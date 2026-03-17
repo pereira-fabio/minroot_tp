@@ -4,12 +4,11 @@
 #SBATCH --error=minroot_k64_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64      # Adjust this to match the number of cores you want to use
+#SBATCH --cpus-per-task=64      # Using all 64 physical cores
+#SBATCH --exclusive             # Request exclusive access to the node
 #SBATCH --time=48:00:00        # Max execution time (adjust as necessary)
 
-# Load required modules (uncomment and adjust according to your HPC environment)
-# module load gcc
-# module load gmp
+# Load required modules
 module load math/GMP/6.3.0-GCCcore-13.2.0
 
 echo "Compiling ginza..."
@@ -31,4 +30,3 @@ echo "Running with $OMP_NUM_THREADS threads"
 ./ginza_run data/challenges/challenge_64_1024.txt data/challenges/modulo_64_1024.txt --bound 2000000 --attempts 10000000
 
 echo "Job finished"
-
