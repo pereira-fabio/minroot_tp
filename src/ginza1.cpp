@@ -232,12 +232,20 @@ void pollard_rho(mpz_t factor, const mpz_t n)
 
         unsigned long seed = (unsigned long)time(NULL);
 #ifdef _OPENMP
-        seed ^= (unsigned long)(omp_get_thread_num() + 1U) * 0x9E3779B1UL;
+        int thread_id = omp_get_thread_num();
+        int num_threads = omp_get_num_threads();
+        seed ^= (unsigned long)(thread_id + 1U) * 0x9E3779B1UL;
+        
+        // Print on initialization so we can see how many threads actually spawned
+        if (thread_id == 0 && num_threads > 1) {
+            printf("  [OpenMP] Parallel Pollard's Rho spawned %d threads.\n", num_threads);
+            fflush(stdout);
+        }
 #endif
         gmp_randseed_ui(state, seed);
 
-        mpz_t x, y, c, d, tmp, abs_diff;
-        mpz_inits(x, y, c, d, tmp, abs_diff, NULL);
+        mpz_t x, y, c, d, tmp, abs_diff, prod;
+        mpz_inits(x, y, c, d, tmp, abs_diff, prod, NULL);
 
         while (!found)
         {
@@ -255,29 +263,39 @@ void pollard_rho(mpz_t factor, const mpz_t n)
             }
 
             mpz_set_ui(d, 1);
+            mpz_set_ui(prod, 1);
 
             int inner_iterations = 0;
             unsigned long long total_steps = 0;
+            const int batch_size = 128;
+
             while (mpz_cmp_ui(d, 1) == 0)
             {
-                if (++inner_iterations % 1000 == 0)
+                if (++inner_iterations % batch_size == 0)
                 {
+                    mpz_gcd(d, prod, n);
+                    if (mpz_cmp_ui(d, 1) != 0) {
+                        break;
+                    }
+                    mpz_set_ui(prod, 1);
+                    
                     int stop = 0;
 #ifdef _OPENMP
 #pragma omp atomic read
 #endif
                     stop = found;
                     if (stop) break;
-
-                    total_steps += inner_iterations;
+                    
+                    // Note: move periodic logging to be thread-local rather than across threads
+                    // so that the atomic operations don't slow down the main batching.
+                    total_steps += batch_size;
                     inner_iterations = 0;
                     
-                    // Print periodic progress from thread 0 so we know it's not frozen
-                    if (total_steps % 50000000ULL == 0)
-                    {
 #ifdef _OPENMP
-                        if (omp_get_thread_num() == 0)
+                    if (omp_get_thread_num() == 0)
 #endif
+                    {
+                        if (total_steps % (50000000ULL) == 0)
                         {
                             printf("  [Progress] Thread 0 reached %llu million modular steps on current chunk...\n", total_steps / 1000000ULL);
                             fflush(stdout);
@@ -299,7 +317,13 @@ void pollard_rho(mpz_t factor, const mpz_t n)
 
                 mpz_sub(abs_diff, x, y);
                 mpz_abs(abs_diff, abs_diff);
-                mpz_gcd(d, abs_diff, n);
+                
+                mpz_mul(prod, prod, abs_diff);
+                mpz_mod(prod, prod, n);
+            }
+            
+            if (mpz_cmp_ui(d, 1) == 0) {
+                mpz_gcd(d, prod, n);
             }
 
             if (mpz_cmp_ui(d, 1) != 0 && mpz_cmp(d, n) != 0)
@@ -318,7 +342,7 @@ void pollard_rho(mpz_t factor, const mpz_t n)
             }
         }
 
-        mpz_clears(x, y, c, d, tmp, abs_diff, NULL);
+        mpz_clears(x, y, c, d, tmp, abs_diff, prod, NULL);
         gmp_randclear(state);
     }
 }
@@ -866,7 +890,7 @@ int main(int argc, char *argv[])
         factor_challenge(challenge, primes, prime_count, &factors);
         free(primes);
     }
-    else if (k == 64)
+    else if (k == -1)
     {
         printf("\nUsing Pollard Rho factorization (K=64)\n");
         printf("Note: A B-smooth search on C * r^3 mod N for a 1024-bit number has vanishingly small probability (~10^-48)\n");
