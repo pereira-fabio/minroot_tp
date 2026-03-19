@@ -267,11 +267,12 @@ void pollard_rho(mpz_t factor, const mpz_t n)
 #pragma omp atomic read
 #endif
                     stop = found;
-                    if (stop) break;
+                    if (stop)
+                        break;
 
                     total_steps += inner_iterations;
                     inner_iterations = 0;
-                    
+
                     // Print periodic progress from thread 0 so we know it's not frozen
                     if (total_steps % 50000000ULL == 0)
                     {
@@ -343,7 +344,7 @@ void factor_recursive(const mpz_t n, factor_list_t *factors)
 
     pollard_rho(divisor, n);
     mpz_divexact(quotient, n, divisor);
-    
+
     gmp_printf("\n[+] Split composite into a smaller chunk! Resuming recursive search...\n");
     fflush(stdout);
 
@@ -693,7 +694,7 @@ bool is_b_smooth(mpz_t n, unsigned long *primes, int prime_count, int *exponents
             mpz_divexact_ui(temp, temp, primes[i]);
             exponents[i]++;
         }
-        
+
         // Early exit: if temp reaches 1, we are done
         if (mpz_cmp_ui(temp, 1) == 0)
         {
@@ -873,7 +874,7 @@ int main(int argc, char *argv[])
         printf("However, since the challenge C is natively a product of <= 64-bit primes, parallel Pollard Rho will break it natively within a few hours!\n");
         factor_challenge_pollard_with_progress(challenge, &factors);
         print_factorization_summary(challenge, &factors);
-        
+
         if (factors.count > 0)
         {
             compute_cube_root_from_factors(candidate_cuberoot, &factors, modulo);

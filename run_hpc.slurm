@@ -12,7 +12,13 @@
 module load math/GMP/6.3.0-GCCcore-13.2.0
 
 echo "Compiling ginza..."
-g++ -O3 -std=c++17 -fopenmp -Wall -Wextra src/ginza1.cpp -lgmp -o ginza_run
+g++ -O3 -std=c++17 -fopenmp -Wall -Wextra \
+    src/ginza1.cpp \
+    src/ginza1_common.cpp \
+    src/ginza1_factor_list.cpp \
+    src/ginza1_factorization.cpp \
+    src/ginza1_solver.cpp \
+    -lgmp -o ginza_run
 
 if [ $? -ne 0 ]; then
     echo "Compilation failed"
