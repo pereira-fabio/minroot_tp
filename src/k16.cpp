@@ -8,6 +8,10 @@
 #include <stdlib.h>
 #include <chrono>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 int main(int argc, char *argv[])
 {
 
@@ -20,8 +24,8 @@ int main(int argc, char *argv[])
     mpz_t exponent; 
     mpz_init_set_ui(exponent, 3);
 
-    const char *challenge_file = "data/challenges/k16/challenge_16_1024.txt";
-    const char *modulo_file = "data/challenges/k16/modulo_16_1024.txt";
+    const char *challenge_file = "data/challenges/k16/challenge_2_16_2048.txt";
+    const char *modulo_file = "data/challenges/k16/modulo_16_2048.txt";
     solver_method_t method = METHOD_FACTOR;
 
     printf("Challenge file: %s\n", challenge_file);
@@ -65,6 +69,10 @@ int main(int argc, char *argv[])
     
     mpz_t result;
     mpz_init(result);
+    
+#ifdef _OPENMP
+    printf("OpenMP enabled with %d threads available.\n", omp_get_max_threads());
+#endif
 
     if (method == METHOD_POWM)
     {
@@ -82,7 +90,7 @@ int main(int argc, char *argv[])
         printf("\nComputing cube root using factorization...\n");
         printf("Generating all primes up to 16 bits...\n");
         int prime_count;
-        unsigned long *primes = generate_primes_up_to(USHRT_MAX, &prime_count);
+        unsigned long *primes = generate_primes_up_to(UINT16_MAX, &prime_count);
         printf("Generated %d primes.\n", prime_count);
 
         factor_list_t factors;
@@ -93,25 +101,34 @@ int main(int argc, char *argv[])
 
         auto factor_start = std::chrono::high_resolution_clock::now();
 
+        int *exponents = (int *)calloc(prime_count, sizeof(int));
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+        for (int i = 0; i < prime_count; i++)
+        {
+            exponents[i] = count_exponent(challenge, primes[i]);
+        }
+
         int total_factors = 0;
         for (int i = 0; i < prime_count; i++)
         {
-            unsigned long p = primes[i];
-            int exp = count_exponent(remaining, p);
-            for (int e = 0; e < exp; e++)
+            if (exponents[i] > 0)
             {
-                mpz_t f;
-                mpz_init_set_ui(f, p);
-                factor_list_append(&factors, f);
-                mpz_clear(f);
-                mpz_divexact_ui(remaining, remaining, p);
-                total_factors++;
-            }
-            if (mpz_cmp_ui(remaining, 1) == 0)
-            {
-                break;
+                unsigned long p = primes[i];
+                for (int e = 0; e < exponents[i]; e++)
+                {
+                    mpz_t f;
+                    mpz_init_set_ui(f, p);
+                    factor_list_append(&factors, f);
+                    mpz_clear(f);
+                    mpz_divexact_ui(remaining, remaining, p);
+                    total_factors++;
+                }
             }
         }
+        free(exponents);
         
         auto factor_end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> factor_duration = factor_end - factor_start;
