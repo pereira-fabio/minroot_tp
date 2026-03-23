@@ -139,8 +139,8 @@ int main(int argc, char *argv[])
 
         double end = wall_time_seconds();
         double elapsed_seconds = end - start;
-        double elapsed_milliseconds = elapsed_seconds * 1000.0;
-        printf("\nCompleted in %.2f seconds (%.2f ms)\n", elapsed_seconds, elapsed_milliseconds);
+        double elapsed_milliseconds = elapsed_seconds * 10000.0;
+        printf("\nCompleted in %.2f seconds (%.3f ms)\n", elapsed_seconds, elapsed_milliseconds);
 
         mpz_clears(challenge, modulo, NULL);
         return 0;
@@ -178,8 +178,8 @@ int main(int argc, char *argv[])
 
     double end = wall_time_seconds();
     double elapsed_seconds = end - start;
-    double elapsed_milliseconds = elapsed_seconds * 1000.0;
-    printf("\nFactorization completed in %.2f seconds (%.2f ms)\n", elapsed_seconds, elapsed_milliseconds);
+    double elapsed_milliseconds = elapsed_seconds * 10000.0;
+    printf("\nFactorization completed in %.2f seconds (%.3f ms)\n", elapsed_seconds, elapsed_milliseconds);
 
     factor_list_clear(&factors);
     mpz_clears(challenge, modulo, NULL);
