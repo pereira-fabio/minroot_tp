@@ -21,9 +21,6 @@ int main(int argc, char *argv[])
         METHOD_POWM,
     };
 
-    mpz_t exponent; 
-    mpz_init_set_ui(exponent, 3);
-
     const char *challenge_file = "data/challenges/k16/challenge_2_16_2048.txt";
     const char *modulo_file = "data/challenges/k16/modulo_16_2048.txt";
     solver_method_t method = METHOD_FACTOR;
@@ -104,7 +101,7 @@ int main(int argc, char *argv[])
         int *exponents = (int *)calloc(prime_count, sizeof(int));
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(static)
 #endif
         for (int i = 0; i < prime_count; i++)
         {
@@ -161,7 +158,7 @@ int main(int argc, char *argv[])
 
     verify_cube_root(result, challenge_mod, modulo);
 
-    mpz_clears(challenge, modulo, exponent, result, challenge_mod, NULL);
+    mpz_clears(challenge, modulo, result, challenge_mod, NULL);
     
     return 0;
 }
