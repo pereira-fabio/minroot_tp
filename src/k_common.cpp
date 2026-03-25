@@ -6,43 +6,6 @@
 #include <string.h>
 #include <time.h>
 
-void factor_list_init(factor_list_t *list) {
-    list->items = NULL;
-    list->count = 0;
-    list->capacity = 0;
-}
-
-void factor_list_append(factor_list_t *list, const mpz_t value)
-{
-    if (list->count == list->capacity)
-    {
-        int new_capacity = (list->capacity == 0) ? 16 : list->capacity * 2;
-        mpz_t *new_items = (mpz_t *)realloc(list->items, (size_t)new_capacity * sizeof(mpz_t));
-        if (!new_items)
-        {
-            fprintf(stderr, "Memory allocation failed\n");
-            exit(1);
-        }
-        list->items = new_items;
-        list->capacity = new_capacity;
-    }
-
-    mpz_init_set(list->items[list->count], value);
-    list->count++;
-}
-
-void factor_list_clear(factor_list_t *list)
-{
-    for (int i = 0; i < list->count; i++)
-    {
-        mpz_clear(list->items[i]);
-    }
-    free(list->items);
-    list->items = NULL;
-    list->count = 0;
-    list->capacity = 0;
-}
-
 void read_mpz_from_file(mpz_t num, const char *filename)
 {
     FILE *f = fopen(filename, "rb");
@@ -140,24 +103,41 @@ bool compute_cube_root_mod_prime(mpz_t result, const mpz_t value, const mpz_t mo
     return true;
 }
 
-void compute_cube_root_from_factors(mpz_t result, const factor_list_t *factors, const mpz_t modulo)
+void precompute_cbrt_table(mpz_t *cbrt_table, const unsigned long *primes, int prime_count, const mpz_t modulo)
 {
-    mpz_t challenge_mod;
-    mpz_init_set_ui(challenge_mod, 1);
+    // compute e = inverse(3, modulo - 1) once — same exponent for every prime
+    mpz_t phi, e, three, prime_mpz;
+    mpz_inits(phi, e, three, prime_mpz, NULL);
 
-    for (int i = 0; i < factors->count; i++)
+    mpz_sub_ui(phi, modulo, 1);
+    mpz_set_ui(three, 3);
+    mpz_invert(e, three, phi);   // e = 3^-1 mod (p-1)
+
+    for (int i = 0; i < prime_count; i++)
     {
-        mpz_mul(challenge_mod, challenge_mod, factors->items[i]);
-        mpz_mod(challenge_mod, challenge_mod, modulo);
+        mpz_init(cbrt_table[i]);
+        mpz_set_ui(prime_mpz, primes[i]);
+        mpz_powm(cbrt_table[i], prime_mpz, e, modulo);   // cbrt_table[i] = primes[i]^e mod M
     }
 
-    if (!compute_cube_root_mod_prime(result, challenge_mod, modulo))
-    {
-        fprintf(stderr, "Error: Cannot compute modular inverse of 3 modulo (modulo - 1)\n");
-        mpz_set_ui(result, 0);
-    }
+    mpz_clears(phi, e, three, prime_mpz, NULL);
+}
 
-    mpz_clear(challenge_mod);
+void compute_cube_root_from_factors(mpz_t result, const int *exponents, const mpz_t *cbrt_table, int prime_count, const mpz_t modulo)
+{
+    mpz_set_ui(result, 1);
+
+    for (int i = 0; i < prime_count; i++)
+    {
+        if (exponents[i] == 0) continue;
+
+        // multiply cbrt_table[i] in exponents[i] times
+        for (int e = 0; e < exponents[i]; e++)
+        {
+            mpz_mul(result, result, cbrt_table[i]);
+            mpz_mod(result, result, modulo);
+        }
+    }
 }
 
 void verify_cube_root(const mpz_t candidate_cuberoot, const mpz_t challenge_mod, const mpz_t modulo)
@@ -183,16 +163,18 @@ void verify_cube_root(const mpz_t candidate_cuberoot, const mpz_t challenge_mod,
     mpz_clear(cubed);
 }
 
-int count_exponent(mpz_t n, unsigned long prime) {
+int count_exponent(const mpz_t n, unsigned long prime)
+{
     mpz_t temp;
     mpz_init_set(temp, n);
-    
+
     int exponent = 0;
-    while (mpz_divisible_ui_p(temp, prime)) {
+    while (mpz_divisible_ui_p(temp, prime))
+    {
         mpz_divexact_ui(temp, temp, prime);
         exponent++;
     }
-    
+
     mpz_clear(temp);
     return exponent;
 }
