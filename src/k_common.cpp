@@ -6,6 +6,10 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 void read_mpz_from_file(mpz_t num, const char *filename)
 {
     FILE *f = fopen(filename, "rb");
@@ -111,15 +115,15 @@ void precompute_cbrt_table(mpz_t *cbrt_table, const unsigned long *primes, int p
 
     mpz_sub_ui(phi, modulo, 1);
     mpz_set_ui(three, 3);
-    mpz_invert(e, three, phi);   // e = 3^-1 mod (modulo-1)
+    mpz_invert(e, three, phi); // e = 3^-1 mod (modulo-1)
 
-    // e and modulo are read-only from here — safe to share across threads
-    #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
+// e and modulo are read-only from here — safe to share across threads
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
     for (int i = 0; i < prime_count; i++)
     {
-        mpz_t prime_mpz;                            // declared inside loop = private per thread
+        mpz_t prime_mpz; // declared inside loop = private per thread
         mpz_init_set_ui(prime_mpz, primes[i]);
         mpz_init(cbrt_table[i]);
         mpz_powm(cbrt_table[i], prime_mpz, e, modulo);
@@ -129,20 +133,57 @@ void precompute_cbrt_table(mpz_t *cbrt_table, const unsigned long *primes, int p
     mpz_clears(phi, e, three, NULL);
 }
 
-void compute_cube_root_from_factors(mpz_t result, const int *exponents, const mpz_t *cbrt_table, int prime_count, const mpz_t modulo)
+void compute_cube_root_from_factors(mpz_t result, const int *exponents,
+                                    const mpz_t *cbrt_table, int prime_count,
+                                    const mpz_t modulo)
 {
-    mpz_set_ui(result, 1);
+    int nthreads = 1;
+#ifdef _OPENMP
+    nthreads = omp_get_max_threads();
+#endif
 
+    // one partial result per thread, all initialized to 1
+    mpz_t *partials = (mpz_t *)malloc((size_t)nthreads * sizeof(mpz_t));
+    for (int t = 0; t < nthreads; t++)
+        mpz_init_set_ui(partials[t], 1);
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
     for (int i = 0; i < prime_count; i++)
     {
         if (exponents[i] == 0) continue;
 
-        for (int e = 0; e < exponents[i]; e++)
+        int t = 0;
+#ifdef _OPENMP
+        t = omp_get_thread_num();
+#endif
+
+        if (exponents[i] == 1)
         {
-            mpz_mul(result, result, cbrt_table[i]);
-            mpz_mod(result, result, modulo);
+            mpz_mul(partials[t], partials[t], cbrt_table[i]);
+            mpz_mod(partials[t], partials[t], modulo);
+        }
+        else
+        {
+            mpz_t powered;
+            mpz_init(powered);
+            mpz_powm_ui(powered, cbrt_table[i], exponents[i], modulo);
+            mpz_mul(partials[t], partials[t], powered);
+            mpz_mod(partials[t], partials[t], modulo);
+            mpz_clear(powered);
         }
     }
+
+    // combine partial results from all threads
+    mpz_set_ui(result, 1);
+    for (int t = 0; t < nthreads; t++)
+    {
+        mpz_mul(result, result, partials[t]);
+        mpz_mod(result, result, modulo);
+        mpz_clear(partials[t]);
+    }
+    free(partials);
 }
 
 void verify_cube_root(const mpz_t candidate_cuberoot, const mpz_t challenge_mod, const mpz_t modulo)
@@ -187,7 +228,11 @@ int count_exponent(const mpz_t n, unsigned long prime)
 void save_cbrt_table(const mpz_t *cbrt_table, int prime_count, const char *filename)
 {
     FILE *f = fopen(filename, "w");
-    if (!f) { fprintf(stderr, "Error: Cannot write table to %s\n", filename); exit(1); }
+    if (!f)
+    {
+        fprintf(stderr, "Error: Cannot write table to %s\n", filename);
+        exit(1);
+    }
 
     fprintf(f, "%d\n", prime_count);
     for (int i = 0; i < prime_count; i++)
@@ -202,13 +247,14 @@ void save_cbrt_table(const mpz_t *cbrt_table, int prime_count, const char *filen
 bool load_cbrt_table(mpz_t *cbrt_table, int prime_count, const char *filename)
 {
     FILE *f = fopen(filename, "r");
-    if (!f) return false;   // file doesn't exist yet — caller must compute it
+    if (!f)
+        return false; // file doesn't exist yet — caller must compute it
 
     int stored_count;
     if (fscanf(f, "%d\n", &stored_count) != 1 || stored_count != prime_count)
     {
         fclose(f);
-        return false;   // stale or mismatched table — recompute
+        return false; // stale or mismatched table — recompute
     }
 
     for (int i = 0; i < prime_count; i++)
@@ -216,7 +262,8 @@ bool load_cbrt_table(mpz_t *cbrt_table, int prime_count, const char *filename)
         mpz_init(cbrt_table[i]);
         if (mpz_inp_str(cbrt_table[i], f, 10) == 0)
         {
-            for (int j = 0; j <= i; j++) mpz_clear(cbrt_table[j]);
+            for (int j = 0; j <= i; j++)
+                mpz_clear(cbrt_table[j]);
             fclose(f);
             return false;
         }
