@@ -15,4 +15,7 @@ void verify_cube_root(const mpz_t candidate_cuberoot, const mpz_t challenge_mod,
 
 void precompute_cbrt_table(mpz_t *cbrt_table, const unsigned long *primes, int prime_count, const mpz_t modulo);
 
+void save_cbrt_table(const mpz_t *cbrt_table, int prime_count, const char *filename);
+bool load_cbrt_table(mpz_t *cbrt_table, int prime_count, const char *filename);
+
 int count_exponent(const mpz_t n, unsigned long prime);

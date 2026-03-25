@@ -105,22 +105,28 @@ bool compute_cube_root_mod_prime(mpz_t result, const mpz_t value, const mpz_t mo
 
 void precompute_cbrt_table(mpz_t *cbrt_table, const unsigned long *primes, int prime_count, const mpz_t modulo)
 {
-    // compute e = inverse(3, modulo - 1) once — same exponent for every prime
-    mpz_t phi, e, three, prime_mpz;
-    mpz_inits(phi, e, three, prime_mpz, NULL);
+    // compute e = inverse(3, modulo - 1) once — reused by all threads
+    mpz_t phi, e, three;
+    mpz_inits(phi, e, three, NULL);
 
     mpz_sub_ui(phi, modulo, 1);
     mpz_set_ui(three, 3);
-    mpz_invert(e, three, phi);   // e = 3^-1 mod (p-1)
+    mpz_invert(e, three, phi);   // e = 3^-1 mod (modulo-1)
 
+    // e and modulo are read-only from here — safe to share across threads
+    #ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
     for (int i = 0; i < prime_count; i++)
     {
+        mpz_t prime_mpz;                            // declared inside loop = private per thread
+        mpz_init_set_ui(prime_mpz, primes[i]);
         mpz_init(cbrt_table[i]);
-        mpz_set_ui(prime_mpz, primes[i]);
-        mpz_powm(cbrt_table[i], prime_mpz, e, modulo);   // cbrt_table[i] = primes[i]^e mod M
+        mpz_powm(cbrt_table[i], prime_mpz, e, modulo);
+        mpz_clear(prime_mpz);
     }
 
-    mpz_clears(phi, e, three, prime_mpz, NULL);
+    mpz_clears(phi, e, three, NULL);
 }
 
 void compute_cube_root_from_factors(mpz_t result, const int *exponents, const mpz_t *cbrt_table, int prime_count, const mpz_t modulo)
@@ -131,7 +137,6 @@ void compute_cube_root_from_factors(mpz_t result, const int *exponents, const mp
     {
         if (exponents[i] == 0) continue;
 
-        // multiply cbrt_table[i] in exponents[i] times
         for (int e = 0; e < exponents[i]; e++)
         {
             mpz_mul(result, result, cbrt_table[i]);
@@ -147,10 +152,6 @@ void verify_cube_root(const mpz_t candidate_cuberoot, const mpz_t challenge_mod,
 
     mpz_powm_ui(cubed, candidate_cuberoot, 3, modulo);
 
-    printf("\nVerification:\n");
-    gmp_printf("Candidate^3 mod modulo = %Zd\n", cubed);
-    gmp_printf("Original challenge     = %Zd\n", challenge_mod);
-
     if (mpz_cmp(cubed, challenge_mod) == 0)
     {
         printf("SUCCESS: Cube root is correct!\n");
@@ -165,6 +166,10 @@ void verify_cube_root(const mpz_t candidate_cuberoot, const mpz_t challenge_mod,
 
 int count_exponent(const mpz_t n, unsigned long prime)
 {
+    // fast early exit — no allocation needed if prime doesn't divide n
+    if (mpz_tdiv_ui(n, prime) != 0)
+        return 0;
+
     mpz_t temp;
     mpz_init_set(temp, n);
 
@@ -177,4 +182,46 @@ int count_exponent(const mpz_t n, unsigned long prime)
 
     mpz_clear(temp);
     return exponent;
+}
+
+void save_cbrt_table(const mpz_t *cbrt_table, int prime_count, const char *filename)
+{
+    FILE *f = fopen(filename, "w");
+    if (!f) { fprintf(stderr, "Error: Cannot write table to %s\n", filename); exit(1); }
+
+    fprintf(f, "%d\n", prime_count);
+    for (int i = 0; i < prime_count; i++)
+    {
+        mpz_out_str(f, 10, cbrt_table[i]);
+        fprintf(f, "\n");
+    }
+    fclose(f);
+    printf("Saved cbrt table to %s\n", filename);
+}
+
+bool load_cbrt_table(mpz_t *cbrt_table, int prime_count, const char *filename)
+{
+    FILE *f = fopen(filename, "r");
+    if (!f) return false;   // file doesn't exist yet — caller must compute it
+
+    int stored_count;
+    if (fscanf(f, "%d\n", &stored_count) != 1 || stored_count != prime_count)
+    {
+        fclose(f);
+        return false;   // stale or mismatched table — recompute
+    }
+
+    for (int i = 0; i < prime_count; i++)
+    {
+        mpz_init(cbrt_table[i]);
+        if (mpz_inp_str(cbrt_table[i], f, 10) == 0)
+        {
+            for (int j = 0; j <= i; j++) mpz_clear(cbrt_table[j]);
+            fclose(f);
+            return false;
+        }
+    }
+
+    fclose(f);
+    return true;
 }

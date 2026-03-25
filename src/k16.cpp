@@ -110,14 +110,35 @@ int main(int argc, char *argv[])
         printf("Generated %d primes.\n", prime_count);
 
         cbrt_table = (mpz_t *)malloc((size_t)prime_count * sizeof(mpz_t));
-        printf("Precomputing cube root table...\n");
-        auto precomp_start = std::chrono::high_resolution_clock::now();
-        precompute_cbrt_table(cbrt_table, primes, prime_count, modulo);
+
+        // derive table filename from modulo filename
+        // e.g. "data/challenges/k16/modulo_16_2048.txt" -> "data/challenges/k16/modulo_16_2048.cbrt"
+        char table_file[512];
+        strncpy(table_file, modulo_file, sizeof(table_file) - 1);
+        table_file[sizeof(table_file) - 1] = '\0';
+        char *dot = strrchr(table_file, '.');
+        if (dot) *dot = '\0';
+        strncat(table_file, ".cbrt", sizeof(table_file) - strlen(table_file) - 1);
+
+        printf("Looking for precomputed table at %s...\n", table_file);
+        auto precomp_start = std::chrono::high_resolution_clock::now();  // ← only declared once
+
+        if (!load_cbrt_table(cbrt_table, prime_count, table_file))
+        {
+            printf("Not found — computing and saving...\n");
+            precompute_cbrt_table(cbrt_table, primes, prime_count, modulo);
+            save_cbrt_table(cbrt_table, prime_count, table_file);
+        }
+        else
+        {
+            printf("Loaded from disk.\n");
+        }
+
         auto precomp_end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> precomp_duration = precomp_end - precomp_start;
-        printf("Precomputation done in %.3f ms\n", precomp_duration.count());
+        printf("Precomputation/load done in %.3f ms\n", precomp_duration.count());
 
-
+        // factoring starts here — timed separately from precomputation
         auto factor_start = std::chrono::high_resolution_clock::now();
 
         int *exponents = (int *)calloc(prime_count, sizeof(int));
@@ -169,7 +190,6 @@ int main(int argc, char *argv[])
 
         mpz_clear(remaining);
         free(exponents);
-        // factor_list_clear(&factors);
     }
 
     mpz_t challenge_mod;
