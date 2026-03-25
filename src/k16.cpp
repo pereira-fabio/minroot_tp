@@ -159,10 +159,35 @@ int main(int argc, char *argv[])
         {
             int *exponents = (int *)calloc(prime_count, sizeof(int));
 
-            auto factor_start = std::chrono::high_resolution_clock::now();
+auto factor_start = std::chrono::high_resolution_clock::now();
 
-            // parallel trial division using native byte arithmetic —
-            // no GMP calls in the hot path for the 99%+ of primes that don't divide
+        int challenge_bits = (int)mpz_sizeinbase(challenge, 2);
+        mpz_t remaining;
+        mpz_init_set(remaining, challenge);
+        int total_factors = 0;
+
+        if (challenge_bits <= 512)
+        {
+            // sequential with early exit — for small challenges stopping early
+            // saves more time than parallelism gains
+            for (int i = 0; i < prime_count; i++)
+            {
+                if (mpz_divisible_ui_p(remaining, primes[i]))
+                {
+                    exponents[i] = 0;
+                    while (mpz_divisible_ui_p(remaining, primes[i]))
+                    {
+                        mpz_divexact_ui(remaining, remaining, primes[i]);
+                        exponents[i]++;
+                        total_factors++;
+                    }
+                    if (mpz_cmp_ui(remaining, 1) == 0) break;
+                }
+            }
+        }
+        else
+        {
+            // parallel scan for large challenges
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
@@ -173,15 +198,10 @@ int main(int argc, char *argv[])
                     rem = (rem * 256 + challenge_bytes[b]) % primes[i];
 
                 if (rem != 0) { exponents[i] = 0; continue; }
-
-                // prime divides — count exact exponent with GMP
                 exponents[i] = count_exponent(challenge, primes[i]);
             }
 
-            // verify full factorization and count factors
-            mpz_t remaining;
-            mpz_init_set(remaining, challenge);
-            int total_factors = 0;
+            // count total factors and reduce remaining
             for (int i = 0; i < prime_count; i++)
             {
                 if (exponents[i] > 0)
@@ -194,8 +214,9 @@ int main(int argc, char *argv[])
                     if (mpz_cmp_ui(remaining, 1) == 0) break;
                 }
             }
+        }
 
-            auto factor_end = std::chrono::high_resolution_clock::now();
+        auto factor_end = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double, std::milli> factor_duration = factor_end - factor_start;
             total_factor_ms += factor_duration.count();
             last_total_factors = total_factors;
