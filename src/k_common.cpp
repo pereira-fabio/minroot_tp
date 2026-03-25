@@ -142,7 +142,10 @@ void compute_cube_root_from_factors(mpz_t result, const int *exponents,
     nthreads = omp_get_max_threads();
 #endif
 
-    // one partial result per thread, all initialized to 1
+    // threshold: reduce mod when accumulator exceeds 4× modulus bit size
+    size_t mod_bits = mpz_sizeinbase(modulo, 2);
+    size_t reduce_threshold = 4 * mod_bits;
+
     mpz_t *partials = (mpz_t *)malloc((size_t)nthreads * sizeof(mpz_t));
     for (int t = 0; t < nthreads; t++)
         mpz_init_set_ui(partials[t], 1);
@@ -152,7 +155,8 @@ void compute_cube_root_from_factors(mpz_t result, const int *exponents,
 #endif
     for (int i = 0; i < prime_count; i++)
     {
-        if (exponents[i] == 0) continue;
+        if (exponents[i] == 0)
+            continue;
 
         int t = 0;
 #ifdef _OPENMP
@@ -162,7 +166,6 @@ void compute_cube_root_from_factors(mpz_t result, const int *exponents,
         if (exponents[i] == 1)
         {
             mpz_mul(partials[t], partials[t], cbrt_table[i]);
-            mpz_mod(partials[t], partials[t], modulo);
         }
         else
         {
@@ -170,15 +173,18 @@ void compute_cube_root_from_factors(mpz_t result, const int *exponents,
             mpz_init(powered);
             mpz_powm_ui(powered, cbrt_table[i], exponents[i], modulo);
             mpz_mul(partials[t], partials[t], powered);
-            mpz_mod(partials[t], partials[t], modulo);
             mpz_clear(powered);
         }
+
+        // only reduce when accumulator grows large — much cheaper than reducing every step
+        if (mpz_sizeinbase(partials[t], 2) > reduce_threshold)
+            mpz_mod(partials[t], partials[t], modulo);
     }
 
-    // combine partial results from all threads
     mpz_set_ui(result, 1);
     for (int t = 0; t < nthreads; t++)
     {
+        mpz_mod(partials[t], partials[t], modulo);
         mpz_mul(result, result, partials[t]);
         mpz_mod(result, result, modulo);
         mpz_clear(partials[t]);
