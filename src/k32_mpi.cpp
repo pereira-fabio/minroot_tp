@@ -1,3 +1,35 @@
+// =============================================================================
+// k32_mpi.cpp — MPI+OpenMP hybrid cube root solver for 32-bit prime factors
+//
+// Architecture:
+//   MPI layer:    splits the prime range [65537, 2^32] across nodes
+//   OpenMP layer: parallelizes sieve + trial division within each node
+//
+// Mapping to hardware (AMD EPYC 7452, 2 NUMA nodes × 32 cores):
+//   --ntasks-per-node=2  →  one MPI rank per NUMA node
+//   --cpus-per-task=32   →  32 OpenMP threads per rank
+//   Total: 8 ranks × 32 threads = 256 cores for 4-node jobs
+//
+// Communication pattern — designed to be minimal:
+//   MPI_Bcast:   challenge + modulo bytes → all ranks (once per challenge)
+//   MPI_Barrier: synchronize before and after factoring (for timing)
+//   MPI_Gather:  factor counts from each rank → rank 0
+//   MPI_Gatherv: factor (prime,exponent) pairs → rank 0  (~34 pairs total)
+//   No communication during the hot trial division loop.
+//
+// Key design decision — broadcast bytes, not GMP integers:
+//   mpz_inp_raw / mpz_out_raw are not thread-safe and only work with files.
+//   We export the challenge and modulo as raw byte arrays on rank 0,
+//   broadcast the bytes, then reconstruct with mpz_import on other ranks.
+//   This is the standard pattern for distributing GMP integers via MPI.
+//
+// Modes:
+//   Single challenge:  k32_mpi <challenge> <modulo> [--bench N]
+//   All sizes:         k32_mpi --all [--data DIR] [--bench N]
+//   --all runs all four sizes (1024/2048/5000/7000) in one MPI execution,
+//   avoiding the multiple-srun-per-job issue on SLURM.
+// =============================================================================
+
 #include "k_common.h"
 
 #include <mpi.h>
@@ -12,11 +44,13 @@
 #include <omp.h>
 #endif
 
-// ---------------------------------------------------------------------------
-// Segmented sieve
-// ---------------------------------------------------------------------------
+#define SEG_SIZE (1 << 19) // 512K sieve segment — fits in L2 cache
 
-#define SEG_SIZE (1 << 19) // 512K — fits in L2 cache
+// ---------------------------------------------------------------------------
+// Small prime generation — same as k32.cpp
+// Primes up to 65536 are needed to correctly sieve any 32-bit range.
+// Computed once on every rank (cheap, ~0.1ms).
+// ---------------------------------------------------------------------------
 
 static unsigned *generate_small_primes(int *count)
 {
@@ -39,13 +73,16 @@ static unsigned *generate_small_primes(int *count)
     for (int i = 2; i <= limit; i++)
         if (sieve[i])
             primes[idx++] = i;
-
     free(sieve);
     return primes;
 }
 
 // ---------------------------------------------------------------------------
 // Factor list — packed as uint64_t pairs for MPI transport
+//
+// factor_msg_t { prime, exponent } is exactly 2 × uint64_t = 16 bytes.
+// This lets us send the whole list as a flat MPI_UINT64_T array using
+// MPI_Gatherv, with count = list.count * 2.  No custom MPI derived types needed.
 // ---------------------------------------------------------------------------
 
 typedef struct
@@ -53,7 +90,6 @@ typedef struct
     uint64_t prime;
     uint64_t exponent;
 } factor_msg_t;
-
 typedef struct
 {
     factor_msg_t *items;
@@ -91,15 +127,18 @@ static void factor_list_free(factor_list_t *f)
 }
 
 // ---------------------------------------------------------------------------
-// Trial division over [range_lo, range_hi] — segmented sieve + OpenMP
+// trial_divide_range — segmented sieve + OpenMP (same as k32.cpp)
+//
+// Each MPI rank calls this on its own sub-range of [65537, 2^32].
+// Within the rank, OpenMP further divides the sub-range across threads.
+// No MPI communication happens inside this function — all parallelism is
+// via shared memory (OpenMP), not message passing.
 // ---------------------------------------------------------------------------
 
 static void trial_divide_range(
     const mpz_t challenge,
-    uint64_t range_lo,
-    uint64_t range_hi,
-    int sp_count,
-    const unsigned *sp,
+    uint64_t range_lo, uint64_t range_hi,
+    int sp_count, const unsigned *sp,
     factor_list_t *found)
 {
     int nthreads = 1;
@@ -107,6 +146,7 @@ static void trial_divide_range(
     nthreads = omp_get_max_threads();
 #endif
 
+    // per-thread factor lists avoid any locking during the hot loop
     factor_list_t *tf = (factor_list_t *)malloc(
         (size_t)nthreads * sizeof(factor_list_t));
     for (int t = 0; t < nthreads; t++)
@@ -117,8 +157,7 @@ static void trial_divide_range(
 #ifdef _OPENMP
 #pragma omp parallel
     {
-        int t = omp_get_thread_num();
-        int nt = omp_get_num_threads();
+        int t = omp_get_thread_num(), nt = omp_get_num_threads();
 #else
     {
         int t = 0, nt = 1;
@@ -161,17 +200,24 @@ static void trial_divide_range(
         free(seg);
     }
 
+    // merge thread-local results
     for (int t = 0; t < nthreads; t++)
     {
         for (int i = 0; i < tf[t].count; i++)
-            factor_list_append(found, tf[t].items[i].prime, tf[t].items[i].exponent);
+            factor_list_append(found, tf[t].items[i].prime,
+                               tf[t].items[i].exponent);
         factor_list_free(&tf[t]);
     }
     free(tf);
 }
 
 // ---------------------------------------------------------------------------
-// Cube root reconstruction (rank 0 only) — parallel powm via OpenMP
+// reconstruct_cube_root — on-the-fly powm, OpenMP-parallelized (rank 0 only)
+//
+// Called only on rank 0 after gathering all factors.
+// e = 3^-1 mod (M-1) is computed once; each powm call is independent.
+// For 7000-bit modulo with 229 factors, reconstruction takes ~650ms —
+// the remaining bottleneck after factoring is distributed via MPI.
 // ---------------------------------------------------------------------------
 
 static void reconstruct_cube_root(
@@ -183,13 +229,14 @@ static void reconstruct_cube_root(
     mpz_inits(phi, e, three, NULL);
     mpz_sub_ui(phi, modulo, 1);
     mpz_set_ui(three, 3);
-    mpz_invert(e, three, phi);
+    mpz_invert(e, three, phi); // e = 3^-1 mod (M-1), computed once
 
     int n = all_factors->count;
     mpz_t *parts = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
     for (int i = 0; i < n; i++)
         mpz_init(parts[i]);
 
+    // independent powm calls — parallelize with OpenMP on rank 0's cores
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
@@ -198,12 +245,14 @@ static void reconstruct_cube_root(
         mpz_t p_mpz, cbrt_p;
         mpz_inits(p_mpz, cbrt_p, NULL);
         mpz_set_ui(p_mpz, (unsigned long)all_factors->items[i].prime);
-        mpz_powm(cbrt_p, p_mpz, e, modulo);
+        mpz_powm(cbrt_p, p_mpz, e, modulo); // cbrt(p) = p^e mod M
+
         if (all_factors->items[i].exponent == 1)
             mpz_set(parts[i], cbrt_p);
         else
             mpz_powm_ui(parts[i], cbrt_p,
                         (unsigned long)all_factors->items[i].exponent, modulo);
+
         mpz_clears(p_mpz, cbrt_p, NULL);
     }
 
@@ -219,21 +268,26 @@ static void reconstruct_cube_root(
 }
 
 // ---------------------------------------------------------------------------
-// solve_one — solve a single challenge file across all MPI ranks
-// Can be called multiple times within a single MPI execution (for --all mode)
-// Returns 1 on success, 0 on failure
+// solve_one — solve a single (challenge, modulo) pair across all MPI ranks
+//
+// Can be called multiple times in one MPI execution (used by --all mode).
+// MPI_Init/Finalize are NOT called here — they bracket the entire program.
+//
+// Flow:
+//   rank 0: read files → export bytes
+//   all:    MPI_Bcast bytes → mpz_import
+//   all:    trial_divide_range on own slice of [65537, 2^32]
+//   all:    MPI_Barrier (synchronize timing)
+//   all:    MPI_Gather factor counts → rank 0
+//   all:    MPI_Gatherv factor data  → rank 0
+//   rank 0: reconstruct + verify
 // ---------------------------------------------------------------------------
 
 static int solve_one(
-    int rank,
-    int nranks,
-    const char *challenge_file,
-    const char *modulo_file,
-    int bench_count,
-    int sp_count,
-    const unsigned *sp,
-    uint64_t my_lo,
-    uint64_t my_hi)
+    int rank, int nranks,
+    const char *challenge_file, const char *modulo_file,
+    int bench_count, int sp_count, const unsigned *sp,
+    uint64_t my_lo, uint64_t my_hi)
 {
     if (rank == 0)
     {
@@ -241,10 +295,9 @@ static int solve_one(
         fflush(stdout);
     }
 
-    // --- rank 0 reads files and exports as bytes ---
+    // --- rank 0 reads and serializes challenge/modulo to byte arrays ---
     size_t challenge_nbytes = 0, modulo_nbytes = 0;
-    unsigned char *challenge_bytes = NULL;
-    unsigned char *modulo_bytes = NULL;
+    unsigned char *challenge_bytes = NULL, *modulo_bytes = NULL;
 
     mpz_t challenge, modulo;
     mpz_inits(challenge, modulo, NULL);
@@ -253,13 +306,15 @@ static int solve_one(
     {
         read_mpz_from_file(challenge, challenge_file);
         read_mpz_from_file(modulo, modulo_file);
+        // mpz_export: converts GMP integer to a plain byte array
+        // arguments: (output buf, &size, order=1=MSB first, word_size=1, endian=0=native, nails=0, op)
         challenge_bytes = (unsigned char *)mpz_export(
             NULL, &challenge_nbytes, 1, 1, 0, 0, challenge);
         modulo_bytes = (unsigned char *)mpz_export(
             NULL, &modulo_nbytes, 1, 1, 0, 0, modulo);
     }
 
-    // --- broadcast challenge and modulo to all ranks ---
+    // broadcast sizes first, then allocate on non-zero ranks, then data
     MPI_Bcast(&challenge_nbytes, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
     MPI_Bcast(&modulo_nbytes, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
 
@@ -269,11 +324,10 @@ static int solve_one(
         modulo_bytes = (unsigned char *)malloc(modulo_nbytes);
     }
 
-    MPI_Bcast(challenge_bytes, (int)challenge_nbytes,
-              MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
-    MPI_Bcast(modulo_bytes, (int)modulo_nbytes,
-              MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
+    MPI_Bcast(challenge_bytes, (int)challenge_nbytes, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
+    MPI_Bcast(modulo_bytes, (int)modulo_nbytes, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
 
+    // reconstruct GMP integers from bytes on non-zero ranks
     if (rank != 0)
     {
         mpz_import(challenge, challenge_nbytes, 1, 1, 0, 0, challenge_bytes);
@@ -296,10 +350,7 @@ static int solve_one(
         fflush(stdout);
     }
 
-    // --- benchmark loop ---
-    double total_factor_ms = 0.0;
-    double total_gather_ms = 0.0;
-    double total_root_ms = 0.0;
+    double total_factor_ms = 0.0, total_gather_ms = 0.0, total_root_ms = 0.0;
     int success = 0;
 
     mpz_t result;
@@ -310,18 +361,20 @@ static int solve_one(
         factor_list_t local_factors;
         factor_list_init(&local_factors);
 
-        // --- factoring phase ---
-        MPI_Barrier(MPI_COMM_WORLD);
+        // --- factoring phase: each rank independently sieves its slice ---
+        MPI_Barrier(MPI_COMM_WORLD); // sync before timing
         auto t0 = std::chrono::high_resolution_clock::now();
 
         trial_divide_range(challenge, my_lo, my_hi,
                            sp_count, sp, &local_factors);
 
-        MPI_Barrier(MPI_COMM_WORLD);
+        MPI_Barrier(MPI_COMM_WORLD); // sync after — slowest rank sets the time
         auto t1 = std::chrono::high_resolution_clock::now();
         total_factor_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-        // --- gather phase ---
+        // --- gather phase: collect all factors at rank 0 ---
+        // Two-step: first gather counts (so rank 0 knows buffer size),
+        //           then gather the actual factor data with MPI_Gatherv.
         auto t2 = std::chrono::high_resolution_clock::now();
 
         int local_count = local_factors.count;
@@ -329,18 +382,20 @@ static int solve_one(
                               ? (int *)malloc((size_t)nranks * sizeof(int))
                               : NULL;
 
+        // step 1: each rank sends its local_count to rank 0
         MPI_Gather(&local_count, 1, MPI_INT,
                    all_counts, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
         factor_list_t all_factors;
         factor_list_init(&all_factors);
-
         int *displs = NULL, *recvcounts = NULL;
         factor_msg_t *recvbuf = NULL;
         int total_count = 0;
 
         if (rank == 0)
         {
+            // build displacement array for MPI_Gatherv
+            // each factor_msg_t = 2 × uint64_t, so recvcounts[r] = all_counts[r] * 2
             displs = (int *)malloc((size_t)nranks * sizeof(int));
             recvcounts = (int *)malloc((size_t)nranks * sizeof(int));
             displs[0] = 0;
@@ -355,6 +410,7 @@ static int solve_one(
                 (size_t)total_count * sizeof(factor_msg_t));
         }
 
+        // step 2: each rank sends its factor list; rank 0 receives all
         MPI_Gatherv(
             local_factors.items, local_count * 2, MPI_UINT64_T,
             recvbuf, recvcounts, displs, MPI_UINT64_T,
@@ -366,20 +422,19 @@ static int solve_one(
         // --- reconstruction phase (rank 0 only) ---
         if (rank == 0)
         {
+            // unpack gathered flat array back into a factor_list_t
             for (int i = 0; i < total_count; i++)
                 factor_list_append(&all_factors,
-                                   recvbuf[i].prime,
-                                   recvbuf[i].exponent);
+                                   recvbuf[i].prime, recvbuf[i].exponent);
             free(recvbuf);
             free(all_counts);
             free(displs);
             free(recvcounts);
 
-            // on first bench run: verify full factorization
             if (bench == 0)
             {
-                printf("Factors found: %d (distinct primes)\n",
-                       all_factors.count);
+                printf("Factors found: %d (distinct primes)\n", all_factors.count);
+                // sanity check: divide out all factors and verify remainder = 1
                 mpz_t remaining;
                 mpz_init_set(remaining, challenge);
                 for (int i = 0; i < all_factors.count; i++)
@@ -422,12 +477,9 @@ static int solve_one(
         else
         {
             printf("Results over %d runs:\n", bench_count);
-            printf("  Average factoring time:      %.3f ms\n",
-                   total_factor_ms / bench_count);
-            printf("  Average gather time:         %.3f ms\n",
-                   total_gather_ms / bench_count);
-            printf("  Average reconstruction time: %.3f ms\n",
-                   total_root_ms / bench_count);
+            printf("  Average factoring time:      %.3f ms\n", total_factor_ms / bench_count);
+            printf("  Average gather time:         %.3f ms\n", total_gather_ms / bench_count);
+            printf("  Average reconstruction time: %.3f ms\n", total_root_ms / bench_count);
             printf("  Average total:               %.3f ms\n",
                    (total_factor_ms + total_gather_ms + total_root_ms) / bench_count);
         }
@@ -450,6 +502,9 @@ static int solve_one(
 
 int main(int argc, char *argv[])
 {
+    // MPI_THREAD_FUNNELED: only the main thread calls MPI functions.
+    // OpenMP threads run inside trial_divide_range and reconstruct_cube_root
+    // but never touch MPI directly — this is safe with FUNNELED.
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
     if (provided < MPI_THREAD_FUNNELED)
@@ -462,12 +517,11 @@ int main(int argc, char *argv[])
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nranks);
 
-    // --- argument parsing (all ranks parse, rank 0 prints) ---
+    // all ranks parse arguments identically — no need to broadcast
     const char *challenge_file = NULL;
     const char *modulo_file = NULL;
     const char *data_dir = "data/challenges/k32";
-    int bench_count = 1;
-    int run_all = 0;
+    int bench_count = 1, run_all = 0;
 
     int positional_index = 0;
     for (int argi = 1; argi < argc; argi++)
@@ -477,7 +531,7 @@ int main(int argc, char *argv[])
             if (argi + 1 >= argc)
             {
                 if (rank == 0)
-                    fprintf(stderr, "Missing value for --bench\n");
+                    fprintf(stderr, "Missing --bench value\n");
                 MPI_Finalize();
                 return 1;
             }
@@ -494,7 +548,7 @@ int main(int argc, char *argv[])
             if (argi + 1 >= argc)
             {
                 if (rank == 0)
-                    fprintf(stderr, "Missing value for --data\n");
+                    fprintf(stderr, "Missing --data value\n");
                 MPI_Finalize();
                 return 1;
             }
@@ -515,8 +569,7 @@ int main(int argc, char *argv[])
         positional_index++;
     }
 
-    // validate arguments
-    if (!run_all && (challenge_file == NULL || modulo_file == NULL))
+    if (!run_all && (!challenge_file || !modulo_file))
     {
         if (rank == 0)
             fprintf(stderr,
@@ -537,15 +590,17 @@ int main(int argc, char *argv[])
         if (bench_count > 1)
             printf("Benchmark runs: %d\n", bench_count);
         if (run_all)
-            printf("Mode:           --all (running all challenge sizes)\n");
+            printf("Mode:           --all\n");
         fflush(stdout);
     }
 
-    // --- setup: small primes for sieve (computed once, same on all ranks) ---
+    // small primes computed independently on every rank (identical result,
+    // avoids an MPI broadcast for a negligible 0.1ms computation)
     int sp_count;
     unsigned *sp = generate_small_primes(&sp_count);
 
-    // --- partition [65537, 2^32] across ranks (fixed for entire run) ---
+    // partition [65537, 2^32] across ranks — fixed for the entire program lifetime
+    // so the partition is computed once here and passed into every solve_one call
     const uint64_t RANGE_LO = 65537;
     const uint64_t RANGE_HI = (uint64_t)UINT32_MAX;
     const uint64_t range_size = RANGE_HI - RANGE_LO + 1;
@@ -562,18 +617,18 @@ int main(int argc, char *argv[])
         fflush(stdout);
     }
 
-    // warm up OpenMP thread pool once before any timing
+    // warm up OpenMP thread pool once before any timed region
 #ifdef _OPENMP
 #pragma omp parallel for
     for (int i = 0; i < omp_get_max_threads(); i++)
         (void)i;
 #endif
 
-    // --- run challenges ---
     if (run_all)
     {
-        // --all mode: solve all four standard sizes in sequence
-        // all within a single MPI execution — no multiple srun calls needed
+        // run all four standard sizes sequentially within one MPI execution.
+        // This avoids multiple srun calls in the SLURM script, which causes
+        // MPI reinitialisation issues on some cluster configurations.
         const char *sizes[] = {"1024", "2048", "5000", "7000"};
         for (int s = 0; s < 4; s++)
         {
@@ -586,7 +641,6 @@ int main(int argc, char *argv[])
     }
     else
     {
-        // single challenge mode
         solve_one(rank, nranks, challenge_file, modulo_file, bench_count,
                   sp_count, sp, my_lo, my_hi);
     }

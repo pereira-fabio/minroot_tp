@@ -1,3 +1,24 @@
+// =============================================================================
+// k16.cpp — Cube root solver for challenges with 16-bit prime factors
+//
+// Strategy: precomputed table + parallel trial division
+//
+// The challenge is a product of primes <= 2^16 (at most 65535).
+// There are exactly 6,542 such primes. For a fixed modulo M we precompute:
+//   cbrt_table[i] = primes[i]^e mod M,   e = 3^-1 mod (M-1)
+// and save it to disk keyed by modulo filename.
+//
+// Per-challenge:
+//   1. Export challenge as raw bytes (once per run)
+//   2. For each prime q: compute challenge mod q via byte arithmetic (parallel)
+//   3. For divisors: record exponent
+//   4. Reconstruct: prod cbrt_table[i]^exp_i  mod M   (homomorphism)
+//
+// Two methods available:
+//   --method factor  (default) — uses precomputed table + factorization
+//   --method powm              — naive Fermat baseline for comparison
+// =============================================================================
+
 #include "k_common.h"
 
 #include <climits>
@@ -7,7 +28,6 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <chrono>
-#include <atomic>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -26,6 +46,10 @@ int main(int argc, char *argv[])
     solver_method_t method = METHOD_FACTOR;
     int bench_count = 1;
 
+    // -------------------------------------------------------------------------
+    // Argument parsing
+    //   <challenge_file> <modulo_file> [--method factor|powm] [--bench N]
+    // -------------------------------------------------------------------------
     int positional_index = 0;
     for (int argi = 1; argi < argc; argi++)
     {
@@ -86,21 +110,26 @@ int main(int argc, char *argv[])
     mpz_t result;
     mpz_init(result);
 
+    // pointers declared here so cleanup at the bottom is always valid
     mpz_t *cbrt_table = nullptr;
     int prime_count = 0;
     unsigned long *primes = nullptr;
 
 #ifdef _OPENMP
     printf("OpenMP enabled with %d threads available.\n", omp_get_max_threads());
-// warm up thread pool before any timing starts
+// spawn threads once now so the first timed region doesn't pay spawn cost
 #pragma omp parallel for
     for (int i = 0; i < omp_get_max_threads(); i++)
         (void)i;
 #endif
 
-    // -----------------------------------------------------------------------
-    // METHOD_POWM — naive Fermat baseline
-    // -----------------------------------------------------------------------
+    // =========================================================================
+    // METHOD_POWM — naive baseline
+    //
+    // Computes challenge^e mod M where e = 3^-1 mod (M-1).
+    // Cost: O(log M) squarings — proportional to modulus size.
+    // Used only to measure the "without parallelism" baseline.
+    // =========================================================================
     if (method == METHOD_POWM)
     {
         printf("\nComputing cube root using direct modular exponentiation...\n");
@@ -111,20 +140,29 @@ int main(int argc, char *argv[])
                std::chrono::duration<double, std::milli>(t1 - t0).count());
     }
 
-    // -----------------------------------------------------------------------
-    // METHOD_FACTOR — factorization + precomputed cube root table
-    // -----------------------------------------------------------------------
+    // =========================================================================
+    // METHOD_FACTOR — factorization + precomputed table
+    //
+    // Step 1: load (or build) cbrt_table[i] = primes[i]^e mod M for all 6542
+    //         primes q <= 65535. Table is keyed by modulo filename (.cbrt).
+    //
+    // Step 2 (hot loop, OpenMP): for each prime q, compute challenge mod q
+    //         using raw byte arithmetic — avoids GMP overhead for the ~99.9%
+    //         of primes that don't divide the challenge.
+    //
+    // Step 3: reconstruct result = prod cbrt_table[i]^exp_i  mod M.
+    // =========================================================================
     else
     {
-        // --- setup: primes and cbrt table ---
         printf("\nComputing cube root using factorization...\n");
+
+        // --- step 1: prime list and cbrt table ---
         primes = generate_primes_up_to(UINT16_MAX, &prime_count);
         printf("Generated %d primes up to 16 bits.\n", prime_count);
 
         cbrt_table = (mpz_t *)malloc((size_t)prime_count * sizeof(mpz_t));
 
-        // derive .cbrt filename from modulo filename
-        // e.g. "modulo_16_2048.txt" -> "modulo_16_2048.cbrt"
+        // derive table path from modulo path:  "modulo_16_2048.txt" → ".cbrt"
         char table_file[512];
         strncpy(table_file, modulo_file, sizeof(table_file) - 1);
         table_file[sizeof(table_file) - 1] = '\0';
@@ -138,6 +176,7 @@ int main(int argc, char *argv[])
 
         if (!load_cbrt_table(cbrt_table, prime_count, table_file))
         {
+            // first run for this modulo — build and persist the table
             printf("Not found — computing and saving...\n");
             precompute_cbrt_table(cbrt_table, primes, prime_count, modulo);
             save_cbrt_table(cbrt_table, prime_count, table_file);
@@ -151,7 +190,8 @@ int main(int argc, char *argv[])
         printf("Precomputation/load done in %.3f ms\n",
                std::chrono::duration<double, std::milli>(precomp_end - precomp_start).count());
 
-        // export challenge as raw bytes once — reused across all bench iterations
+        // export challenge bytes once — the byte-arithmetic divisibility check
+        // in the hot loop reads these; they never change across bench iterations
         size_t nbytes;
         unsigned char *challenge_bytes = (unsigned char *)mpz_export(
             NULL, &nbytes, 1, 1, 0, 0, challenge);
@@ -167,6 +207,12 @@ int main(int argc, char *argv[])
 
             auto factor_start = std::chrono::high_resolution_clock::now();
 
+            // --- step 2: parallel trial division ---
+            // Each thread handles a static chunk of the 6542 primes.
+            // For prime q: compute challenge mod q = sum(byte[b] * 256^b) mod q
+            // via Horner's method in native unsigned long arithmetic.
+            // No GMP allocation for the ~99.9% of q that don't divide.
+            // count_exponent() (GMP) is only called on actual divisors.
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
@@ -181,9 +227,12 @@ int main(int argc, char *argv[])
                     exponents[i] = 0;
                     continue;
                 }
+
+                // prime divides — count exact multiplicity
                 exponents[i] = count_exponent(challenge, primes[i]);
             }
 
+            // verify full factorization and count total prime factors
             mpz_t remaining;
             mpz_init_set(remaining, challenge);
             int total_factors = 0;
@@ -197,23 +246,32 @@ int main(int argc, char *argv[])
                         total_factors++;
                     }
                     if (mpz_cmp_ui(remaining, 1) == 0)
-                        break;
+                        break; // fully factored
                 }
             }
 
             auto factor_end = std::chrono::high_resolution_clock::now();
-            total_factor_ms += std::chrono::duration<double, std::milli>(factor_end - factor_start).count();
+            total_factor_ms += std::chrono::duration<double, std::milli>(
+                                   factor_end - factor_start)
+                                   .count();
             last_total_factors = total_factors;
 
             if (mpz_cmp_ui(remaining, 1) == 0)
             {
+                // --- step 3: reconstruction ---
+                // result = prod cbrt_table[i]^exponents[i]  mod M
+                // Parallelized inside compute_cube_root_from_factors().
                 auto root_start = std::chrono::high_resolution_clock::now();
-                compute_cube_root_from_factors(result, exponents, cbrt_table, prime_count, modulo);
+                compute_cube_root_from_factors(result, exponents, cbrt_table,
+                                               prime_count, modulo);
                 auto root_end = std::chrono::high_resolution_clock::now();
-                total_root_ms += std::chrono::duration<double, std::milli>(root_end - root_start).count();
+                total_root_ms += std::chrono::duration<double, std::milli>(
+                                     root_end - root_start)
+                                     .count();
             }
             else if (bench == 0)
             {
+                // challenge was not fully 16-bit-smooth — wrong challenge type
                 printf("WARNING: Not fully factored. Remaining: ");
                 gmp_printf("%Zd\n", remaining);
             }
@@ -221,7 +279,6 @@ int main(int argc, char *argv[])
             mpz_clear(remaining);
             free(exponents);
         }
-        // --- end benchmark loop ---
 
         free(challenge_bytes);
 
@@ -234,17 +291,19 @@ int main(int argc, char *argv[])
         else
         {
             printf("\nResults over %d runs:\n", bench_count);
-            printf("  Average factoring time:      %.3f ms\n", total_factor_ms / bench_count);
-            printf("  Average reconstruction time: %.3f ms\n", total_root_ms / bench_count);
+            printf("  Average factoring time:      %.3f ms\n",
+                   total_factor_ms / bench_count);
+            printf("  Average reconstruction time: %.3f ms\n",
+                   total_root_ms / bench_count);
             printf("  Average total:               %.3f ms\n",
                    (total_factor_ms + total_root_ms) / bench_count);
         }
     }
 
-    // --- verification (always runs) ---
+    // --- verification (always) ---
     mpz_t challenge_mod;
     mpz_init(challenge_mod);
-    mpz_mod(challenge_mod, challenge, modulo);
+    mpz_mod(challenge_mod, challenge, modulo); // reduce mod M before comparing
     verify_cube_root(result, challenge_mod, modulo);
 
     // --- cleanup ---
