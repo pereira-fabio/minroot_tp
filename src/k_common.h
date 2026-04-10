@@ -98,3 +98,28 @@ void verify_cube_root(const mpz_t candidate_cuberoot, const mpz_t challenge_mod,
 // Fast path: mpz_tdiv_ui checks divisibility without any GMP allocation;
 // returns 0 immediately for the ~99.9% of primes that don't divide n.
 int count_exponent(const mpz_t n, unsigned long prime);
+
+// ---------------------------------------------------------------------------
+// Benchmark/reporting helpers
+// ---------------------------------------------------------------------------
+
+// Compute standard deviation from raw timing samples.
+// sample_stddev=true uses Bessel correction (n-1), false uses population (n).
+double compute_stddev_from_values(const double *vals, int n, bool sample_stddev);
+
+// Compute standard deviation from sum and sum-of-squares accumulators.
+// sample_stddev=true uses Bessel correction (n-1), false uses population (n).
+double compute_stddev_from_moments(double sum, double sumsq, int n,
+                                   bool sample_stddev);
+
+// Print one aligned timing line in the common format:
+//   "    <label> avg=... ms   stddev=... ms"
+void print_timing_stat_moments(const char *label,
+                               double sum, double sumsq, int n,
+                               int label_width, bool sample_stddev);
+
+// Print one aligned average-only timing line in the common format:
+//   "    <label> avg=... ms"
+// If extra_text is non-null/non-empty, it is appended after the avg.
+void print_timing_total(const char *label, double mean,
+                        int label_width, const char *extra_text);

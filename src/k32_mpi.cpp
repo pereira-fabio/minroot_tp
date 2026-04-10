@@ -45,7 +45,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include <math.h>
 #include <chrono>
 
 #ifdef _OPENMP
@@ -455,19 +454,6 @@ static void compute_local_cbrt(mpz_t result,
 }
 
 // ---------------------------------------------------------------------------
-// Timing report helper — Bessel-corrected sample stddev
-// ---------------------------------------------------------------------------
-
-static void print_stat(const char *label, double sum, double sumsq, int n)
-{
-    double mean = sum / n;
-    double stddev = (n > 1)
-                        ? sqrt((sumsq - sum * sum / n) / (n - 1))
-                        : 0.0;
-    printf("    %-30s avg=%9.3f ms   stddev=%7.3f ms\n", label, mean, stddev);
-}
-
-// ---------------------------------------------------------------------------
 // solve_one — solve a single (challenge, modulo) pair across all MPI ranks
 //
 // Reconstruction flow (NEW vs OLD):
@@ -763,16 +749,26 @@ static int solve_one(
         else
         {
             printf("Results over %d runs:\n", bench_count);
-            print_stat("Factoring:", fac_sum, fac_sq, bench_count);
-            print_stat("Local cbrt (max):", loc_sum, loc_sq, bench_count);
-            print_stat("Gather:", gat_sum, gat_sq, bench_count);
-            print_stat("Combine (rank 0):", com_sum, com_sq, bench_count);
+            print_timing_stat_moments("Factoring:",
+                                      fac_sum, fac_sq, bench_count,
+                                      30, true);
+            print_timing_stat_moments("Local cbrt (max):",
+                                      loc_sum, loc_sq, bench_count,
+                                      30, true);
+            print_timing_stat_moments("Gather:",
+                                      gat_sum, gat_sq, bench_count,
+                                      30, true);
+            print_timing_stat_moments("Combine (rank 0):",
+                                      com_sum, com_sq, bench_count,
+                                      30, true);
             double recon_sum = loc_sum + gat_sum + com_sum;
             double recon_sq = loc_sq + gat_sq + com_sq; // approx (correlation ignored)
-            print_stat("Reconstruction total:", recon_sum, recon_sq, bench_count);
+            print_timing_stat_moments("Reconstruction total:",
+                                      recon_sum, recon_sq, bench_count,
+                                      30, true);
             double total_sum = fac_sum + recon_sum;
-            printf("    %-30s avg=%9.3f ms\n", "Total:",
-                   total_sum / bench_count);
+            print_timing_total("Total:", total_sum / bench_count,
+                               30, NULL);
         }
 
         // Verify

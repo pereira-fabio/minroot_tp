@@ -2,28 +2,22 @@
 // k32.cpp — Cube root solver for challenges with 32-bit prime factors
 //           Single-node version (OpenMP only)
 //
-// Why a different approach from k16:
-//   k16 precomputes cbrt(q) for all 6,542 primes q <= 2^16. That table is ~1MB.
-//   For k32 there are ~203 million primes <= 2^32: a full table would be ~52GB.
-//   Instead we generate primes on-the-fly using a segmented sieve and compute
-//   cbrt(p) on-the-fly only for the handful of primes that actually divide.
+// Three factoring methods:
+//   sieve   — segmented sieve, primes generated on-the-fly        [default]
+//   table   — precomputed prime file loaded once (~812 MB on disk)
+//   compare — runs both per benchmark iteration; reports side-by-side timing
+//             with mean ± stddev so the two approaches can be compared fairly
 //
-// Algorithm:
-//   1. Generate "small primes" <= 65536 (needed to sieve 32-bit segments)
-//   2. Segmented sieve over [65537, 2^32]:
-//        - Process 512K-entry segments at a time (fits in L2 cache)
-//        - Mark composites using small primes
-//        - For each surviving prime candidate: check divisibility with mpz_tdiv_ui
-//        - For divisors: record (prime, exponent) — typically ~N_bits/32 hits
-//   3. For each found prime p: compute cbrt(p) = p^e mod M  (on-the-fly powm)
-//   4. Reconstruct: result = prod cbrt(p_i)^exp_i  mod M
+// Prime table generation (one-time, ~10 s):
+//   ./k32 --precompute [--primes k32_primes.bin]
 //
-// Parallelism:
-//   The sieve range is split evenly across OpenMP threads. Each thread has its
-//   own private segment buffer and factor list — no shared-memory contention
-//   during the hot trial division loop.
+// Usage:
+//   ./k32 [challenge] [modulo] [--method sieve|table|compare]
+//         [--primes FILE] [--precompute] [--bench N]
 //
-// For MPI+OpenMP multi-node version see k32_mpi.cpp.
+// The table is ~812 MB on disk (203 M primes × 4 bytes).
+// For bench_count > 1 the I/O cost is amortised: the file is loaded once,
+// all iterations share the in-memory array.
 // =============================================================================
 
 #include "k_common.h"
@@ -34,54 +28,30 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <chrono>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
-// Segment size for the sieve: 512K entries (one byte per candidate).
-// Must fit in L2 cache to avoid memory bandwidth becoming the bottleneck.
-#define SEG_SIZE (1 << 19)
-
 // ---------------------------------------------------------------------------
-// Small prime generation — Sieve of Eratosthenes up to sqrt(2^32) = 65536
-//
-// These primes are used to mark composites inside each sieve segment.
-// All primes <= 65536 are needed to correctly sieve any 32-bit range segment
-// (because every composite <= 2^32 has a factor <= sqrt(2^32) = 65536).
+// Constants
 // ---------------------------------------------------------------------------
 
-static unsigned *generate_small_primes(int *count)
+#define SEG_SIZE (1 << 19)                      // 512 KiB — fits in L2 cache
+#define PRIME_TABLE_MAGIC 0x4B33325052494D53ULL // "K32PRIMS"
+#define WRITE_BATCH 65536                       // primes flushed per fwrite call
+
+typedef enum
 {
-    const int limit = 65536;
-    char *sieve = (char *)calloc(limit + 1, 1);
-    memset(sieve, 1, limit + 1);
-    sieve[0] = sieve[1] = 0;
-    for (int i = 2; (long long)i * i <= limit; i++)
-        if (sieve[i])
-            for (int j = i * i; j <= limit; j += i)
-                sieve[j] = 0;
-
-    *count = 0;
-    for (int i = 2; i <= limit; i++)
-        if (sieve[i])
-            (*count)++;
-
-    unsigned *primes = (unsigned *)malloc((size_t)(*count) * sizeof(unsigned));
-    int idx = 0;
-    for (int i = 2; i <= limit; i++)
-        if (sieve[i])
-            primes[idx++] = i;
-    free(sieve);
-    return primes;
-}
+    METHOD_SIEVE,
+    METHOD_TABLE,
+    METHOD_COMPARE
+} run_method_t;
 
 // ---------------------------------------------------------------------------
 // Factor list — (prime, exponent) pairs
-//
-// Stores the distinct prime factors found during trial division.
-// Uses unsigned long (sufficient for 32-bit primes on all platforms).
 // ---------------------------------------------------------------------------
 
 typedef struct
@@ -96,27 +66,14 @@ typedef struct
     int capacity;
 } found_factors_t;
 
-static void found_factors_init(found_factors_t *f)
+static void ff_init(found_factors_t *f)
 {
     f->items = NULL;
     f->count = 0;
     f->capacity = 0;
 }
 
-static void found_factors_append(found_factors_t *f, unsigned long prime, int exp)
-{
-    if (f->count == f->capacity)
-    {
-        int nc = (f->capacity == 0) ? 64 : f->capacity * 2;
-        f->items = (factor_t *)realloc(f->items, (size_t)nc * sizeof(factor_t));
-        f->capacity = nc;
-    }
-    f->items[f->count].prime = prime;
-    f->items[f->count].exponent = exp;
-    f->count++;
-}
-
-static void found_factors_clear(found_factors_t *f)
+static void ff_clear(found_factors_t *f)
 {
     free(f->items);
     f->items = NULL;
@@ -124,59 +81,199 @@ static void found_factors_clear(found_factors_t *f)
     f->capacity = 0;
 }
 
+static void ff_append(found_factors_t *f, unsigned long p, int e)
+{
+    if (f->count == f->capacity)
+    {
+        int nc = (f->capacity == 0) ? 64 : f->capacity * 2;
+        f->items = (factor_t *)realloc(f->items, (size_t)nc * sizeof(factor_t));
+        f->capacity = nc;
+    }
+    f->items[f->count].prime = p;
+    f->items[f->count].exponent = e;
+    f->count++;
+}
+
 // ---------------------------------------------------------------------------
-// trial_divide_range — segmented sieve trial division with OpenMP
-//
-// Finds all primes in [range_lo, range_hi] that divide n, recording each
-// as a (prime, exponent) pair in *found.
-//
-// Parallelism model:
-//   - The range [range_lo, range_hi] is split into nthreads equal sub-ranges
-//   - Each thread independently sieves its sub-range in 512K segments
-//   - Each thread maintains a private factor list (no locking in hot loop)
-//   - After the parallel region, thread lists are merged sequentially
-//
-// Divisibility check:
-//   mpz_tdiv_ui(n, c) computes n mod c using GMP's internal limb arithmetic.
-//   This is fast (O(limbs)) and avoids allocation — called for every prime
-//   candidate surviving the sieve. count_exponent() (which allocates a copy
-//   of n) is called only for the rare primes that actually divide.
+// Small prime generator — Sieve of Eratosthenes up to sqrt(2^32) = 65536
+// Needed to mark composites inside each 32-bit sieve segment.
 // ---------------------------------------------------------------------------
 
-static void trial_divide_range(
-    const mpz_t n,
-    uint64_t range_lo, uint64_t range_hi,
-    int sp_count, const unsigned *sp,
-    found_factors_t *found)
+static unsigned *generate_small_primes(int *count)
+{
+    const int limit = 65536;
+    char *sieve = (char *)calloc((size_t)(limit + 1), 1);
+    memset(sieve, 1, (size_t)(limit + 1));
+    sieve[0] = sieve[1] = 0;
+    for (int i = 2; (long long)i * i <= limit; i++)
+        if (sieve[i])
+            for (int j = i * i; j <= limit; j += i)
+                sieve[j] = 0;
+    *count = 0;
+    for (int i = 2; i <= limit; i++)
+        if (sieve[i])
+            (*count)++;
+    unsigned *primes = (unsigned *)malloc((size_t)(*count) * sizeof(unsigned));
+    int idx = 0;
+    for (int i = 2; i <= limit; i++)
+        if (sieve[i])
+            primes[idx++] = (unsigned)i;
+    free(sieve);
+    return primes;
+}
+
+// ---------------------------------------------------------------------------
+// Prime table I/O
+//
+// File format (binary, little-endian platform order for uint64_t header):
+//   [uint64_t magic  = PRIME_TABLE_MAGIC]
+//   [uint64_t count  = number of primes stored]
+//   [uint32_t prime[count]]   sorted ascending, range [65537, 2^32]
+//
+// File size: 16 + 203,280,221 × 4 ≈ 813 MB
+//
+// The table is generated once by --precompute (or auto-generated on first run
+// when --method table is used and the file does not yet exist).
+// ---------------------------------------------------------------------------
+
+// Streams primes from the segmented sieve directly to disk in WRITE_BATCH
+// chunks — avoids holding all 800+ MB in RAM during generation.
+static bool generate_and_save_prime_table(const char *path,
+                                          int sp_count, const unsigned *sp)
+{
+    printf("Generating prime table [65537, 2^32] → %s ...\n", path);
+    FILE *f = fopen(path, "wb");
+    if (!f)
+    {
+        fprintf(stderr, "Cannot create %s\n", path);
+        return false;
+    }
+
+    uint64_t magic = PRIME_TABLE_MAGIC, count = 0;
+    fwrite(&magic, 8, 1, f);
+    long count_pos = ftell(f); // remember where to write the final count
+    fwrite(&count, 8, 1, f);   // placeholder
+
+    char *seg = (char *)malloc(SEG_SIZE);
+    uint32_t *batch = (uint32_t *)malloc(WRITE_BATCH * sizeof(uint32_t));
+    int bi = 0;
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    for (uint64_t lo = 65537ULL; lo <= (uint64_t)UINT32_MAX; lo += SEG_SIZE)
+    {
+        uint64_t hi = lo + SEG_SIZE - 1;
+        if (hi > (uint64_t)UINT32_MAX)
+            hi = (uint64_t)UINT32_MAX;
+        size_t seg_len = (size_t)(hi - lo + 1);
+
+        memset(seg, 1, seg_len);
+        for (int i = 0; i < sp_count; i++)
+        {
+            uint64_t p = sp[i];
+            uint64_t start = ((lo + p - 1) / p) * p;
+            if (start == p)
+                start += p;
+            for (uint64_t j = start; j <= hi; j += p)
+                seg[j - lo] = 0;
+        }
+        for (uint64_t c = lo; c <= hi; c++)
+        {
+            if (!seg[c - lo])
+                continue;
+            batch[bi++] = (uint32_t)c;
+            count++;
+            if (bi == WRITE_BATCH)
+            {
+                fwrite(batch, 4, (size_t)WRITE_BATCH, f);
+                bi = 0;
+            }
+        }
+    }
+    if (bi > 0)
+        fwrite(batch, 4, (size_t)bi, f);
+    free(seg);
+    free(batch);
+
+    // write actual prime count into the header placeholder
+    fseek(f, count_pos, SEEK_SET);
+    fwrite(&count, 8, 1, f);
+    fclose(f);
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    printf("Generated %" PRIu64 " primes in %.1f ms  (file ≈ %.0f MB)\n",
+           count, ms, (double)(16 + count * 4) / 1e6);
+    return true;
+}
+
+// Loads the entire prime table into a malloc'd uint32_t array.
+// Returns NULL on failure; sets *out_count.
+static uint32_t *load_prime_table(uint64_t *out_count, const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+
+    uint64_t magic, count;
+    if (fread(&magic, 8, 1, f) != 1 || magic != PRIME_TABLE_MAGIC ||
+        fread(&count, 8, 1, f) != 1)
+    {
+        fclose(f);
+        return NULL;
+    }
+    uint32_t *primes = (uint32_t *)malloc(count * 4);
+    if (!primes || fread(primes, 4, count, f) != count)
+    {
+        free(primes);
+        fclose(f);
+        return NULL;
+    }
+    fclose(f);
+    printf("Loaded %" PRIu64 " primes from %s\n", count, path);
+    *out_count = count;
+    return primes;
+}
+
+// ---------------------------------------------------------------------------
+// Trial division — SIEVE method  (unchanged from original k32.cpp)
+//
+// Segmented sieve over [range_lo, range_hi]: each OpenMP thread gets its
+// own sub-range and private 512 KiB sieve buffer. Factors found via
+// mpz_tdiv_ui (fast, no allocation) + count_exponent (only on actual divisors).
+// ---------------------------------------------------------------------------
+
+static void trial_divide_sieve(const mpz_t n,
+                               uint64_t range_lo, uint64_t range_hi,
+                               int sp_count, const unsigned *sp,
+                               found_factors_t *found)
 {
     int nthreads = 1;
 #ifdef _OPENMP
     nthreads = omp_get_max_threads();
 #endif
-
-    // each thread gets its own factor list — avoids locking during the hot loop
     found_factors_t *tf = (found_factors_t *)malloc(
         (size_t)nthreads * sizeof(found_factors_t));
     for (int t = 0; t < nthreads; t++)
-        found_factors_init(&tf[t]);
+        ff_init(&tf[t]);
 
     uint64_t range_size = range_hi - range_lo + 1;
 
 #ifdef _OPENMP
 #pragma omp parallel
     {
-        int t = omp_get_thread_num(), nt = omp_get_num_threads();
+        int t = omp_get_thread_num();
+        int nt = omp_get_num_threads();
 #else
     {
         int t = 0, nt = 1;
 #endif
-        // this thread's sub-range — contiguous slice for good cache locality
         uint64_t t_lo = range_lo + (range_size * (uint64_t)t) / (uint64_t)nt;
         uint64_t t_hi = range_lo + (range_size * (uint64_t)(t + 1)) / (uint64_t)nt - 1;
         if (t == nt - 1)
             t_hi = range_hi;
 
-        char *seg = (char *)malloc(SEG_SIZE); // private sieve buffer per thread
+        char *seg = (char *)malloc(SEG_SIZE);
 
         for (uint64_t lo = t_lo; lo <= t_hi; lo += SEG_SIZE)
         {
@@ -185,110 +282,283 @@ static void trial_divide_range(
                 hi = t_hi;
             size_t seg_len = (size_t)(hi - lo + 1);
 
-            // initialize segment: all candidates marked as prime
             memset(seg, 1, seg_len);
-
-            // mark composites: for each small prime p, find first multiple >= lo
-            // that is not p itself, then stride through segment
             for (int i = 0; i < sp_count; i++)
             {
                 uint64_t p = sp[i];
                 uint64_t start = ((lo + p - 1) / p) * p;
                 if (start == p)
-                    start += p; // don't mark p itself as composite
+                    start += p;
                 for (uint64_t j = start; j <= hi; j += p)
                     seg[j - lo] = 0;
             }
-
-            // trial division: surviving candidates are primes — check divisibility
-            for (uint64_t candidate = lo; candidate <= hi; candidate++)
+            for (uint64_t c = lo; c <= hi; c++)
             {
-                if (!seg[candidate - lo])
-                    continue; // composite — skip
-
-                // fast divisibility test (no GMP allocation)
-                if (mpz_tdiv_ui(n, (unsigned long)candidate) != 0)
+                if (!seg[c - lo])
                     continue;
-
-                // n is divisible — count exact multiplicity
-                int exp = count_exponent(n, (unsigned long)candidate);
-                if (exp > 0)
-                    found_factors_append(&tf[t], (unsigned long)candidate, exp);
+                if (mpz_tdiv_ui(n, (unsigned long)c) != 0)
+                    continue;
+                int e = count_exponent(n, (unsigned long)c);
+                if (e > 0)
+                    ff_append(&tf[t], (unsigned long)c, e);
             }
         }
         free(seg);
     }
 
-    // merge thread-local results into the caller's list
     for (int t = 0; t < nthreads; t++)
     {
         for (int i = 0; i < tf[t].count; i++)
-            found_factors_append(found, tf[t].items[i].prime,
-                                 tf[t].items[i].exponent);
-        found_factors_clear(&tf[t]);
+            ff_append(found, tf[t].items[i].prime, tf[t].items[i].exponent);
+        ff_clear(&tf[t]);
     }
     free(tf);
 }
 
 // ---------------------------------------------------------------------------
-// compute_cube_root_from_found — on-the-fly reconstruction
+// Trial division — TABLE method
 //
-// For each found prime p with exponent e:
-//   cbrt(p^e) = cbrt(p)^e = (p^inv3)^e  mod M
-// where inv3 = 3^-1 mod (M-1) is computed once.
+// Iterates the preloaded sorted uint32_t prime array.
+// The array is split evenly across OpenMP threads (static schedule).
+// Each thread maintains its own private factor list — no locking in hot loop.
 //
-// Unlike k16, there is no precomputed table here — but there are only
-// ~N_bits/32 factors (e.g. ~34 for 1024-bit), so powm is called only ~34
-// times. Each call is independent so the loop is OpenMP-parallelized.
+// Cache behaviour differs from the sieve: the prime array is 800+ MB, so
+// it will not fit in any cache level. Hardware sequential prefetch mitigates
+// this, but memory bandwidth is the bottleneck rather than compute.
+// The sieve method keeps only a 512 KiB working set in L2 at all times.
 // ---------------------------------------------------------------------------
 
-static void compute_cube_root_from_found(
-    mpz_t result,
-    const found_factors_t *found,
-    const mpz_t modulo)
+static void trial_divide_table(const mpz_t n,
+                               const uint32_t *primes, int64_t prime_count,
+                               found_factors_t *found)
 {
-    // e = 3^-1 mod (modulo-1), computed once for all factors
+    int nthreads = 1;
+#ifdef _OPENMP
+    nthreads = omp_get_max_threads();
+#endif
+    found_factors_t *tf = (found_factors_t *)malloc(
+        (size_t)nthreads * sizeof(found_factors_t));
+    for (int t = 0; t < nthreads; t++)
+        ff_init(&tf[t]);
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (int64_t i = 0; i < prime_count; i++)
+    {
+        int t = 0;
+#ifdef _OPENMP
+        t = omp_get_thread_num();
+#endif
+        unsigned long p = (unsigned long)primes[i];
+        if (mpz_tdiv_ui(n, p) != 0)
+            continue;
+        int e = count_exponent(n, p);
+        if (e > 0)
+            ff_append(&tf[t], p, e);
+    }
+
+    for (int t = 0; t < nthreads; t++)
+    {
+        for (int i = 0; i < tf[t].count; i++)
+            ff_append(found, tf[t].items[i].prime, tf[t].items[i].exponent);
+        ff_clear(&tf[t]);
+    }
+    free(tf);
+}
+
+// ---------------------------------------------------------------------------
+// k32 cbrt cache I/O
+//
+// We cache only factors actually discovered in challenges (not all 203M primes).
+// File format (text):
+//   line 1: count
+//   line i: <prime> <cuberoot_decimal>
+// ---------------------------------------------------------------------------
+
+typedef struct
+{
+    unsigned long prime;
+    mpz_t cbrt;
+} cbrt_entry_t;
+
+typedef struct
+{
+    cbrt_entry_t *items;
+    int count;
+    int capacity;
+} cbrt_cache_t;
+
+static void cbrt_cache_init(cbrt_cache_t *cache)
+{
+    cache->items = NULL;
+    cache->count = 0;
+    cache->capacity = 0;
+}
+
+static void cbrt_cache_clear(cbrt_cache_t *cache)
+{
+    for (int i = 0; i < cache->count; i++)
+        mpz_clear(cache->items[i].cbrt);
+    free(cache->items);
+    cache->items = NULL;
+    cache->count = 0;
+    cache->capacity = 0;
+}
+
+static int cbrt_cache_find_index(const cbrt_cache_t *cache, unsigned long prime)
+{
+    for (int i = 0; i < cache->count; i++)
+    {
+        if (cache->items[i].prime == prime)
+            return i;
+    }
+    return -1;
+}
+
+static void cbrt_cache_append(cbrt_cache_t *cache, unsigned long prime,
+                              const mpz_t cbrt_val)
+{
+    if (cache->count == cache->capacity)
+    {
+        int nc = (cache->capacity == 0) ? 64 : cache->capacity * 2;
+        cache->items = (cbrt_entry_t *)realloc(cache->items,
+                                               (size_t)nc * sizeof(cbrt_entry_t));
+        cache->capacity = nc;
+    }
+
+    cache->items[cache->count].prime = prime;
+    mpz_init_set(cache->items[cache->count].cbrt, cbrt_val);
+    cache->count++;
+}
+
+static bool load_k32_cbrt_cache(cbrt_cache_t *cache, const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+
+    int stored_count = 0;
+    if (fscanf(f, "%d", &stored_count) != 1 || stored_count < 0)
+    {
+        fclose(f);
+        return false;
+    }
+
+    cbrt_cache_clear(cache);
+    cbrt_cache_init(cache);
+
+    for (int i = 0; i < stored_count; i++)
+    {
+        unsigned long p = 0;
+        if (fscanf(f, "%lu", &p) != 1)
+        {
+            fclose(f);
+            cbrt_cache_clear(cache);
+            cbrt_cache_init(cache);
+            return false;
+        }
+
+        mpz_t v;
+        mpz_init(v);
+        if (mpz_inp_str(v, f, 10) == 0)
+        {
+            mpz_clear(v);
+            fclose(f);
+            cbrt_cache_clear(cache);
+            cbrt_cache_init(cache);
+            return false;
+        }
+
+        cbrt_cache_append(cache, p, v);
+        mpz_clear(v);
+    }
+
+    fclose(f);
+    printf("Loaded %d cached cbrt entries from %s\n", cache->count, path);
+    return true;
+}
+
+static bool save_k32_cbrt_cache(const cbrt_cache_t *cache, const char *path)
+{
+    FILE *f = fopen(path, "w");
+    if (!f)
+    {
+        fprintf(stderr, "Cannot write cbrt cache to %s\n", path);
+        return false;
+    }
+
+    fprintf(f, "%d\n", cache->count);
+    for (int i = 0; i < cache->count; i++)
+    {
+        fprintf(f, "%lu ", cache->items[i].prime);
+        mpz_out_str(f, 10, cache->items[i].cbrt);
+        fputc('\n', f);
+    }
+
+    fclose(f);
+    printf("Saved %d cached cbrt entries to %s\n", cache->count, path);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Reconstruction using persistent cbrt cache
+// ---------------------------------------------------------------------------
+
+static void compute_cube_root_from_found(mpz_t result,
+                                         const found_factors_t *found,
+                                         const mpz_t modulo,
+                                         cbrt_cache_t *cache,
+                                         bool *cache_dirty)
+{
     mpz_t phi, e, three;
     mpz_inits(phi, e, three, NULL);
     mpz_sub_ui(phi, modulo, 1);
     mpz_set_ui(three, 3);
     mpz_invert(e, three, phi);
 
-    int n = found->count;
-    mpz_t *parts = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
-    for (int i = 0; i < n; i++)
-        mpz_init(parts[i]);
-
-    // all powm calls are independent — safe to parallelize
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-    for (int i = 0; i < n; i++)
-    {
-        mpz_t p_mpz, cbrt_p;
-        mpz_inits(p_mpz, cbrt_p, NULL);
-        mpz_set_ui(p_mpz, found->items[i].prime);
-        mpz_powm(cbrt_p, p_mpz, e, modulo); // cbrt(p) = p^e mod M
-
-        if (found->items[i].exponent == 1)
-            mpz_set(parts[i], cbrt_p);
-        else
-            // cbrt(p^k) = cbrt(p)^k — avoids k separate powm calls
-            mpz_powm_ui(parts[i], cbrt_p,
-                        (unsigned long)found->items[i].exponent, modulo);
-
-        mpz_clears(p_mpz, cbrt_p, NULL);
-    }
-
-    // combine: result = prod parts[i]  mod M
     mpz_set_ui(result, 1);
-    for (int i = 0; i < n; i++)
+
+    for (int i = 0; i < found->count; i++)
     {
-        mpz_mul(result, result, parts[i]);
+        unsigned long p = found->items[i].prime;
+        int idx = cbrt_cache_find_index(cache, p);
+
+        mpz_t cbrt_p;
+        mpz_init(cbrt_p);
+
+        if (idx >= 0)
+        {
+            mpz_set(cbrt_p, cache->items[idx].cbrt);
+        }
+        else
+        {
+            mpz_t p_mpz;
+            mpz_init_set_ui(p_mpz, p);
+            mpz_powm(cbrt_p, p_mpz, e, modulo);
+            cbrt_cache_append(cache, p, cbrt_p);
+            *cache_dirty = true;
+            mpz_clear(p_mpz);
+        }
+
+        if (found->items[i].exponent > 1)
+        {
+            mpz_t powered;
+            mpz_init(powered);
+            mpz_powm_ui(powered, cbrt_p,
+                        (unsigned long)found->items[i].exponent, modulo);
+            mpz_mul(result, result, powered);
+            mpz_clear(powered);
+        }
+        else
+        {
+            mpz_mul(result, result, cbrt_p);
+        }
+
         mpz_mod(result, result, modulo);
-        mpz_clear(parts[i]);
+        mpz_clear(cbrt_p);
     }
-    free(parts);
+
     mpz_clears(phi, e, three, NULL);
 }
 
@@ -300,134 +570,322 @@ int main(int argc, char *argv[])
 {
     const char *challenge_file = "data/challenges/k32/challenge_32_1024.txt";
     const char *modulo_file = "data/challenges/k32/modulo_32_1024.txt";
+    const char *primes_file = "k32_primes.bin";
     int bench_count = 1;
+    int do_precompute = 0;
+    run_method_t method = METHOD_SIEVE;
 
-    int positional_index = 0;
+    int positional = 0;
     for (int argi = 1; argi < argc; argi++)
     {
-        if (strcmp(argv[argi], "--bench") == 0)
+        if (strcmp(argv[argi], "--bench") == 0 && argi + 1 < argc)
         {
-            if (argi + 1 >= argc)
+            bench_count = atoi(argv[++argi]);
+        }
+        else if (strcmp(argv[argi], "--method") == 0 && argi + 1 < argc)
+        {
+            const char *m = argv[++argi];
+            if (strcmp(m, "sieve") == 0)
+                method = METHOD_SIEVE;
+            else if (strcmp(m, "table") == 0)
+                method = METHOD_TABLE;
+            else if (strcmp(m, "compare") == 0)
+                method = METHOD_COMPARE;
+            else
             {
-                fprintf(stderr, "Missing --bench value\n");
+                fprintf(stderr, "Unknown --method '%s'\n", m);
                 return 1;
             }
-            bench_count = atoi(argv[++argi]);
-            continue;
         }
-        if (positional_index == 0)
-            challenge_file = argv[argi];
-        else if (positional_index == 1)
-            modulo_file = argv[argi];
+        else if (strcmp(argv[argi], "--primes") == 0 && argi + 1 < argc)
+        {
+            primes_file = argv[++argi];
+        }
+        else if (strcmp(argv[argi], "--precompute") == 0)
+        {
+            do_precompute = 1;
+        }
+        else if (argv[argi][0] != '-')
+        {
+            if (positional == 0)
+            {
+                challenge_file = argv[argi];
+                positional++;
+            }
+            else if (positional == 1)
+            {
+                modulo_file = argv[argi];
+                positional++;
+            }
+            else
+            {
+                fprintf(stderr, "Unexpected argument '%s'\n", argv[argi]);
+                return 1;
+            }
+        }
         else
         {
-            fprintf(stderr, "Unexpected argument '%s'\n", argv[argi]);
+            fprintf(stderr, "Unknown option '%s'\n", argv[argi]);
             return 1;
         }
-        positional_index++;
     }
 
-    printf("Challenge file: %s\n", challenge_file);
-    printf("Modulo file:    %s\n", modulo_file);
-    if (bench_count > 1)
-        printf("Benchmark mode: %d runs\n", bench_count);
+    const char *method_name =
+        (method == METHOD_SIEVE) ? "sieve" : (method == METHOD_TABLE) ? "table"
+                                                                      : "compare";
 
-    mpz_t challenge, modulo;
-    mpz_inits(challenge, modulo, NULL);
+    printf("Challenge: %s\n", challenge_file);
+    printf("Modulo:    %s\n", modulo_file);
+    printf("Method:    %s\n", method_name);
+    if (bench_count > 1)
+        printf("Bench:     %d runs\n", bench_count);
+
+#ifdef _OPENMP
+    printf("OpenMP:    %d threads\n", omp_get_max_threads());
+#pragma omp parallel for
+    for (int i = 0; i < omp_get_max_threads(); i++)
+        (void)i; // warm up pool
+#endif
+
+    int sp_count;
+    unsigned *sp = generate_small_primes(&sp_count);
+    printf("Small primes ≤65536: %d\n\n", sp_count);
+
+    // --precompute: generate prime file and exit
+    if (do_precompute)
+    {
+        bool ok = generate_and_save_prime_table(primes_file, sp_count, sp);
+        free(sp);
+        return ok ? 0 : 1;
+    }
+
+    mpz_t challenge, modulo, result;
+    mpz_inits(challenge, modulo, result, NULL);
     read_mpz_from_file(challenge, challenge_file);
     read_mpz_from_file(modulo, modulo_file);
 
-    mpz_t result;
-    mpz_init(result);
+    size_t cbits = mpz_sizeinbase(challenge, 2);
+    printf("Challenge: %zu bits  (~%zu factors expected)\n\n", cbits, cbits / 32);
 
-#ifdef _OPENMP
-    printf("OpenMP enabled with %d threads available.\n", omp_get_max_threads());
-#pragma omp parallel for
-    for (int i = 0; i < omp_get_max_threads(); i++)
-        (void)i; // warm up
-#endif
+    // ---- Prime table bootstrap (always): load or create k32_primes.bin ----
 
-    // generate small primes once — reused by every sieve segment and bench run
-    printf("Generating small primes for sieve...\n");
-    int sp_count;
-    unsigned *sp = generate_small_primes(&sp_count);
-    printf("Generated %d small primes up to 65536.\n", sp_count);
+    uint32_t *prime_table = NULL;
+    int64_t prime_table_count = 0;
+    double table_load_ms = 0.0;
 
-    size_t challenge_bits = mpz_sizeinbase(challenge, 2);
-    printf("Challenge: %zu bits\n", challenge_bits);
-    printf("~%zu on-the-fly powm calls expected\n", challenge_bits / 32);
+    auto tl0 = std::chrono::high_resolution_clock::now();
+    {
+        uint64_t uc = 0;
+        prime_table = load_prime_table(&uc, primes_file);
+        prime_table_count = (int64_t)uc;
+    }
+    if (!prime_table)
+    {
+        printf("Prime table not found — generating now (one-time cost)...\n");
+        if (!generate_and_save_prime_table(primes_file, sp_count, sp))
+        {
+            free(sp);
+            return 1;
+        }
+        uint64_t uc = 0;
+        prime_table = load_prime_table(&uc, primes_file);
+        prime_table_count = (int64_t)uc;
+        if (!prime_table)
+        {
+            fprintf(stderr, "Failed to load %s after generation\n", primes_file);
+            free(sp);
+            return 1;
+        }
+    }
+    auto tl1 = std::chrono::high_resolution_clock::now();
+    table_load_ms = std::chrono::duration<double, std::milli>(tl1 - tl0).count();
+    printf("Table ready: %" PRId64 " primes in %.1f ms\n\n",
+           prime_table_count, table_load_ms);
 
-    double total_factor_ms = 0.0, total_root_ms = 0.0;
+    // ---- k32 cbrt cache file (modulo-specific) ----
+    char cbrt_file[512];
+    {
+        char base[504];
+        strncpy(base, modulo_file, sizeof(base) - 1);
+        base[sizeof(base) - 1] = '\0';
+        char *dot = strrchr(base, '.');
+        if (dot)
+            *dot = '\0';
+        snprintf(cbrt_file, sizeof(cbrt_file), "%s.cbrt", base);
+    }
+
+    cbrt_cache_t cbrt_cache;
+    cbrt_cache_init(&cbrt_cache);
+    bool cbrt_cache_dirty = false;
+
+    if (!load_k32_cbrt_cache(&cbrt_cache, cbrt_file))
+    {
+        printf("No existing k32 cbrt cache at %s — creating on demand.\n", cbrt_file);
+    }
+
+    if (method == METHOD_SIEVE)
+    {
+        // Keep startup behaviour (always load prime file) without holding 800+ MB
+        // when the selected method does not use the table.
+        free(prime_table);
+        prime_table = NULL;
+    }
+
+    // ---- Timing accumulators ----
+
+    // sieve path
+    double s_fac_sum = 0, s_fac_sq = 0;
+    double s_rec_sum = 0, s_rec_sq = 0;
+    // table path
+    double t_fac_sum = 0, t_fac_sq = 0;
+    double t_rec_sum = 0, t_rec_sq = 0;
+
+    // ---- Benchmark loop ----
 
     for (int bench = 0; bench < bench_count; bench++)
     {
-        found_factors_t found;
-        found_factors_init(&found);
 
-        auto t0 = std::chrono::high_resolution_clock::now();
+        // ---- SIEVE ----
+        if (method == METHOD_SIEVE || method == METHOD_COMPARE)
+        {
+            found_factors_t found;
+            ff_init(&found);
 
-        // trial division over the full 32-bit prime range above 16-bit boundary
-        trial_divide_range(challenge, 65537, UINT32_MAX, sp_count, sp, &found);
+            auto t0 = std::chrono::high_resolution_clock::now();
+            trial_divide_sieve(challenge, 65537, (uint64_t)UINT32_MAX,
+                               sp_count, sp, &found);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            s_fac_sum += dt;
+            s_fac_sq += dt * dt;
 
-        // verify that all factors were accounted for (remaining should be 1)
-        mpz_t remaining;
-        mpz_init_set(remaining, challenge);
-        int total_factors = 0;
-        for (int i = 0; i < found.count; i++)
-            for (int e = 0; e < found.items[i].exponent; e++)
+            if (bench == 0)
             {
-                mpz_divexact_ui(remaining, remaining, found.items[i].prime);
-                total_factors++;
+                printf("[sieve] Found %d distinct 32-bit factors\n", found.count);
+                mpz_t rem;
+                mpz_init_set(rem, challenge);
+                for (int i = 0; i < found.count; i++)
+                    for (int e = 0; e < found.items[i].exponent; e++)
+                        mpz_divexact_ui(rem, rem, found.items[i].prime);
+                if (mpz_cmp_ui(rem, 1) != 0)
+                    printf("[sieve] WARNING: challenge not fully factored\n");
+                mpz_clear(rem);
             }
 
-        auto t1 = std::chrono::high_resolution_clock::now();
-        total_factor_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-        if (bench == 0)
-        {
-            printf("\nFactored into %d primes (distinct: %d)\n",
-                   total_factors, found.count);
-            if (mpz_cmp_ui(remaining, 1) != 0)
+            if (found.count > 0)
             {
-                // remaining > 1 means challenge has factors above 2^32
-                printf("WARNING: Not fully factored. Remaining: ");
-                gmp_printf("%Zd\n", remaining);
+                auto t2 = std::chrono::high_resolution_clock::now();
+                compute_cube_root_from_found(result, &found, modulo,
+                                             &cbrt_cache, &cbrt_cache_dirty);
+                auto t3 = std::chrono::high_resolution_clock::now();
+                double dr = std::chrono::duration<double, std::milli>(t3 - t2).count();
+                s_rec_sum += dr;
+                s_rec_sq += dr * dr;
             }
+            ff_clear(&found);
         }
 
-        if (mpz_cmp_ui(remaining, 1) == 0)
+        // ---- TABLE ----
+        if (method == METHOD_TABLE || method == METHOD_COMPARE)
         {
-            auto t2 = std::chrono::high_resolution_clock::now();
-            compute_cube_root_from_found(result, &found, modulo);
-            auto t3 = std::chrono::high_resolution_clock::now();
-            total_root_ms += std::chrono::duration<double, std::milli>(t3 - t2).count();
+            found_factors_t found;
+            ff_init(&found);
+
+            auto t0 = std::chrono::high_resolution_clock::now();
+            trial_divide_table(challenge, prime_table, prime_table_count, &found);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            t_fac_sum += dt;
+            t_fac_sq += dt * dt;
+
+            if (bench == 0)
+            {
+                printf("[table] Found %d distinct 32-bit factors\n", found.count);
+                mpz_t rem;
+                mpz_init_set(rem, challenge);
+                for (int i = 0; i < found.count; i++)
+                    for (int e = 0; e < found.items[i].exponent; e++)
+                        mpz_divexact_ui(rem, rem, found.items[i].prime);
+                if (mpz_cmp_ui(rem, 1) != 0)
+                    printf("[table] WARNING: challenge not fully factored\n");
+                mpz_clear(rem);
+            }
+
+            if (found.count > 0)
+            {
+                auto t2 = std::chrono::high_resolution_clock::now();
+                compute_cube_root_from_found(result, &found, modulo,
+                                             &cbrt_cache, &cbrt_cache_dirty);
+                auto t3 = std::chrono::high_resolution_clock::now();
+                double dr = std::chrono::duration<double, std::milli>(t3 - t2).count();
+                t_rec_sum += dr;
+                t_rec_sq += dr * dr;
+            }
+            ff_clear(&found);
         }
-
-        mpz_clear(remaining);
-        found_factors_clear(&found);
     }
 
-    free(sp);
+    // ---- Report ----
+    printf("\n=== Results over %d run(s) ===\n", bench_count);
 
-    if (bench_count == 1)
+    if (method == METHOD_SIEVE || method == METHOD_COMPARE)
     {
-        printf("Factoring time:      %.3f ms\n", total_factor_ms);
-        printf("Reconstruction time: %.3f ms\n", total_root_ms);
-    }
-    else
-    {
-        printf("\nResults over %d runs:\n", bench_count);
-        printf("  Average factoring time:      %.3f ms\n", total_factor_ms / bench_count);
-        printf("  Average reconstruction time: %.3f ms\n", total_root_ms / bench_count);
-        printf("  Average total:               %.3f ms\n",
-               (total_factor_ms + total_root_ms) / bench_count);
+        printf("\nSIEVE method:\n");
+        print_timing_stat_moments("Factoring:",
+                                  s_fac_sum, s_fac_sq, bench_count,
+                                  26, true);
+        print_timing_stat_moments("Reconstruction:",
+                                  s_rec_sum, s_rec_sq, bench_count,
+                                  26, true);
+        print_timing_total("Total:",
+                           (s_fac_sum + s_rec_sum) / bench_count,
+                           26, NULL);
     }
 
+    if (method == METHOD_TABLE || method == METHOD_COMPARE)
+    {
+        double amortised = table_load_ms / bench_count;
+         char total_extra[64];
+         snprintf(total_extra, sizeof(total_extra),
+               "(+ %.1f ms amortised load)", amortised);
+        printf("\nTABLE method  (table load %.1f ms, amortised %.1f ms/run):\n",
+               table_load_ms, amortised);
+         print_timing_stat_moments("Factoring:",
+                          t_fac_sum, t_fac_sq, bench_count,
+                          26, true);
+         print_timing_stat_moments("Reconstruction:",
+                          t_rec_sum, t_rec_sq, bench_count,
+                          26, true);
+         print_timing_total("Total:",
+                      (t_fac_sum + t_rec_sum) / bench_count,
+                      26, total_extra);
+    }
+
+    if (method == METHOD_COMPARE)
+    {
+        printf("\nSpeedup (sieve factoring / table factoring): %.2f×\n",
+               t_fac_sum > 0 ? s_fac_sum / t_fac_sum : 0.0);
+        printf("Note: table speedup is only meaningful for bench_count >> 1\n"
+               "      because the %zu-MB load cost is amortised over all runs.\n",
+               (size_t)(16 + (uint64_t)prime_table_count * 4) / (1024 * 1024));
+    }
+
+    if (cbrt_cache_dirty)
+    {
+        save_k32_cbrt_cache(&cbrt_cache, cbrt_file);
+    }
+
+    // ---- Verify ----
+    printf("\n");
     mpz_t challenge_mod;
     mpz_init(challenge_mod);
     mpz_mod(challenge_mod, challenge, modulo);
     verify_cube_root(result, challenge_mod, modulo);
+    mpz_clear(challenge_mod);
 
-    mpz_clears(challenge, modulo, result, challenge_mod, NULL);
+    cbrt_cache_clear(&cbrt_cache);
+    free(prime_table);
+    free(sp);
+    mpz_clears(challenge, modulo, result, NULL);
     return 0;
 }

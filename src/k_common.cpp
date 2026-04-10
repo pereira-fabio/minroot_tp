@@ -1,6 +1,7 @@
 #include "k_common.h"
 
 #include <gmp.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -329,4 +330,68 @@ int count_exponent(const mpz_t n, unsigned long prime)
     }
     mpz_clear(temp);
     return exponent;
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark/reporting helpers
+// ---------------------------------------------------------------------------
+
+double compute_stddev_from_values(const double *vals, int n, bool sample_stddev)
+{
+    if (!vals || n <= 0)
+        return 0.0;
+    if (n == 1)
+        return 0.0;
+
+    double sum = 0.0;
+    double sumsq = 0.0;
+    for (int i = 0; i < n; i++)
+    {
+        sum += vals[i];
+        sumsq += vals[i] * vals[i];
+    }
+
+    return compute_stddev_from_moments(sum, sumsq, n, sample_stddev);
+}
+
+double compute_stddev_from_moments(double sum, double sumsq, int n,
+                                   bool sample_stddev)
+{
+    if (n <= 0)
+        return 0.0;
+    if (n == 1)
+        return 0.0;
+
+    double denom = sample_stddev ? (double)(n - 1) : (double)n;
+    double var = (sumsq - (sum * sum) / (double)n) / denom;
+    if (var < 0.0)
+    {
+        // Clamp tiny negative values caused by floating-point roundoff.
+        var = 0.0;
+    }
+    return sqrt(var);
+}
+
+void print_timing_stat_moments(const char *label,
+                               double sum, double sumsq, int n,
+                               int label_width, bool sample_stddev)
+{
+    double mean = (n > 0) ? (sum / n) : 0.0;
+    double stddev = compute_stddev_from_moments(sum, sumsq, n, sample_stddev);
+    printf("    %-*s avg=%9.3f ms   stddev=%7.3f ms\n",
+           label_width, label, mean, stddev);
+}
+
+void print_timing_total(const char *label, double mean,
+                        int label_width, const char *extra_text)
+{
+    if (extra_text && extra_text[0] != '\0')
+    {
+        printf("    %-*s avg=%9.3f ms  %s\n",
+               label_width, label, mean, extra_text);
+    }
+    else
+    {
+        printf("    %-*s avg=%9.3f ms\n", label_width, label, mean);
+    }
 }
