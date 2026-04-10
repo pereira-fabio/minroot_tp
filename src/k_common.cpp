@@ -1,5 +1,6 @@
 #include "k_common.h"
 
+#include <gmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,11 @@
 void read_mpz_from_file(mpz_t num, const char *filename)
 {
     FILE *f = fopen(filename, "rb");
-    if (!f) { fprintf(stderr, "Error: Cannot open file %s\n", filename); exit(1); }
+    if (!f)
+    {
+        fprintf(stderr, "Error: Cannot open file %s\n", filename);
+        exit(1);
+    }
 
     // try decimal text first (e.g. challenge files written as plain integers)
     if (mpz_inp_str(num, f, 10) == 0)
@@ -25,7 +30,8 @@ void read_mpz_from_file(mpz_t num, const char *filename)
         if (mpz_inp_raw(num, f) == 0)
         {
             fprintf(stderr, "Error: Failed to read number from %s\n", filename);
-            fclose(f); exit(1);
+            fclose(f);
+            exit(1);
         }
     }
     fclose(f);
@@ -39,7 +45,11 @@ void read_mpz_from_file(mpz_t num, const char *filename)
 unsigned long *generate_primes_up_to(unsigned long limit, int *count)
 {
     char *sieve = (char *)malloc(limit + 1);
-    if (!sieve) { fprintf(stderr, "Memory allocation failed\n"); exit(1); }
+    if (!sieve)
+    {
+        fprintf(stderr, "Memory allocation failed\n");
+        exit(1);
+    }
 
     memset(sieve, 1, limit + 1);
     sieve[0] = sieve[1] = 0;
@@ -52,14 +62,22 @@ unsigned long *generate_primes_up_to(unsigned long limit, int *count)
 
     *count = 0;
     for (unsigned long i = 2; i <= limit; i++)
-        if (sieve[i]) (*count)++;
+        if (sieve[i])
+            (*count)++;
 
-    unsigned long *primes = (unsigned long *)malloc((size_t)(*count) * sizeof(unsigned long));
-    if (!primes) { fprintf(stderr, "Memory allocation failed\n"); free(sieve); exit(1); }
+    unsigned long *primes = (unsigned long *)malloc(
+        (size_t)(*count) * sizeof(unsigned long));
+    if (!primes)
+    {
+        fprintf(stderr, "Memory allocation failed\n");
+        free(sieve);
+        exit(1);
+    }
 
     int idx = 0;
     for (unsigned long i = 2; i <= limit; i++)
-        if (sieve[i]) primes[idx++] = i;
+        if (sieve[i])
+            primes[idx++] = i;
 
     free(sieve);
     return primes;
@@ -97,8 +115,8 @@ bool compute_cube_root_mod_prime(mpz_t result, const mpz_t value, const mpz_t mo
 // Precomputed cube root table — k16 optimization
 //
 // Instead of computing x^e mod M once for the full challenge, we precompute
-// p^e mod M for each of the 6542 primes up to 2^16.  Then reconstruction is
-// just table lookups + multiplications — no more large exponentiations.
+// p^e mod M for each of the 6542 primes up to 2^16. Then reconstruction is
+// just table lookups + multiplications — no large exponentiations per challenge.
 // ---------------------------------------------------------------------------
 
 void precompute_cbrt_table(mpz_t *cbrt_table, const unsigned long *primes,
@@ -118,7 +136,7 @@ void precompute_cbrt_table(mpz_t *cbrt_table, const unsigned long *primes,
 #endif
     for (int i = 0; i < prime_count; i++)
     {
-        mpz_t prime_mpz;                        // thread-private
+        mpz_t prime_mpz; // thread-private
         mpz_init_set_ui(prime_mpz, primes[i]);
         mpz_init(cbrt_table[i]);
         mpz_powm(cbrt_table[i], prime_mpz, e, modulo);
@@ -131,7 +149,11 @@ void precompute_cbrt_table(mpz_t *cbrt_table, const unsigned long *primes,
 void save_cbrt_table(const mpz_t *cbrt_table, int prime_count, const char *filename)
 {
     FILE *f = fopen(filename, "w");
-    if (!f) { fprintf(stderr, "Error: Cannot write table to %s\n", filename); exit(1); }
+    if (!f)
+    {
+        fprintf(stderr, "Error: Cannot write table to %s\n", filename);
+        exit(1);
+    }
     fprintf(f, "%d\n", prime_count);
     for (int i = 0; i < prime_count; i++)
     {
@@ -145,13 +167,14 @@ void save_cbrt_table(const mpz_t *cbrt_table, int prime_count, const char *filen
 bool load_cbrt_table(mpz_t *cbrt_table, int prime_count, const char *filename)
 {
     FILE *f = fopen(filename, "r");
-    if (!f) return false;   // not yet computed for this modulo
+    if (!f)
+        return false; // not yet computed for this modulo
 
     int stored_count;
     if (fscanf(f, "%d\n", &stored_count) != 1 || stored_count != prime_count)
     {
         fclose(f);
-        return false;       // stale table (different prime set) — recompute
+        return false; // stale table (different prime set) — recompute
     }
 
     for (int i = 0; i < prime_count; i++)
@@ -159,9 +182,10 @@ bool load_cbrt_table(mpz_t *cbrt_table, int prime_count, const char *filename)
         mpz_init(cbrt_table[i]);
         if (mpz_inp_str(cbrt_table[i], f, 10) == 0)
         {
-            // partial read — clear what we initialized and signal failure
-            for (int j = 0; j <= i; j++) mpz_clear(cbrt_table[j]);
-            fclose(f); return false;
+            for (int j = 0; j <= i; j++)
+                mpz_clear(cbrt_table[j]);
+            fclose(f);
+            return false;
         }
     }
     fclose(f);
@@ -175,8 +199,28 @@ bool load_cbrt_table(mpz_t *cbrt_table, int prime_count, const char *filename)
 //   cbrt(challenge) = prod cbrt_table[i]^exponents[i]  mod M
 //
 // Parallelized with OpenMP: each thread accumulates a partial product,
-// which are combined at the end. mpz_mod is deferred until the accumulator
-// exceeds 4× the modulus size to reduce expensive reduction calls.
+// which are combined sequentially at the end.
+//
+// Modular reduction is deferred until the accumulator exceeds 4× the modulus
+// size — reduces the number of expensive mpz_mod calls significantly.
+//
+// ---------------------------------------------------------------------------
+// Note on mpn_powm vs mpz_powm_ui
+//
+// The supervisor suggested investigating mpn_powm — a lower-level GMP function
+// that operates directly on mp_limb_t arrays without the mpz_t wrapper overhead
+// (no internal scratch allocation, no normalization bookkeeping per call).
+//
+// Investigation result: mpn_powm is declared in <gmp-impl.h>, which is an
+// internal GMP header NOT installed with the library (it lives in the GMP
+// build tree only). It is therefore not linkable from user code without
+// patching the GMP installation.
+//
+// Decision: keep mpz_powm_ui for the exponents[i] > 1 case.
+// mpz_powm_ui is the next best option — it takes an unsigned long exponent
+// directly, avoiding the arbitrary-precision exponent path that mpz_powm uses.
+// Since our exponents are always small (at most ~20 for typical challenges),
+// mpz_powm_ui is both correct and the most efficient available public function.
 // ---------------------------------------------------------------------------
 
 void compute_cube_root_from_factors(mpz_t result, const int *exponents,
@@ -202,7 +246,8 @@ void compute_cube_root_from_factors(mpz_t result, const int *exponents,
 #endif
     for (int i = 0; i < prime_count; i++)
     {
-        if (exponents[i] == 0) continue;
+        if (exponents[i] == 0)
+            continue;
 
         int t = 0;
 #ifdef _OPENMP
@@ -211,15 +256,19 @@ void compute_cube_root_from_factors(mpz_t result, const int *exponents,
 
         if (exponents[i] == 1)
         {
-            // most common case — just multiply in the precomputed cube root
+            // most common case — multiply precomputed cube root directly
             mpz_mul(partials[t], partials[t], cbrt_table[i]);
         }
         else
         {
-            // cbrt(p^k) = cbrt(p)^k — one powm call instead of k multiplications
+            // cbrt(p^k) = cbrt(p)^k
+            // mpz_powm_ui takes an unsigned long exponent — avoids the
+            // arbitrary-precision exponent path of mpz_powm, which would be
+            // wasteful since our exponents are tiny (at most ~20)
             mpz_t powered;
             mpz_init(powered);
-            mpz_powm_ui(powered, cbrt_table[i], exponents[i], modulo);
+            mpz_powm_ui(powered, cbrt_table[i],
+                        (unsigned long)exponents[i], modulo);
             mpz_mul(partials[t], partials[t], powered);
             mpz_clear(powered);
         }
@@ -229,7 +278,7 @@ void compute_cube_root_from_factors(mpz_t result, const int *exponents,
             mpz_mod(partials[t], partials[t], modulo);
     }
 
-    // combine partial results sequentially — only nthreads multiplications
+    // combine partial results — only nthreads multiplications
     mpz_set_ui(result, 1);
     for (int t = 0; t < nthreads; t++)
     {
@@ -265,12 +314,12 @@ void verify_cube_root(const mpz_t candidate_cuberoot, const mpz_t challenge_mod,
 
 int count_exponent(const mpz_t n, unsigned long prime)
 {
-    // fast early exit: remainder check via hardware division, no GMP allocation
-    if (mpz_tdiv_ui(n, prime) != 0) return 0;
+    // fast early exit: no GMP allocation if prime doesn't divide n
+    if (mpz_tdiv_ui(n, prime) != 0)
+        return 0;
 
-    // prime divides n — now count exact multiplicity
     mpz_t temp;
-    mpz_init_set(temp, n);   // work on a private copy
+    mpz_init_set(temp, n); // work on a private copy
 
     int exponent = 0;
     while (mpz_divisible_ui_p(temp, prime))
