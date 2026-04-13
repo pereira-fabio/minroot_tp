@@ -45,6 +45,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <math.h>
 #include <chrono>
 
 #ifdef _OPENMP
@@ -412,15 +413,23 @@ static void trial_divide_table(const mpz_t challenge,
 // Local cube root reconstruction — called by EVERY rank
 //
 // Computes  partial = ∏ cbrt(p_i)^e_i  mod M  for this rank's local factors.
-// e = 3^-1 mod (M-1) is precomputed once on each rank (same M, same e).
+// e = 3^-1 mod (M-1) is precomputed once per solve_one call (same M → same e
+// on every rank) and passed in.
 //
-// For a 1024-bit challenge with 8 ranks each rank has ~4 factors on average,
-// so no OpenMP is needed here — the parallelism comes from all ranks running
-// simultaneously.
+// Parallelism model (two levels):
+//   MPI level:   all ranks run this function simultaneously, each with its
+//                own subset of factors (~total_factors / nranks powm calls).
+//   OpenMP level: the powm calls within one rank are independent — safe to
+//                 parallelize across the rank's threads.
+//
+// Why OpenMP matters here:
+//   For large challenges each powm operates on a ~N-bit modulus.
+//   Without threading: 104 sequential powm calls on a 7019-bit modulus
+//   takes ~9.6 s (observed). With 32 OMP threads: ~104/32 ≈ 4 calls per
+//   thread → expected ~300-400 ms.
 //
 // The results from all ranks are gathered and multiplied at rank 0, giving
-//   cbrt(challenge) = ∏_r partial_r  mod M
-// by the cbrt homomorphism.
+//   cbrt(challenge) = ∏_r partial_r  mod M   (cbrt homomorphism).
 // ---------------------------------------------------------------------------
 
 static void compute_local_cbrt(mpz_t result,
@@ -428,29 +437,67 @@ static void compute_local_cbrt(mpz_t result,
                                const mpz_t e, // 3^-1 mod (M-1)
                                const mpz_t modulo)
 {
-    mpz_set_ui(result, 1);
-    for (int i = 0; i < factors->count; i++)
-    {
-        mpz_t p, cbrt_p, powered;
-        mpz_inits(p, cbrt_p, powered, NULL);
+    int n = factors->count;
 
+    // Empty factor list → this rank contributes the identity element 1.
+    if (n == 0)
+    {
+        mpz_set_ui(result, 1);
+        return;
+    }
+
+    // Allocate one mpz_t per factor — each thread writes its own slot.
+    mpz_t *parts = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
+    for (int i = 0; i < n; i++)
+        mpz_init_set_ui(parts[i], 1);
+
+    // All powm calls are independent — parallelize across OMP threads.
+    // Each thread allocates its own GMP temporaries (thread-private).
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (int i = 0; i < n; i++)
+    {
+        mpz_t p, cbrt_p;
+        mpz_inits(p, cbrt_p, NULL);
         mpz_set_ui(p, (unsigned long)factors->items[i].prime);
         mpz_powm(cbrt_p, p, e, modulo); // cbrt(p) = p^e mod M
 
         if (factors->items[i].exponent == 1)
         {
-            mpz_mul(result, result, cbrt_p);
+            mpz_set(parts[i], cbrt_p);
         }
         else
         {
-            // cbrt(p^k) = cbrt(p)^k
-            mpz_powm_ui(powered, cbrt_p,
+            // cbrt(p^k) = cbrt(p)^k — one additional powm_ui per repeated factor
+            mpz_powm_ui(parts[i], cbrt_p,
                         (unsigned long)factors->items[i].exponent, modulo);
-            mpz_mul(result, result, powered);
         }
-        mpz_mod(result, result, modulo);
-        mpz_clears(p, cbrt_p, powered, NULL);
+        mpz_clears(p, cbrt_p, NULL);
     }
+
+    // Combine partial products sequentially (only n multiplications).
+    mpz_set_ui(result, 1);
+    for (int i = 0; i < n; i++)
+    {
+        mpz_mul(result, result, parts[i]);
+        mpz_mod(result, result, modulo);
+        mpz_clear(parts[i]);
+    }
+    free(parts);
+}
+
+// ---------------------------------------------------------------------------
+// Timing report helper — Bessel-corrected sample stddev
+// ---------------------------------------------------------------------------
+
+static void print_stat(const char *label, double sum, double sumsq, int n)
+{
+    double mean = sum / n;
+    double stddev = (n > 1)
+                        ? sqrt((sumsq - sum * sum / n) / (n - 1))
+                        : 0.0;
+    printf("    %-30s avg=%9.3f ms   stddev=%7.3f ms\n", label, mean, stddev);
 }
 
 // ---------------------------------------------------------------------------
@@ -597,11 +644,16 @@ static int solve_one(
     mpz_invert(e_inv, three_mpz, phi);
     mpz_clears(phi, three_mpz, NULL);
 
-    // Timing accumulators (rank 0 records all; max_local via MPI_Reduce)
+    // Timing accumulators (rank 0 records all; max_local via MPI_Reduce).
+    // recon_{sum,sq} track the per-iteration reconstruction total directly
+    // (loc + gat + com per run) so that stddev is computed correctly.
+    // Summing the squares of individual phases gives the wrong variance.
     double fac_sum = 0, fac_sq = 0;
     double loc_sum = 0, loc_sq = 0; // max local cbrt across ranks
     double gat_sum = 0, gat_sq = 0;
     double com_sum = 0, com_sq = 0;
+    double recon_sum = 0, recon_sq = 0; // per-iteration (loc+gat+com)
+    double cur_max_loc = 0.0;           // carried across steps within one iteration
 
     // ---- Benchmark loop ----
 
@@ -610,6 +662,8 @@ static int solve_one(
 
         factor_list_t local_factors;
         fl_init(&local_factors);
+        // Per-iteration components at rank 0 — used for correct recon stddev
+        double iter_gat = 0.0, iter_com = 0.0;
 
         // ---- FACTORING ----
         MPI_Barrier(MPI_COMM_WORLD);
@@ -662,6 +716,7 @@ static int solve_one(
         {
             loc_sum += max_local_dt;
             loc_sq += max_local_dt * max_local_dt;
+            cur_max_loc = max_local_dt; // save for recon accumulation below
         }
 
         // Barrier so gather time measures only MPI communication, not waiting
@@ -702,6 +757,7 @@ static int solve_one(
             double dt = std::chrono::duration<double, std::milli>(t_gat1 - t_gat0).count();
             gat_sum += dt;
             gat_sq += dt * dt;
+            iter_gat = dt;
         }
 
         // Step 4 — rank 0 multiplies the nranks partial results together.
@@ -727,6 +783,16 @@ static int solve_one(
             double dt = std::chrono::duration<double, std::milli>(t_com1 - t_com0).count();
             com_sum += dt;
             com_sq += dt * dt;
+            iter_com = dt;
+        }
+
+        // Per-iteration reconstruction total — rank 0 only.
+        // Must be accumulated AFTER both gather and combine are recorded.
+        if (rank == 0)
+        {
+            double recon_dt = cur_max_loc + iter_gat + iter_com;
+            recon_sum += recon_dt;
+            recon_sq += recon_dt * recon_dt;
         }
 
         fl_free(&local_factors);
@@ -749,26 +815,13 @@ static int solve_one(
         else
         {
             printf("Results over %d runs:\n", bench_count);
-            print_timing_stat_moments("Factoring:",
-                                      fac_sum, fac_sq, bench_count,
-                                      30, true);
-            print_timing_stat_moments("Local cbrt (max):",
-                                      loc_sum, loc_sq, bench_count,
-                                      30, true);
-            print_timing_stat_moments("Gather:",
-                                      gat_sum, gat_sq, bench_count,
-                                      30, true);
-            print_timing_stat_moments("Combine (rank 0):",
-                                      com_sum, com_sq, bench_count,
-                                      30, true);
-            double recon_sum = loc_sum + gat_sum + com_sum;
-            double recon_sq = loc_sq + gat_sq + com_sq; // approx (correlation ignored)
-            print_timing_stat_moments("Reconstruction total:",
-                                      recon_sum, recon_sq, bench_count,
-                                      30, true);
-            double total_sum = fac_sum + recon_sum;
-            print_timing_total("Total:", total_sum / bench_count,
-                               30, NULL);
+            print_stat("Factoring:", fac_sum, fac_sq, bench_count);
+            print_stat("Local cbrt (max):", loc_sum, loc_sq, bench_count);
+            print_stat("Gather:", gat_sum, gat_sq, bench_count);
+            print_stat("Combine (rank 0):", com_sum, com_sq, bench_count);
+            print_stat("Reconstruction total:", recon_sum, recon_sq, bench_count);
+            printf("    %-30s avg=%9.3f ms\n", "Total:",
+                   (fac_sum + recon_sum) / bench_count);
         }
 
         // Verify
