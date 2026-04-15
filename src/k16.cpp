@@ -21,7 +21,7 @@
 //   --method powm                  — naive Fermat baseline (one powm on challenge)
 //   --method powm-recon            — factor first, then time reconstruction using
 //                                    one sequential mpz_powm per factor (no OMP)
-//                                    isolates raw powm cost 
+//                                    isolates raw powm cost
 //
 // Benchmarking:
 //   --bench N   runs N iterations, reports mean ± standard deviation
@@ -110,7 +110,8 @@ int main(int argc, char *argv[])
     {
         METHOD_FACTOR,
         METHOD_POWM,
-        METHOD_POWM_RECON
+        METHOD_POWM_RECON,
+        METHOD_COMPARE // runs all three and prints full comparison table
     };
 
     const char *challenge_file = "data/challenges/k16/challenge_2_16_2048.txt";
@@ -120,7 +121,7 @@ int main(int argc, char *argv[])
 
     // -------------------------------------------------------------------------
     // Argument parsing
-    //   <challenge_file> <modulo_file> [--method factor|powm|powm-recon]
+    //   <challenge_file> <modulo_file> [--method factor|powm|powm-recon|compare]
     //                                  [--bench N]
     // -------------------------------------------------------------------------
     int positional_index = 0;
@@ -139,10 +140,12 @@ int main(int argc, char *argv[])
                 method = METHOD_POWM;
             else if (strcmp(argv[argi + 1], "powm-recon") == 0)
                 method = METHOD_POWM_RECON;
+            else if (strcmp(argv[argi + 1], "compare") == 0)
+                method = METHOD_COMPARE;
             else
             {
                 fprintf(stderr, "Error: Invalid --method '%s' "
-                                "(use factor, powm, or powm-recon)\n",
+                                "(use factor, powm, powm-recon, or compare)\n",
                         argv[argi + 1]);
                 return 1;
             }
@@ -177,6 +180,7 @@ int main(int argc, char *argv[])
     printf("Modulo:    %s\n", modulo_file);
     printf("Method:    %s\n",
            method == METHOD_POWM ? "powm" : method == METHOD_POWM_RECON ? "powm-recon"
+                                        : method == METHOD_COMPARE      ? "compare"
                                                                         : "factor");
     if (bench_count > 1)
         printf("Bench:     %d runs\n", bench_count);
@@ -210,6 +214,9 @@ int main(int argc, char *argv[])
     // Computes challenge^e mod M where e = 3^-1 mod (M-1).
     // Cost: O(log M) squarings on the full challenge — no factorization.
     // Used only to measure the "without parallelism" reference time.
+    //
+    // For METHOD_COMPARE this block is skipped here and run later as part of
+    // the unified compare loop so all methods share the same bench structure.
     // =========================================================================
     if (method == METHOD_POWM)
     {
@@ -238,9 +245,10 @@ int main(int argc, char *argv[])
     //     a lower-level powm (e.g. mpn_powm) would be worth pursuing.
     //     See k_common.cpp for why mpn_powm is not used.
     // =========================================================================
-    else
+    if (method == METHOD_FACTOR || method == METHOD_POWM_RECON || method == METHOD_COMPARE)
     {
-        printf("\nComputing cube root using factorization...\n");
+        if (method != METHOD_COMPARE)
+            printf("\nComputing cube root using factorization...\n");
 
         // -----------------------------------------------------------------------
         // Step 1: load or build prime list and cbrt table
@@ -307,6 +315,9 @@ int main(int argc, char *argv[])
         // -----------------------------------------------------------------------
         double *factor_times = (double *)malloc((size_t)bench_count * sizeof(double));
         double *root_times = (double *)malloc((size_t)bench_count * sizeof(double));
+        // table_recon_times: used only in compare mode to store the parallel
+        // table-lookup reconstruction time separately from powm-recon times.
+        double *table_recon_times = (double *)malloc((size_t)bench_count * sizeof(double));
         int last_total_factors = 0;
 
         for (int bench = 0; bench < bench_count; bench++)
@@ -394,7 +405,7 @@ int main(int argc, char *argv[])
             {
                 auto root_start = std::chrono::high_resolution_clock::now();
 
-                if (method == METHOD_POWM_RECON)
+                if (method == METHOD_POWM_RECON || method == METHOD_COMPARE)
                 {
                     // ---------------------------------------------------------------
                     // Sequential powm-per-factor — no parallelism, no table
@@ -449,9 +460,28 @@ int main(int argc, char *argv[])
                                                    prime_count, modulo);
                 }
 
-                root_times[bench] = std::chrono::duration<double, std::milli>(
-                                        std::chrono::high_resolution_clock::now() - root_start)
-                                        .count();
+                double recon_elapsed = std::chrono::duration<double, std::milli>(
+                                           std::chrono::high_resolution_clock::now() - root_start)
+                                           .count();
+
+                if (method == METHOD_COMPARE)
+                {
+                    // In compare mode root_start was measuring powm-recon above.
+                    // We now need to time the table-lookup path separately.
+                    auto tbl_start = std::chrono::high_resolution_clock::now();
+                    compute_cube_root_from_factors(result, exponents, cbrt_table,
+                                                   prime_count, modulo);
+                    table_recon_times[bench] = std::chrono::duration<double, std::milli>(
+                                                   std::chrono::high_resolution_clock::now() - tbl_start)
+                                                   .count();
+                    // root_times holds the powm-recon time recorded above
+                    root_times[bench] = recon_elapsed;
+                }
+                else
+                {
+                    root_times[bench] = recon_elapsed;
+                    table_recon_times[bench] = 0.0;
+                }
             }
             else
             {
@@ -467,7 +497,101 @@ int main(int argc, char *argv[])
         // -----------------------------------------------------------------------
         // Report: mean ± standard deviation
         // -----------------------------------------------------------------------
-        if (bench_count == 1)
+
+        double f_sum = 0.0, r_sum = 0.0;
+        double f_sumsq = 0.0, r_sumsq = 0.0;
+        for (int i = 0; i < bench_count; i++)
+        {
+            f_sum += factor_times[i];
+            r_sum += root_times[i];
+            f_sumsq += factor_times[i] * factor_times[i];
+            r_sumsq += root_times[i] * root_times[i];
+        }
+
+        if (method == METHOD_COMPARE)
+        {
+            // root_times[]        = powm-recon reconstruction times (row 3)
+            // table_recon_times[] = parallel table-lookup recon times (row 2)
+            double tr_sum = 0.0, tr_sumsq = 0.0;
+            for (int i = 0; i < bench_count; i++)
+            {
+                tr_sum += table_recon_times[i];
+                tr_sumsq += table_recon_times[i] * table_recon_times[i];
+            }
+
+            printf("\n=== Comparison: all methods over %d run(s) ===\n\n", bench_count);
+
+            // Row 1 — sequential powm: challenge^e mod M, one call, no parallelism
+            printf("  [1] ");
+            double powm_avg = run_powm_baseline(result, challenge, modulo,
+                                                bench_count, 30);
+
+            // Row 2 — factor: factoring + parallel table-lookup reconstruction
+            {
+                double f_avg = f_sum / bench_count;
+                double tr_avg = tr_sum / bench_count;
+                double f_sd = compute_stddev_from_moments(f_sum, f_sumsq,
+                                                          bench_count, true);
+                double tr_sd = compute_stddev_from_moments(tr_sum, tr_sumsq,
+                                                           bench_count, true);
+                double tot_sd = compute_stddev_from_moments(f_sum + tr_sum,
+                                                            f_sumsq + tr_sumsq, bench_count, true);
+                printf("  [2] %-30s avg=%9.3f ms   stddev=%7.3f ms\n",
+                       "factor (parallel recon):", f_avg + tr_avg, tot_sd);
+                printf("       %-29s factoring: %.3f+/-%.3f ms   recon: %.3f+/-%.3f ms\n",
+                       "", f_avg, f_sd, tr_avg, tr_sd);
+            }
+
+            // Row 3 — powm-recon: same factoring + one sequential powm per factor
+            {
+                double f_avg = f_sum / bench_count;
+                double pr_avg = r_sum / bench_count;
+                double f_sd = compute_stddev_from_moments(f_sum, f_sumsq,
+                                                          bench_count, true);
+                double pr_sd = compute_stddev_from_moments(r_sum, r_sumsq,
+                                                           bench_count, true);
+                double tot_sd = compute_stddev_from_moments(f_sum + r_sum,
+                                                            f_sumsq + r_sumsq, bench_count, true);
+                printf("  [3] %-30s avg=%9.3f ms   stddev=%7.3f ms\n",
+                       "powm-recon (seq per factor):", f_avg + pr_avg, tot_sd);
+                printf("       %-29s factoring: %.3f+/-%.3f ms   recon: %.3f+/-%.3f ms\n",
+                       "", f_avg, f_sd, pr_avg, pr_sd);
+            }
+
+            double tr_recon_avg = tr_sum / bench_count;
+            double pr_recon_avg = r_sum / bench_count;
+            double f2_total_avg = (f_sum + tr_sum) / bench_count;
+            double f3_total_avg = (f_sum + r_sum) / bench_count;
+
+            printf("\n--- Speedup vs sequential powm [1] ---\n");
+            printf("  [1] vs [2] total:               %.2fx  "
+                   "(end-to-end: factoring + parallel recon)\n",
+                   f2_total_avg > 0 ? powm_avg / f2_total_avg : 0.0);
+            printf("  [1] vs [2] recon only:          %.2fx  "
+                   "<-- key number: Algorithm 2 reconstruction speedup\n",
+                   tr_recon_avg > 0 ? powm_avg / tr_recon_avg : 0.0);
+            printf("  [1] vs [3] total:               %.2fx  "
+                   "(sequential powm per factor, no table)\n",
+                   f3_total_avg > 0 ? powm_avg / f3_total_avg : 0.0);
+            printf("  [1] vs [3] recon only:          %.2fx  "
+                   "(per-factor sequential powm vs full-challenge powm)\n",
+                   pr_recon_avg > 0 ? powm_avg / pr_recon_avg : 0.0);
+            printf("  [2] vs [3] recon only:          %.2fx  "
+                   "(table lookup vs on-the-fly powm per factor)\n",
+                   tr_recon_avg > 0 && pr_recon_avg > 0
+                       ? pr_recon_avg / tr_recon_avg
+                       : 0.0);
+
+            printf("\nNote:\n"
+                   "  '[1] vs [2] recon only' is the number your supervisor wants.\n"
+                   "  It compares N parallel independent powm(p_i,e,M) calls\n"
+                   "  against one sequential powm(challenge,e,M) of the same depth.\n"
+                   "  This is exactly Algorithm 2 of Biryukov et al. CRYPTO 2024.\n"
+                   "  '[2] vs [3]' shows the extra gain from the precomputed table:\n"
+                   "  cbrt(q) is computed once and looked up rather than recomputed\n"
+                   "  per solve call.\n");
+        }
+        else if (bench_count == 1)
         {
             printf("Fully factored into %d factors in %.3f ms\n",
                    last_total_factors, factor_times[0]);
@@ -476,18 +600,9 @@ int main(int argc, char *argv[])
         }
         else
         {
-            double f_sum = 0.0, r_sum = 0.0;
-            double f_sumsq = 0.0, r_sumsq = 0.0;
-            for (int i = 0; i < bench_count; i++)
-            {
-                f_sum += factor_times[i];
-                r_sum += root_times[i];
-                f_sumsq += factor_times[i] * factor_times[i];
-                r_sumsq += root_times[i] * root_times[i];
-            }
-
             printf("\n=== Results over %d run(s) ===\n", bench_count);
-            printf("\nFACTOR method:\n");
+            printf("\n%s method:\n",
+                   method == METHOD_POWM_RECON ? "POWM-RECON" : "FACTOR");
             print_timing_stat_moments("Factoring:",
                                       f_sum, f_sumsq, bench_count,
                                       26, false);
@@ -501,6 +616,7 @@ int main(int argc, char *argv[])
 
         free(factor_times);
         free(root_times);
+        free(table_recon_times);
     }
 
     // ---- Verify ----

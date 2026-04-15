@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <chrono>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -394,4 +395,66 @@ void print_timing_total(const char *label, double mean,
     {
         printf("    %-*s avg=%9.3f ms\n", label_width, label, mean);
     }
+}
+
+// Computes y = (c * r^3) mod M
+void blind_challenge(mpz_t y, const mpz_t challenge, const mpz_t r, const mpz_t modulo)
+{
+    mpz_t r3;
+    mpz_init(r3);
+    mpz_powm_ui(r3, r, 3, modulo); // r^3 mod M
+    mpz_mul(y, challenge, r3);     // c * r^3
+    mpz_mod(y, y, modulo);         // (c * r^3) mod M
+    mpz_clear(r3);
+}
+
+// Computes result = (y_root * r^-1) mod M
+void unblind_root(mpz_t result, const mpz_t y_root, const mpz_t r, const mpz_t modulo)
+{
+    mpz_t r_inv;
+    mpz_init(r_inv);
+    if (mpz_invert(r_inv, r, modulo))
+    { // r^-1 mod M
+        mpz_mul(result, y_root, r_inv);
+        mpz_mod(result, result, modulo);
+    }
+    mpz_clear(r_inv);
+}
+
+// ---------------------------------------------------------------------------
+// Sequential powm baseline
+// ---------------------------------------------------------------------------
+
+double run_powm_baseline(mpz_t result, const mpz_t challenge,
+                         const mpz_t modulo, int bench_count,
+                         int label_width)
+{
+    // e = 3^-1 mod (M-1): computed once, same for every iteration
+    mpz_t e, phi, three;
+    mpz_inits(e, phi, three, NULL);
+    mpz_sub_ui(phi, modulo, 1);
+    mpz_set_ui(three, 3);
+    mpz_invert(e, three, phi);
+    mpz_clears(phi, three, NULL);
+
+    double sum = 0.0, sumsq = 0.0;
+
+    for (int i = 0; i < bench_count; i++)
+    {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        // Single sequential modular exponentiation — the VDF "sequential" step.
+        // mpz_powm uses Montgomery modular multiplication internally; each
+        // squaring depends on the previous one so this cannot be parallelised.
+        mpz_powm(result, challenge, e, modulo);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        sum += dt;
+        sumsq += dt * dt;
+    }
+
+    mpz_clear(e);
+
+    print_timing_stat_moments("powm (sequential baseline):",
+                              sum, sumsq, bench_count, label_width, true);
+    return (bench_count > 0) ? sum / bench_count : 0.0;
 }

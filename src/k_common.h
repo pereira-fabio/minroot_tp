@@ -123,3 +123,23 @@ void print_timing_stat_moments(const char *label,
 // If extra_text is non-null/non-empty, it is appended after the avg.
 void print_timing_total(const char *label, double mean,
                         int label_width, const char *extra_text);
+
+void blind_challenge(mpz_t y, const mpz_t challenge, const mpz_t r, const mpz_t modulo);
+void unblind_root(mpz_t result, const mpz_t y_root, const mpz_t r, const mpz_t modulo);
+
+// ---------------------------------------------------------------------------
+// Sequential powm baseline — the comparison target for all parallel solvers
+// ---------------------------------------------------------------------------
+
+// Compute challenge^e mod modulo sequentially for bench_count iterations,
+// where e = 3^-1 mod (modulo-1).  This is the O(log M) squaring baseline:
+// every squaring depends on the previous one so it cannot be parallelised.
+// In the VDF context this is exactly what the ASIC executes each round.
+//
+// Prints one timing line using print_timing_stat_moments, then returns the
+// average time in ms so callers can compute speedup ratios.
+//
+// result receives the last computed cube root (can be used for verification).
+double run_powm_baseline(mpz_t result, const mpz_t challenge,
+                         const mpz_t modulo, int bench_count,
+                         int label_width);

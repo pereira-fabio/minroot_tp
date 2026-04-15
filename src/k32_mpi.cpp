@@ -63,7 +63,8 @@
 typedef enum
 {
     METHOD_SIEVE,
-    METHOD_TABLE
+    METHOD_TABLE,
+    METHOD_COMPARE // sieve (distributed) + sequential powm on rank 0 for comparison
 } run_method_t;
 
 // ---------------------------------------------------------------------------
@@ -824,6 +825,39 @@ static int solve_one(
                    (fac_sum + recon_sum) / bench_count);
         }
 
+        // ---- Sequential powm baseline + speedup (compare mode only) ----
+        // Runs on rank 0 only after the distributed solve, so it does not
+        // pollute the distributed timing. MPI is not involved — this is
+        // a plain sequential benchmark of challenge^e mod M.
+        if (method == METHOD_COMPARE)
+        {
+            printf("\n--- Sequential powm baseline (rank 0, %d threads unused) ---\n",
+#ifdef _OPENMP
+                   omp_get_max_threads());
+#else
+                   0);
+#endif
+            mpz_t powm_result;
+            mpz_init(powm_result);
+            double powm_avg = run_powm_baseline(powm_result, challenge, modulo,
+                                                bench_count, 30);
+            mpz_clear(powm_result);
+
+            double recon_avg = recon_sum / bench_count;
+            double total_avg = (fac_sum + recon_sum) / bench_count;
+
+            printf("\n--- Speedup vs sequential powm ---\n");
+            printf("  powm vs reconstruction only:  %.2fx  "
+                   "(parallel cbrt, no factoring cost)\n",
+                   recon_avg > 0 ? powm_avg / recon_avg : 0.0);
+            printf("  powm vs total (factor+recon): %.2fx  "
+                   "(end-to-end latency)\n",
+                   total_avg > 0 ? powm_avg / total_avg : 0.0);
+            printf("\nNote: 'recon only' is the most direct comparison to the paper's\n"
+                   "      Algorithm 2 speedup claim. Total includes factoring overhead\n"
+                   "      which the paper treats as separate precomputation cost.\n");
+        }
+
         // Verify
         mpz_t challenge_mod;
         mpz_init(challenge_mod);
@@ -891,6 +925,8 @@ int main(int argc, char *argv[])
                 method = METHOD_SIEVE;
             else if (strcmp(m, "table") == 0)
                 method = METHOD_TABLE;
+            else if (strcmp(m, "compare") == 0)
+                method = METHOD_COMPARE;
             else
             {
                 if (rank == 0)
@@ -956,7 +992,8 @@ int main(int argc, char *argv[])
         printf("Total workers:  %d\n", nranks * omp_get_max_threads());
 #endif
         printf("Method:         %s\n",
-               method == METHOD_SIEVE ? "sieve" : "table");
+               method == METHOD_SIEVE ? "sieve" : method == METHOD_TABLE ? "table"
+                                                                         : "compare");
         if (bench_count > 1)
             printf("Benchmark runs: %d\n", bench_count);
         if (run_all)

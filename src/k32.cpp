@@ -34,6 +34,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include <cmath>
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -733,6 +734,8 @@ int main(int argc, char *argv[])
 
     // ---- Timing accumulators ----
 
+    // powm sequential baseline
+    double p_sum = 0, p_sq = 0;
     // sieve path
     double s_fac_sum = 0, s_fac_sq = 0;
     double s_rec_sum = 0, s_rec_sq = 0;
@@ -745,7 +748,26 @@ int main(int argc, char *argv[])
     for (int bench = 0; bench < bench_count; bench++)
     {
 
-        // ---- SIEVE ----
+        // ---- POWM sequential baseline (compare mode only) ----
+        // Single mpz_powm(challenge, e, M) — the unparallelisable VDF baseline.
+        // Timed here so it shares identical loop structure with sieve/table.
+        if (method == METHOD_COMPARE)
+        {
+            mpz_t powm_result, e, phi, three;
+            mpz_inits(powm_result, e, phi, three, NULL);
+            mpz_sub_ui(phi, modulo, 1);
+            mpz_set_ui(three, 3);
+            mpz_invert(e, three, phi);
+
+            auto t0 = std::chrono::high_resolution_clock::now();
+            mpz_powm(powm_result, challenge, e, modulo);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            p_sum += dt;
+            p_sq += dt * dt;
+
+            mpz_clears(powm_result, e, phi, three, NULL);
+        }
         if (method == METHOD_SIEVE || method == METHOD_COMPARE)
         {
             found_factors_t found;
@@ -828,46 +850,108 @@ int main(int argc, char *argv[])
     // ---- Report ----
     printf("\n=== Results over %d run(s) ===\n", bench_count);
 
-    if (method == METHOD_SIEVE || method == METHOD_COMPARE)
-    {
-        printf("\nSIEVE method:\n");
-        print_timing_stat_moments("Factoring:",
-                                  s_fac_sum, s_fac_sq, bench_count,
-                                  26, true);
-        print_timing_stat_moments("Reconstruction:",
-                                  s_rec_sum, s_rec_sq, bench_count,
-                                  26, true);
-        print_timing_total("Total:",
-                           (s_fac_sum + s_rec_sum) / bench_count,
-                           26, NULL);
-    }
-
-    if (method == METHOD_TABLE || method == METHOD_COMPARE)
-    {
-        double amortised = table_load_ms / bench_count;
-         char total_extra[64];
-         snprintf(total_extra, sizeof(total_extra),
-               "(+ %.1f ms amortised load)", amortised);
-        printf("\nTABLE method  (table load %.1f ms, amortised %.1f ms/run):\n",
-               table_load_ms, amortised);
-         print_timing_stat_moments("Factoring:",
-                          t_fac_sum, t_fac_sq, bench_count,
-                          26, true);
-         print_timing_stat_moments("Reconstruction:",
-                          t_rec_sum, t_rec_sq, bench_count,
-                          26, true);
-         print_timing_total("Total:",
-                      (t_fac_sum + t_rec_sum) / bench_count,
-                      26, total_extra);
-    }
-
     if (method == METHOD_COMPARE)
     {
-        printf("\nSpeedup (sieve factoring / table factoring): %.2f×\n",
-               t_fac_sum > 0 ? s_fac_sum / t_fac_sum : 0.0);
-        printf("Note: table speedup is only meaningful for bench_count >> 1\n"
-               "      because the %zu-MB load cost is amortised over all runs.\n",
-               (size_t)(16 + (uint64_t)prime_table_count * 4) / (1024 * 1024));
+        printf("\n%-28s  %s\n", "", "avg (ms)   stddev (ms)");
+        printf("%-28s  %s\n", "Method", "----------   ----------");
+
+        // powm baseline row
+        {
+            double mean = p_sum / bench_count;
+            double stddev = (bench_count > 1)
+                                ? sqrt((p_sq - p_sum * p_sum / bench_count) / (bench_count - 1))
+                                : 0.0;
+            printf("  %-26s  %9.3f      %7.3f\n",
+                   "powm (sequential):", mean, stddev);
+        }
+
+        // sieve total row
+        {
+            double s_tot = s_fac_sum + s_rec_sum;
+            double s_tot_sq = 0; // approx — printed separately below
+            (void)s_tot_sq;
+            double mean = s_tot / bench_count;
+            double f_mean = s_fac_sum / bench_count;
+            double r_mean = s_rec_sum / bench_count;
+            double f_sd = (bench_count > 1)
+                              ? sqrt((s_fac_sq - s_fac_sum * s_fac_sum / bench_count) / (bench_count - 1))
+                              : 0.0;
+            double r_sd = (bench_count > 1)
+                              ? sqrt((s_rec_sq - s_rec_sum * s_rec_sum / bench_count) / (bench_count - 1))
+                              : 0.0;
+            printf("  %-26s  %9.3f   (factor: %.3f±%.3f  recon: %.3f±%.3f)\n",
+                   "sieve (parallel total):", mean, f_mean, f_sd, r_mean, r_sd);
+        }
+
+        // table total row
+        {
+            double t_tot = t_fac_sum + t_rec_sum;
+            double mean = t_tot / bench_count;
+            double f_mean = t_fac_sum / bench_count;
+            double r_mean = t_rec_sum / bench_count;
+            double f_sd = (bench_count > 1)
+                              ? sqrt((t_fac_sq - t_fac_sum * t_fac_sum / bench_count) / (bench_count - 1))
+                              : 0.0;
+            double r_sd = (bench_count > 1)
+                              ? sqrt((t_rec_sq - t_rec_sum * t_rec_sum / bench_count) / (bench_count - 1))
+                              : 0.0;
+            double amortised = table_load_ms / bench_count;
+            printf("  %-26s  %9.3f   (factor: %.3f±%.3f  recon: %.3f±%.3f  +%.1f ms load)\n",
+                   "table (parallel total):", mean, f_mean, f_sd, r_mean, r_sd, amortised);
+        }
+
+        double p_avg = p_sum / bench_count;
+        double s_avg = (s_fac_sum + s_rec_sum) / bench_count;
+        double t_avg = (t_fac_sum + t_rec_sum) / bench_count;
+        double s_rec_avg = s_rec_sum / bench_count;
+        double t_rec_avg = t_rec_sum / bench_count;
+
+        printf("\n--- Speedup vs sequential powm ---\n");
+        printf("  powm vs sieve total:         %.2fx\n",
+               s_avg > 0 ? p_avg / s_avg : 0.0);
+        printf("  powm vs sieve recon only:    %.2fx  "
+               "(reconstruction alone, no factoring overhead)\n",
+               s_rec_avg > 0 ? p_avg / s_rec_avg : 0.0);
+        printf("  powm vs table total:         %.2fx\n",
+               t_avg > 0 ? p_avg / t_avg : 0.0);
+        printf("  powm vs table recon only:    %.2fx\n",
+               t_rec_avg > 0 ? p_avg / t_rec_avg : 0.0);
+        printf("  sieve vs table (total):      %.2fx  "
+               "(sieve/table factoring comparison)\n",
+               t_avg > 0 ? s_avg / t_avg : 0.0);
+        printf("\nNote: 'recon only' speedup isolates the parallel powm-per-factor\n"
+               "      reconstruction from the sieve/table factoring overhead.\n"
+               "      This is the number most directly comparable to the paper's\n"
+               "      Algorithm 2 latency claim.\n");
+    }
+    else
+    {
+        if (method == METHOD_SIEVE)
+        {
+            printf("\nSIEVE method:\n");
+            print_timing_stat_moments("Factoring:",
+                                      s_fac_sum, s_fac_sq, bench_count, 26, true);
+            print_timing_stat_moments("Reconstruction:",
+                                      s_rec_sum, s_rec_sq, bench_count, 26, true);
+            print_timing_total("Total:",
+                               (s_fac_sum + s_rec_sum) / bench_count, 26, NULL);
+        }
+
+        if (method == METHOD_TABLE)
+        {
+            double amortised = table_load_ms / bench_count;
+            char total_extra[64];
+            snprintf(total_extra, sizeof(total_extra),
+                     "(+ %.1f ms amortised load)", amortised);
+            printf("\nTABLE method  (table load %.1f ms, amortised %.1f ms/run):\n",
+                   table_load_ms, amortised);
+            print_timing_stat_moments("Factoring:",
+                                      t_fac_sum, t_fac_sq, bench_count, 26, true);
+            print_timing_stat_moments("Reconstruction:",
+                                      t_rec_sum, t_rec_sq, bench_count, 26, true);
+            print_timing_total("Total:",
+                               (t_fac_sum + t_rec_sum) / bench_count, 26, total_extra);
+        }
     }
 
     if (cbrt_cache_dirty)
