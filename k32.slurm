@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=32
 #SBATCH --exclusive
-#SBATCH --time=01:00:00
+#SBATCH --time=01:30:00
 
 module load compiler/GCC/13.2.0
 module load mpi/OpenMPI/4.1.6-GCC-13.2.0
@@ -44,9 +44,9 @@ echo ""
 # ---------------------------------------------------------------------------
 # Section 1 — Sieve method
 #
-# The segmented sieve generates primes on-the-fly during factoring.
-# Each rank sieves its own [my_lo, my_hi] sub-range with a 512 KiB
-# working set that stays in L2 cache. No pre-generated file needed.
+# Segmented sieve generates primes on-the-fly. Each rank sieves its own
+# [my_lo, my_hi] sub-range with a 512 KiB L2-resident working set.
+# No pre-generated file needed.
 # ---------------------------------------------------------------------------
 echo "============================================================"
 echo "SECTION 1: METHOD = SIEVE  ($BENCH runs, all challenge sizes)"
@@ -64,11 +64,8 @@ echo ""
 # ---------------------------------------------------------------------------
 # Section 2 — Prime table generation (one-time, rank 0 only)
 #
-# Generates all ~203 M primes in [65537, 2^32] and writes them to a
-# sorted binary file (~813 MB). Cost: ~10 s. Subsequent runs reuse the
-# file, amortising the I/O over all bench iterations.
-# Each rank will later load only its own slice via binary search,
-# so no rank reads the full 813 MB at query time.
+# ~203 M primes written to a sorted binary file (~813 MB).
+# Each rank later loads only its own slice via binary search.
 # ---------------------------------------------------------------------------
 if [ ! -f "$PRIMES" ]; then
     echo "============================================================"
@@ -89,10 +86,8 @@ fi
 # ---------------------------------------------------------------------------
 # Section 3 — Table method
 #
-# Each rank loads its own prime slice from the pre-built binary file.
-# Trial division iterates a preloaded uint32_t array instead of running
-# the sieve on-the-fly. The working set is larger (~range/nranks × 4 B)
-# but the per-prime cost is lower because sieve marking is skipped.
+# Each rank reads its own prime slice from the pre-built file.
+# Larger working set than sieve but no per-segment marking overhead.
 # ---------------------------------------------------------------------------
 echo "============================================================"
 echo "SECTION 3: METHOD = TABLE  ($BENCH runs, all challenge sizes)"
@@ -104,6 +99,36 @@ srun --mpi=pmix ./k32_mpi \
     --data $DATA \
     --method table \
     --primes $PRIMES \
+    --bench $BENCH
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Section 4 — Compare: distributed sieve + sequential powm baseline
+#
+# --method compare runs the full distributed sieve across all ranks (same
+# as Section 1), then rank 0 runs a plain sequential mpz_powm(challenge, e, M)
+# for the same bench_count iterations with all other ranks idle.
+#
+# This produces the key comparison your supervisor asked for:
+#
+#   "powm vs reconstruction only" — parallel independent powm calls on
+#   small factors vs one sequential powm on the full challenge.
+#   This directly measures the Algorithm 2 speedup (Biryukov et al.).
+#
+# Look for this line in the output:
+#   powm vs reconstruction only:  X.XXx  (parallel cbrt, no factoring cost)
+# ---------------------------------------------------------------------------
+echo "============================================================"
+echo "SECTION 4: METHOD = COMPARE  ($BENCH runs, all challenge sizes)"
+echo "           (distributed sieve + sequential powm baseline on rank 0)"
+echo "============================================================"
+echo ""
+
+srun --mpi=pmix ./k32_mpi \
+    --all \
+    --data $DATA \
+    --method compare \
     --bench $BENCH
 
 echo ""
