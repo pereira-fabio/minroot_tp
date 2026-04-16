@@ -73,7 +73,7 @@ echo "============================================================"
 echo ""
 
 for SIZE in $SIZES; do
-    CHALLENGE=$DATA/challenge_2_16_${SIZE}.txt
+    CHALLENGE=$DATA/challenge_16_${SIZE}.txt
     MODULO=$DATA/modulo_16_${SIZE}.txt
 
     if [ ! -f "$CHALLENGE" ] || [ ! -f "$MODULO" ]; then
@@ -102,7 +102,7 @@ echo "============================================================"
 echo ""
 
 for SIZE in $SIZES; do
-    CHALLENGE=$DATA/challenge_2_16_${SIZE}.txt
+    CHALLENGE=$DATA/challenge_16_${SIZE}.txt
     MODULO=$DATA/modulo_16_${SIZE}.txt
     [ ! -f "$CHALLENGE" ] || [ ! -f "$MODULO" ] && continue
 
@@ -118,7 +118,7 @@ echo "============================================================"
 echo ""
 
 for SIZE in $SIZES; do
-    CHALLENGE=$DATA/challenge_2_16_${SIZE}.txt
+    CHALLENGE=$DATA/challenge_16_${SIZE}.txt
     MODULO=$DATA/modulo_16_${SIZE}.txt
     [ ! -f "$CHALLENGE" ] || [ ! -f "$MODULO" ] && continue
 
@@ -134,7 +134,7 @@ echo "============================================================"
 echo ""
 
 for SIZE in $SIZES; do
-    CHALLENGE=$DATA/challenge_2_16_${SIZE}.txt
+    CHALLENGE=$DATA/challenge_16_${SIZE}.txt
     MODULO=$DATA/modulo_16_${SIZE}.txt
     [ ! -f "$CHALLENGE" ] || [ ! -f "$MODULO" ] && continue
 
