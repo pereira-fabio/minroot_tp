@@ -670,7 +670,7 @@ static int solve_one(
         MPI_Barrier(MPI_COMM_WORLD);
         auto t_fac0 = std::chrono::high_resolution_clock::now();
 
-        if (method == METHOD_SIEVE)
+        if (method == METHOD_SIEVE || method == METHOD_COMPARE)
             trial_divide_sieve(challenge, my_lo, my_hi,
                                sp_count, sp, &local_factors);
         else
