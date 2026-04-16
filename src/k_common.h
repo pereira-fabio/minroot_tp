@@ -143,3 +143,89 @@ void unblind_root(mpz_t result, const mpz_t y_root, const mpz_t r, const mpz_t m
 double run_powm_baseline(mpz_t result, const mpz_t challenge,
                          const mpz_t modulo, int bench_count,
                          int label_width);
+
+// ---------------------------------------------------------------------------
+// Unified factor list — (prime, exponent) pairs with mpz_t primes
+//
+// Using mpz_t for the prime field handles all bit widths (16, 32, 64) without
+// separate struct definitions in each solver file. The overhead versus a plain
+// unsigned long is negligible — mpz_t allocation only happens on append, and
+// the factor count is always small (~N_bits / prime_bits, typically < 200).
+// ---------------------------------------------------------------------------
+
+typedef struct
+{
+    mpz_t prime;
+    int exponent;
+} kfactor_t;
+
+typedef struct
+{
+    kfactor_t *items;
+    int count;
+    int capacity;
+} kfactor_list_t;
+
+// Initialise an empty list (must be called before first use).
+void kfl_init(kfactor_list_t *f);
+
+// Append a (prime, exponent) entry. prime is copied via mpz_init_set.
+// Accepts unsigned long for convenience (k32 path).
+void kfl_append_ul(kfactor_list_t *f, unsigned long prime, int exponent);
+
+// Append from an existing mpz_t (k64 / Pollard's rho path).
+void kfl_append_mpz(kfactor_list_t *f, const mpz_t prime, int exponent);
+
+// Release all mpz_t entries and free the backing array.
+void kfl_free(kfactor_list_t *f);
+
+// ---------------------------------------------------------------------------
+// Solver config — shared CLI state parsed by parse_common_args()
+// ---------------------------------------------------------------------------
+
+typedef struct
+{
+    const char *challenge_file;
+    const char *modulo_file;
+    int bench_count;
+} solver_config_t;
+
+// Parse positional <challenge> <modulo> and --bench N from argv.
+// File defaults are applied before this call; this function overwrites them
+// only when the caller explicitly provides them on the command line.
+// Returns 0 on success, 1 if an unrecognised flag is encountered (caller
+// should then handle it and advance argi past any consumed tokens).
+// Unknown flags are NOT consumed — the caller's loop must handle them.
+int parse_common_args(int argc, char **argv, solver_config_t *cfg,
+                      int *argi_inout);
+
+// ---------------------------------------------------------------------------
+// Timing accumulator — (sum, sum-of-squares) pair
+//
+// Wraps the repetitive  sum += dt; sumsq += dt*dt;  pattern.
+// Use accum_record() inside the bench loop, then print with
+// print_timing_stat_moments(label, a.sum, a.sumsq, n, width, true).
+// ---------------------------------------------------------------------------
+
+typedef struct
+{
+    double sum;
+    double sumsq;
+} bench_accum_t;
+
+static inline void accum_reset(bench_accum_t *a)
+{
+    a->sum = 0.0;
+    a->sumsq = 0.0;
+}
+
+static inline void accum_record(bench_accum_t *a, double dt)
+{
+    a->sum += dt;
+    a->sumsq += dt * dt;
+}
+
+static inline double accum_mean(const bench_accum_t *a, int n)
+{
+    return n > 0 ? a->sum / n : 0.0;
+}

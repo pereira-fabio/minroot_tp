@@ -114,18 +114,20 @@ int main(int argc, char *argv[])
         METHOD_COMPARE // runs all three and prints full comparison table
     };
 
-    const char *challenge_file = "data/challenges/k16/challenge_2_16_2048.txt";
-    const char *modulo_file = "data/challenges/k16/modulo_16_2048.txt";
+    solver_config_t cfg = {
+        "data/challenges/k16/challenge_2_16_2048.txt",
+        "data/challenges/k16/modulo_16_2048.txt",
+        1};
     solver_method_t method = METHOD_FACTOR;
-    int bench_count = 1;
 
     // -------------------------------------------------------------------------
     // Argument parsing
     //   <challenge_file> <modulo_file> [--method factor|powm|powm-recon|compare]
     //                                  [--bench N]
+    // parse_common_args() handles --bench and positional challenge/modulo.
     // -------------------------------------------------------------------------
-    int positional_index = 0;
-    for (int argi = 1; argi < argc; argi++)
+    int argi = 1;
+    while (argi < argc)
     {
         if (strcmp(argv[argi], "--method") == 0)
         {
@@ -149,32 +151,20 @@ int main(int argc, char *argv[])
                         argv[argi + 1]);
                 return 1;
             }
-            argi++;
-            continue;
+            argi += 2;
         }
-
-        if (strcmp(argv[argi], "--bench") == 0)
-        {
-            if (argi + 1 >= argc)
-            {
-                fprintf(stderr, "Error: Missing value for --bench\n");
-                return 1;
-            }
-            bench_count = atoi(argv[++argi]);
-            continue;
-        }
-
-        if (positional_index == 0)
-            challenge_file = argv[argi];
-        else if (positional_index == 1)
-            modulo_file = argv[argi];
         else
         {
-            fprintf(stderr, "Error: Unexpected argument '%s'\n", argv[argi]);
-            return 1;
+            // Delegate --bench and positional args to shared parser
+            if (parse_common_args(argc, argv, &cfg, &argi) != 0)
+                return 1;
         }
-        positional_index++;
     }
+
+    // Unpack config into local names used throughout the rest of main()
+    const char *challenge_file = cfg.challenge_file;
+    const char *modulo_file = cfg.modulo_file;
+    int bench_count = cfg.bench_count;
 
     printf("Challenge: %s\n", challenge_file);
     printf("Modulo:    %s\n", modulo_file);
@@ -311,13 +301,12 @@ int main(int argc, char *argv[])
             NULL, &nbytes, 1, 1, 0, 0, challenge);
 
         // -----------------------------------------------------------------------
-        // Per-run timing arrays — needed for mean + stddev reporting
+        // Per-run timing accumulators — bench_accum_t replaces the old
+        // per-iteration malloc arrays; mean + stddev are computed on-the-fly.
         // -----------------------------------------------------------------------
-        double *factor_times = (double *)malloc((size_t)bench_count * sizeof(double));
-        double *root_times = (double *)malloc((size_t)bench_count * sizeof(double));
-        // table_recon_times: used only in compare mode to store the parallel
-        // table-lookup reconstruction time separately from powm-recon times.
-        double *table_recon_times = (double *)malloc((size_t)bench_count * sizeof(double));
+        bench_accum_t fac_acc = {0, 0};  // factoring (shared by all recon paths)
+        bench_accum_t rec_acc = {0, 0};  // reconstruction (powm-recon path)
+        bench_accum_t trec_acc = {0, 0}; // table-lookup recon (compare mode)
         int last_total_factors = 0;
 
         for (int bench = 0; bench < bench_count; bench++)
@@ -386,9 +375,9 @@ int main(int argc, char *argv[])
                     break; // fully factored
             }
 
-            factor_times[bench] = std::chrono::duration<double, std::milli>(
-                                      std::chrono::high_resolution_clock::now() - factor_start)
-                                      .count();
+            accum_record(&fac_acc, std::chrono::duration<double, std::milli>(
+                                       std::chrono::high_resolution_clock::now() - factor_start)
+                                       .count());
             last_total_factors = total_factors;
 
             if (bench == 0)
@@ -471,21 +460,21 @@ int main(int argc, char *argv[])
                     auto tbl_start = std::chrono::high_resolution_clock::now();
                     compute_cube_root_from_factors(result, exponents, cbrt_table,
                                                    prime_count, modulo);
-                    table_recon_times[bench] = std::chrono::duration<double, std::milli>(
-                                                   std::chrono::high_resolution_clock::now() - tbl_start)
-                                                   .count();
+                    accum_record(&trec_acc, std::chrono::duration<double, std::milli>(
+                                                std::chrono::high_resolution_clock::now() - tbl_start)
+                                                .count());
                     // root_times holds the powm-recon time recorded above
-                    root_times[bench] = recon_elapsed;
+                    accum_record(&rec_acc, recon_elapsed);
                 }
                 else
                 {
-                    root_times[bench] = recon_elapsed;
-                    table_recon_times[bench] = 0.0;
+                    accum_record(&rec_acc, recon_elapsed);
+                    // trec_acc not updated outside compare mode
                 }
             }
             else
             {
-                root_times[bench] = 0.0;
+                // not fully factored — zero contribution
             }
 
             mpz_clear(remaining);
@@ -498,26 +487,17 @@ int main(int argc, char *argv[])
         // Report: mean ± standard deviation
         // -----------------------------------------------------------------------
 
-        double f_sum = 0.0, r_sum = 0.0;
-        double f_sumsq = 0.0, r_sumsq = 0.0;
-        for (int i = 0; i < bench_count; i++)
-        {
-            f_sum += factor_times[i];
-            r_sum += root_times[i];
-            f_sumsq += factor_times[i] * factor_times[i];
-            r_sumsq += root_times[i] * root_times[i];
-        }
+        // Accumulator aliases for the report blocks below.
+        // (bench_accum_t fields: .sum and .sumsq)
+        double f_sum = fac_acc.sum, f_sumsq = fac_acc.sumsq;
+        double r_sum = rec_acc.sum, r_sumsq = rec_acc.sumsq;
 
         if (method == METHOD_COMPARE)
         {
-            // root_times[]        = powm-recon reconstruction times (row 3)
-            // table_recon_times[] = parallel table-lookup recon times (row 2)
-            double tr_sum = 0.0, tr_sumsq = 0.0;
-            for (int i = 0; i < bench_count; i++)
-            {
-                tr_sum += table_recon_times[i];
-                tr_sumsq += table_recon_times[i] * table_recon_times[i];
-            }
+            // rec_acc  = powm-recon reconstruction (row 3)
+            // trec_acc = parallel table-lookup recon (row 2)
+            double tr_sum = trec_acc.sum, tr_sumsq = trec_acc.sumsq;
+            // f_sum / r_sum already set from accumulators above
 
             printf("\n=== Comparison: all methods over %d run(s) ===\n\n", bench_count);
 
@@ -594,9 +574,9 @@ int main(int argc, char *argv[])
         else if (bench_count == 1)
         {
             printf("Fully factored into %d factors in %.3f ms\n",
-                   last_total_factors, factor_times[0]);
-            printf("Cube root recovery time: %.3f ms\n", root_times[0]);
-            printf("Total: %.3f ms\n", factor_times[0] + root_times[0]);
+                   last_total_factors, fac_acc.sum);
+            printf("Cube root recovery time: %.3f ms\n", rec_acc.sum);
+            printf("Total: %.3f ms\n", fac_acc.sum + rec_acc.sum);
         }
         else
         {
@@ -604,19 +584,14 @@ int main(int argc, char *argv[])
             printf("\n%s method:\n",
                    method == METHOD_POWM_RECON ? "POWM-RECON" : "FACTOR");
             print_timing_stat_moments("Factoring:",
-                                      f_sum, f_sumsq, bench_count,
-                                      26, false);
+                                      fac_acc.sum, fac_acc.sumsq, bench_count, 26, true);
             print_timing_stat_moments("Reconstruction:",
-                                      r_sum, r_sumsq, bench_count,
-                                      26, false);
+                                      rec_acc.sum, rec_acc.sumsq, bench_count, 26, true);
             print_timing_total("Total:",
-                               (f_sum + r_sum) / bench_count,
-                               26, NULL);
+                               (fac_acc.sum + rec_acc.sum) / bench_count, 26, NULL);
         }
 
-        free(factor_times);
-        free(root_times);
-        free(table_recon_times);
+        // timing arrays replaced by bench_accum_t — nothing to free
     }
 
     // ---- Verify ----

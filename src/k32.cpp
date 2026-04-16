@@ -52,48 +52,13 @@ typedef enum
 } run_method_t;
 
 // ---------------------------------------------------------------------------
-// Factor list — (prime, exponent) pairs
+// Factor list — provided by k_common.h as kfactor_list_t / kfl_* functions.
 // ---------------------------------------------------------------------------
-
-typedef struct
-{
-    unsigned long prime;
-    int exponent;
-} factor_t;
-typedef struct
-{
-    factor_t *items;
-    int count;
-    int capacity;
-} found_factors_t;
-
-static void ff_init(found_factors_t *f)
-{
-    f->items = NULL;
-    f->count = 0;
-    f->capacity = 0;
-}
-
-static void ff_clear(found_factors_t *f)
-{
-    free(f->items);
-    f->items = NULL;
-    f->count = 0;
-    f->capacity = 0;
-}
-
-static void ff_append(found_factors_t *f, unsigned long p, int e)
-{
-    if (f->count == f->capacity)
-    {
-        int nc = (f->capacity == 0) ? 64 : f->capacity * 2;
-        f->items = (factor_t *)realloc(f->items, (size_t)nc * sizeof(factor_t));
-        f->capacity = nc;
-    }
-    f->items[f->count].prime = p;
-    f->items[f->count].exponent = e;
-    f->count++;
-}
+// Local aliases so the sieve/table functions read naturally.
+#define found_factors_t kfactor_list_t
+#define ff_init kfl_init
+#define ff_clear kfl_free
+#define ff_append(f, p, e) kfl_append_ul(f, (unsigned long)(p), e)
 
 // ---------------------------------------------------------------------------
 // Small prime generator — Sieve of Eratosthenes up to sqrt(2^32) = 65536
@@ -310,7 +275,7 @@ static void trial_divide_sieve(const mpz_t n,
     for (int t = 0; t < nthreads; t++)
     {
         for (int i = 0; i < tf[t].count; i++)
-            ff_append(found, tf[t].items[i].prime, tf[t].items[i].exponent);
+            ff_append(found, mpz_get_ui(tf[t].items[i].prime), tf[t].items[i].exponent);
         ff_clear(&tf[t]);
     }
     free(tf);
@@ -362,7 +327,7 @@ static void trial_divide_table(const mpz_t n,
     for (int t = 0; t < nthreads; t++)
     {
         for (int i = 0; i < tf[t].count; i++)
-            ff_append(found, tf[t].items[i].prime, tf[t].items[i].exponent);
+            ff_append(found, mpz_get_ui(tf[t].items[i].prime), tf[t].items[i].exponent);
         ff_clear(&tf[t]);
     }
     free(tf);
@@ -522,7 +487,7 @@ static void compute_cube_root_from_found(mpz_t result,
 
     for (int i = 0; i < found->count; i++)
     {
-        unsigned long p = found->items[i].prime;
+        unsigned long p = mpz_get_ui(found->items[i].prime);
         int idx = cbrt_cache_find_index(cache, p);
 
         mpz_t cbrt_p;
@@ -735,13 +700,11 @@ int main(int argc, char *argv[])
     // ---- Timing accumulators ----
 
     // powm sequential baseline
-    double p_sum = 0, p_sq = 0;
-    // sieve path
-    double s_fac_sum = 0, s_fac_sq = 0;
-    double s_rec_sum = 0, s_rec_sq = 0;
-    // table path
-    double t_fac_sum = 0, t_fac_sq = 0;
-    double t_rec_sum = 0, t_rec_sq = 0;
+    bench_accum_t p_acc = {0, 0}; // powm sequential baseline
+    bench_accum_t s_fac = {0, 0}; // sieve factoring
+    bench_accum_t s_rec = {0, 0}; // sieve reconstruction
+    bench_accum_t t_fac = {0, 0}; // table factoring
+    bench_accum_t t_rec = {0, 0}; // table reconstruction
 
     // ---- Benchmark loop ----
 
@@ -763,8 +726,7 @@ int main(int argc, char *argv[])
             mpz_powm(powm_result, challenge, e, modulo);
             auto t1 = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            p_sum += dt;
-            p_sq += dt * dt;
+            accum_record(&p_acc, dt);
 
             mpz_clears(powm_result, e, phi, three, NULL);
         }
@@ -778,8 +740,7 @@ int main(int argc, char *argv[])
                                sp_count, sp, &found);
             auto t1 = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            s_fac_sum += dt;
-            s_fac_sq += dt * dt;
+            accum_record(&s_fac, dt);
 
             if (bench == 0)
             {
@@ -788,7 +749,7 @@ int main(int argc, char *argv[])
                 mpz_init_set(rem, challenge);
                 for (int i = 0; i < found.count; i++)
                     for (int e = 0; e < found.items[i].exponent; e++)
-                        mpz_divexact_ui(rem, rem, found.items[i].prime);
+                        mpz_divexact_ui(rem, rem, mpz_get_ui(found.items[i].prime));
                 if (mpz_cmp_ui(rem, 1) != 0)
                     printf("[sieve] WARNING: challenge not fully factored\n");
                 mpz_clear(rem);
@@ -801,8 +762,7 @@ int main(int argc, char *argv[])
                                              &cbrt_cache, &cbrt_cache_dirty);
                 auto t3 = std::chrono::high_resolution_clock::now();
                 double dr = std::chrono::duration<double, std::milli>(t3 - t2).count();
-                s_rec_sum += dr;
-                s_rec_sq += dr * dr;
+                accum_record(&s_rec, dr);
             }
             ff_clear(&found);
         }
@@ -817,8 +777,7 @@ int main(int argc, char *argv[])
             trial_divide_table(challenge, prime_table, prime_table_count, &found);
             auto t1 = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            t_fac_sum += dt;
-            t_fac_sq += dt * dt;
+            accum_record(&t_fac, dt);
 
             if (bench == 0)
             {
@@ -827,7 +786,7 @@ int main(int argc, char *argv[])
                 mpz_init_set(rem, challenge);
                 for (int i = 0; i < found.count; i++)
                     for (int e = 0; e < found.items[i].exponent; e++)
-                        mpz_divexact_ui(rem, rem, found.items[i].prime);
+                        mpz_divexact_ui(rem, rem, mpz_get_ui(found.items[i].prime));
                 if (mpz_cmp_ui(rem, 1) != 0)
                     printf("[table] WARNING: challenge not fully factored\n");
                 mpz_clear(rem);
@@ -840,8 +799,7 @@ int main(int argc, char *argv[])
                                              &cbrt_cache, &cbrt_cache_dirty);
                 auto t3 = std::chrono::high_resolution_clock::now();
                 double dr = std::chrono::duration<double, std::milli>(t3 - t2).count();
-                t_rec_sum += dr;
-                t_rec_sq += dr * dr;
+                accum_record(&t_rec, dr);
             }
             ff_clear(&found);
         }
@@ -857,9 +815,9 @@ int main(int argc, char *argv[])
 
         // powm baseline row
         {
-            double mean = p_sum / bench_count;
+            double mean = accum_mean(&p_acc, bench_count);
             double stddev = (bench_count > 1)
-                                ? sqrt((p_sq - p_sum * p_sum / bench_count) / (bench_count - 1))
+                                ? compute_stddev_from_moments(p_acc.sum, p_acc.sumsq, bench_count, true)
                                 : 0.0;
             printf("  %-26s  %9.3f      %7.3f\n",
                    "powm (sequential):", mean, stddev);
@@ -867,17 +825,17 @@ int main(int argc, char *argv[])
 
         // sieve total row
         {
-            double s_tot = s_fac_sum + s_rec_sum;
+            double s_tot = s_fac.sum + s_rec.sum;
             double s_tot_sq = 0; // approx — printed separately below
             (void)s_tot_sq;
             double mean = s_tot / bench_count;
-            double f_mean = s_fac_sum / bench_count;
-            double r_mean = s_rec_sum / bench_count;
+            double f_mean = accum_mean(&s_fac, bench_count);
+            double r_mean = accum_mean(&s_rec, bench_count);
             double f_sd = (bench_count > 1)
-                              ? sqrt((s_fac_sq - s_fac_sum * s_fac_sum / bench_count) / (bench_count - 1))
+                              ? compute_stddev_from_moments(s_fac.sum, s_fac.sumsq, bench_count, true)
                               : 0.0;
             double r_sd = (bench_count > 1)
-                              ? sqrt((s_rec_sq - s_rec_sum * s_rec_sum / bench_count) / (bench_count - 1))
+                              ? compute_stddev_from_moments(s_rec.sum, s_rec.sumsq, bench_count, true)
                               : 0.0;
             printf("  %-26s  %9.3f   (factor: %.3f±%.3f  recon: %.3f±%.3f)\n",
                    "sieve (parallel total):", mean, f_mean, f_sd, r_mean, r_sd);
@@ -885,26 +843,26 @@ int main(int argc, char *argv[])
 
         // table total row
         {
-            double t_tot = t_fac_sum + t_rec_sum;
+            double t_tot = t_fac.sum + t_rec.sum;
             double mean = t_tot / bench_count;
-            double f_mean = t_fac_sum / bench_count;
-            double r_mean = t_rec_sum / bench_count;
+            double f_mean = accum_mean(&t_fac, bench_count);
+            double r_mean = accum_mean(&t_rec, bench_count);
             double f_sd = (bench_count > 1)
-                              ? sqrt((t_fac_sq - t_fac_sum * t_fac_sum / bench_count) / (bench_count - 1))
+                              ? compute_stddev_from_moments(t_fac.sum, t_fac.sumsq, bench_count, true)
                               : 0.0;
             double r_sd = (bench_count > 1)
-                              ? sqrt((t_rec_sq - t_rec_sum * t_rec_sum / bench_count) / (bench_count - 1))
+                              ? compute_stddev_from_moments(t_rec.sum, t_rec.sumsq, bench_count, true)
                               : 0.0;
             double amortised = table_load_ms / bench_count;
             printf("  %-26s  %9.3f   (factor: %.3f±%.3f  recon: %.3f±%.3f  +%.1f ms load)\n",
                    "table (parallel total):", mean, f_mean, f_sd, r_mean, r_sd, amortised);
         }
 
-        double p_avg = p_sum / bench_count;
-        double s_avg = (s_fac_sum + s_rec_sum) / bench_count;
-        double t_avg = (t_fac_sum + t_rec_sum) / bench_count;
-        double s_rec_avg = s_rec_sum / bench_count;
-        double t_rec_avg = t_rec_sum / bench_count;
+        double p_avg = accum_mean(&p_acc, bench_count);
+        double s_avg = (s_fac.sum + s_rec.sum) / bench_count;
+        double t_avg = (t_fac.sum + t_rec.sum) / bench_count;
+        double s_rec_avg = accum_mean(&s_rec, bench_count);
+        double t_rec_avg = accum_mean(&t_rec, bench_count);
 
         printf("\n--- Speedup vs sequential powm ---\n");
         printf("  powm vs sieve total:         %.2fx\n",
@@ -930,11 +888,11 @@ int main(int argc, char *argv[])
         {
             printf("\nSIEVE method:\n");
             print_timing_stat_moments("Factoring:",
-                                      s_fac_sum, s_fac_sq, bench_count, 26, true);
+                                      s_fac.sum, s_fac.sumsq, bench_count, 26, true);
             print_timing_stat_moments("Reconstruction:",
-                                      s_rec_sum, s_rec_sq, bench_count, 26, true);
+                                      s_rec.sum, s_rec.sumsq, bench_count, 26, true);
             print_timing_total("Total:",
-                               (s_fac_sum + s_rec_sum) / bench_count, 26, NULL);
+                               (s_fac.sum + s_rec.sum) / bench_count, 26, NULL);
         }
 
         if (method == METHOD_TABLE)
@@ -946,11 +904,11 @@ int main(int argc, char *argv[])
             printf("\nTABLE method  (table load %.1f ms, amortised %.1f ms/run):\n",
                    table_load_ms, amortised);
             print_timing_stat_moments("Factoring:",
-                                      t_fac_sum, t_fac_sq, bench_count, 26, true);
+                                      t_fac.sum, t_fac.sumsq, bench_count, 26, true);
             print_timing_stat_moments("Reconstruction:",
-                                      t_rec_sum, t_rec_sq, bench_count, 26, true);
+                                      t_rec.sum, t_rec.sumsq, bench_count, 26, true);
             print_timing_total("Total:",
-                               (t_fac_sum + t_rec_sum) / bench_count, 26, total_extra);
+                               (t_fac.sum + t_rec.sum) / bench_count, 26, total_extra);
         }
     }
 

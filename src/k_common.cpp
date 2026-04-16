@@ -429,7 +429,6 @@ double run_powm_baseline(mpz_t result, const mpz_t challenge,
                          const mpz_t modulo, int bench_count,
                          int label_width)
 {
-    // e = 3^-1 mod (M-1): computed once, same for every iteration
     mpz_t e, phi, three;
     mpz_inits(e, phi, three, NULL);
     mpz_sub_ui(phi, modulo, 1);
@@ -442,9 +441,6 @@ double run_powm_baseline(mpz_t result, const mpz_t challenge,
     for (int i = 0; i < bench_count; i++)
     {
         auto t0 = std::chrono::high_resolution_clock::now();
-        // Single sequential modular exponentiation — the VDF "sequential" step.
-        // mpz_powm uses Montgomery modular multiplication internally; each
-        // squaring depends on the previous one so this cannot be parallelised.
         mpz_powm(result, challenge, e, modulo);
         auto t1 = std::chrono::high_resolution_clock::now();
         double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -457,4 +453,108 @@ double run_powm_baseline(mpz_t result, const mpz_t challenge,
     print_timing_stat_moments("powm (sequential baseline):",
                               sum, sumsq, bench_count, label_width, true);
     return (bench_count > 0) ? sum / bench_count : 0.0;
+}
+
+// ---------------------------------------------------------------------------
+// Unified factor list
+// ---------------------------------------------------------------------------
+
+void kfl_init(kfactor_list_t *f)
+{
+    f->items = NULL;
+    f->count = 0;
+    f->capacity = 0;
+}
+
+static void kfl_grow(kfactor_list_t *f)
+{
+    if (f->count == f->capacity)
+    {
+        int nc = (f->capacity == 0) ? 32 : f->capacity * 2;
+        f->items = (kfactor_t *)realloc(f->items, (size_t)nc * sizeof(kfactor_t));
+        f->capacity = nc;
+    }
+}
+
+void kfl_append_ul(kfactor_list_t *f, unsigned long prime, int exponent)
+{
+    kfl_grow(f);
+    mpz_init_set_ui(f->items[f->count].prime, prime);
+    f->items[f->count].exponent = exponent;
+    f->count++;
+}
+
+void kfl_append_mpz(kfactor_list_t *f, const mpz_t prime, int exponent)
+{
+    kfl_grow(f);
+    mpz_init_set(f->items[f->count].prime, prime);
+    f->items[f->count].exponent = exponent;
+    f->count++;
+}
+
+void kfl_free(kfactor_list_t *f)
+{
+    for (int i = 0; i < f->count; i++)
+        mpz_clear(f->items[i].prime);
+    free(f->items);
+    f->items = NULL;
+    f->count = 0;
+    f->capacity = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Common argument parser
+// ---------------------------------------------------------------------------
+
+int parse_common_args(int argc, char **argv, solver_config_t *cfg,
+                      int *argi_inout)
+{
+    int &argi = *argi_inout;
+    int positional = 0;
+
+    // Count how many positional args have already been consumed by the caller
+    // so we know which slot (challenge vs modulo) we are filling.
+    // We infer this from whether the defaults are still set, but to keep it
+    // simple we just track within this single call — callers pre-set defaults.
+
+    while (argi < argc)
+    {
+        if (strcmp(argv[argi], "--bench") == 0)
+        {
+            if (argi + 1 >= argc)
+            {
+                fprintf(stderr, "Error: Missing value for --bench\n");
+                return 1;
+            }
+            cfg->bench_count = atoi(argv[++argi]);
+            argi++;
+        }
+        else if (argv[argi][0] != '-')
+        {
+            // positional: first non-flag = challenge, second = modulo
+            if (positional == 0)
+            {
+                cfg->challenge_file = argv[argi];
+                positional++;
+                argi++;
+            }
+            else if (positional == 1)
+            {
+                cfg->modulo_file = argv[argi];
+                positional++;
+                argi++;
+            }
+            else
+            {
+                // More positional args — caller handles them
+                break;
+            }
+        }
+        else
+        {
+            // Unknown flag — stop and let caller handle it
+            break;
+        }
+    }
+    return 0;
 }

@@ -68,50 +68,13 @@ typedef enum
 } run_method_t;
 
 // ---------------------------------------------------------------------------
-// Factor list — (prime, exponent) packed as uint64_t pairs for easy MPI use
-// (kept for internal bookkeeping; no longer gathered to rank 0 directly)
+// Factor list — provided by k_common.h as kfactor_list_t / kfl_* functions.
+// Local aliases preserve the existing sieve/table function signatures.
 // ---------------------------------------------------------------------------
-
-typedef struct
-{
-    uint64_t prime;
-    uint64_t exponent;
-} factor_msg_t;
-typedef struct
-{
-    factor_msg_t *items;
-    int count;
-    int capacity;
-} factor_list_t;
-
-static void fl_init(factor_list_t *f)
-{
-    f->items = NULL;
-    f->count = 0;
-    f->capacity = 0;
-}
-
-static void fl_free(factor_list_t *f)
-{
-    free(f->items);
-    f->items = NULL;
-    f->count = 0;
-    f->capacity = 0;
-}
-
-static void fl_append(factor_list_t *f, uint64_t prime, uint64_t exp)
-{
-    if (f->count == f->capacity)
-    {
-        int nc = (f->capacity == 0) ? 64 : f->capacity * 2;
-        f->items = (factor_msg_t *)realloc(f->items,
-                                           (size_t)nc * sizeof(factor_msg_t));
-        f->capacity = nc;
-    }
-    f->items[f->count].prime = prime;
-    f->items[f->count].exponent = exp;
-    f->count++;
-}
+#define factor_list_t kfactor_list_t
+#define fl_init kfl_init
+#define fl_free kfl_free
+#define fl_append(f, p, e) kfl_append_ul(f, (unsigned long)(p), (int)(e))
 
 // ---------------------------------------------------------------------------
 // Small prime generator (same as k32.cpp)
@@ -360,7 +323,7 @@ static void trial_divide_sieve(const mpz_t challenge,
     for (int t = 0; t < nthreads; t++)
     {
         for (int i = 0; i < tf[t].count; i++)
-            fl_append(found, tf[t].items[i].prime, tf[t].items[i].exponent);
+            fl_append(found, mpz_get_ui(tf[t].items[i].prime), (int)tf[t].items[i].exponent);
         fl_free(&tf[t]);
     }
     free(tf);
@@ -404,7 +367,7 @@ static void trial_divide_table(const mpz_t challenge,
     for (int t = 0; t < nthreads; t++)
     {
         for (int i = 0; i < tf[t].count; i++)
-            fl_append(found, tf[t].items[i].prime, tf[t].items[i].exponent);
+            fl_append(found, mpz_get_ui(tf[t].items[i].prime), (int)tf[t].items[i].exponent);
         fl_free(&tf[t]);
     }
     free(tf);
@@ -461,7 +424,7 @@ static void compute_local_cbrt(mpz_t result,
     {
         mpz_t p, cbrt_p;
         mpz_inits(p, cbrt_p, NULL);
-        mpz_set_ui(p, (unsigned long)factors->items[i].prime);
+        mpz_set_ui(p, mpz_get_ui(factors->items[i].prime));
         mpz_powm(cbrt_p, p, e, modulo); // cbrt(p) = p^e mod M
 
         if (factors->items[i].exponent == 1)
@@ -488,18 +451,9 @@ static void compute_local_cbrt(mpz_t result,
     free(parts);
 }
 
-// ---------------------------------------------------------------------------
-// Timing report helper — Bessel-corrected sample stddev
-// ---------------------------------------------------------------------------
-
-static void print_stat(const char *label, double sum, double sumsq, int n)
-{
-    double mean = sum / n;
-    double stddev = (n > 1)
-                        ? sqrt((sumsq - sum * sum / n) / (n - 1))
-                        : 0.0;
-    printf("    %-30s avg=%9.3f ms   stddev=%7.3f ms\n", label, mean, stddev);
-}
+// Timing report: print_timing_stat_moments() from k_common.h at width 30.
+// print_stat() is a thin wrapper kept for call-site readability.
+#define print_stat(lbl, sum, sumsq, n) print_timing_stat_moments(lbl, sum, sumsq, n, 30, true)
 
 // ---------------------------------------------------------------------------
 // solve_one — solve a single (challenge, modulo) pair across all MPI ranks
@@ -649,12 +603,12 @@ static int solve_one(
     // recon_{sum,sq} track the per-iteration reconstruction total directly
     // (loc + gat + com per run) so that stddev is computed correctly.
     // Summing the squares of individual phases gives the wrong variance.
-    double fac_sum = 0, fac_sq = 0;
-    double loc_sum = 0, loc_sq = 0; // max local cbrt across ranks
-    double gat_sum = 0, gat_sq = 0;
-    double com_sum = 0, com_sq = 0;
-    double recon_sum = 0, recon_sq = 0; // per-iteration (loc+gat+com)
-    double cur_max_loc = 0.0;           // carried across steps within one iteration
+    bench_accum_t fac_acc = {0, 0};   // factoring
+    bench_accum_t loc_acc = {0, 0};   // max local cbrt across ranks
+    bench_accum_t gat_acc = {0, 0};   // MPI gather
+    bench_accum_t com_acc = {0, 0};   // combine + unblind on rank 0
+    bench_accum_t recon_acc = {0, 0}; // loc + gat + com per iteration
+    double cur_max_loc = 0.0;         // carried within one iteration
 
     // ---- Benchmark loop ----
 
@@ -684,8 +638,7 @@ static int solve_one(
             double dt = std::chrono::duration<double, std::milli>(t_fac1 - t_fac0).count();
             if (rank == 0)
             {
-                fac_sum += dt;
-                fac_sq += dt * dt;
+                accum_record(&fac_acc, dt);
             }
         }
 
@@ -715,9 +668,8 @@ static int solve_one(
         MPI_Reduce(&local_dt, &max_local_dt, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
         if (rank == 0)
         {
-            loc_sum += max_local_dt;
-            loc_sq += max_local_dt * max_local_dt;
-            cur_max_loc = max_local_dt; // save for recon accumulation below
+            accum_record(&loc_acc, max_local_dt);
+            cur_max_loc = max_local_dt;
         }
 
         // Barrier so gather time measures only MPI communication, not waiting
@@ -756,8 +708,7 @@ static int solve_one(
         if (rank == 0)
         {
             double dt = std::chrono::duration<double, std::milli>(t_gat1 - t_gat0).count();
-            gat_sum += dt;
-            gat_sq += dt * dt;
+            accum_record(&gat_acc, dt);
             iter_gat = dt;
         }
 
@@ -782,8 +733,7 @@ static int solve_one(
 
             auto t_com1 = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double, std::milli>(t_com1 - t_com0).count();
-            com_sum += dt;
-            com_sq += dt * dt;
+            accum_record(&com_acc, dt);
             iter_com = dt;
         }
 
@@ -792,8 +742,7 @@ static int solve_one(
         if (rank == 0)
         {
             double recon_dt = cur_max_loc + iter_gat + iter_com;
-            recon_sum += recon_dt;
-            recon_sq += recon_dt * recon_dt;
+            accum_record(&recon_acc, recon_dt);
         }
 
         fl_free(&local_factors);
@@ -805,24 +754,24 @@ static int solve_one(
         printf("\n");
         if (bench_count == 1)
         {
-            printf("Factoring:         %.3f ms\n", fac_sum);
-            printf("Local cbrt (max):  %.3f ms\n", loc_sum);
-            printf("Gather:            %.3f ms\n", gat_sum);
-            printf("Combine:           %.3f ms\n", com_sum);
-            printf("Reconstruction:    %.3f ms\n", loc_sum + gat_sum + com_sum);
+            printf("Factoring:         %.3f ms\n", fac_acc.sum);
+            printf("Local cbrt (max):  %.3f ms\n", loc_acc.sum);
+            printf("Gather:            %.3f ms\n", gat_acc.sum);
+            printf("Combine:           %.3f ms\n", com_acc.sum);
+            printf("Reconstruction:    %.3f ms\n", loc_acc.sum + gat_acc.sum + com_acc.sum);
             printf("Total:             %.3f ms\n",
-                   fac_sum + loc_sum + gat_sum + com_sum);
+                   fac_acc.sum + loc_acc.sum + gat_acc.sum + com_acc.sum);
         }
         else
         {
             printf("Results over %d runs:\n", bench_count);
-            print_stat("Factoring:", fac_sum, fac_sq, bench_count);
-            print_stat("Local cbrt (max):", loc_sum, loc_sq, bench_count);
-            print_stat("Gather:", gat_sum, gat_sq, bench_count);
-            print_stat("Combine (rank 0):", com_sum, com_sq, bench_count);
-            print_stat("Reconstruction total:", recon_sum, recon_sq, bench_count);
+            print_stat("Factoring:", fac_acc.sum, fac_acc.sumsq, bench_count);
+            print_stat("Local cbrt (max):", loc_acc.sum, loc_acc.sumsq, bench_count);
+            print_stat("Gather:", gat_acc.sum, gat_acc.sumsq, bench_count);
+            print_stat("Combine (rank 0):", com_acc.sum, com_acc.sumsq, bench_count);
+            print_stat("Reconstruction total:", recon_acc.sum, recon_acc.sumsq, bench_count);
             printf("    %-30s avg=%9.3f ms\n", "Total:",
-                   (fac_sum + recon_sum) / bench_count);
+                   (fac_acc.sum + recon_acc.sum) / bench_count);
         }
 
         // ---- Sequential powm baseline + speedup (compare mode only) ----
@@ -843,8 +792,8 @@ static int solve_one(
                                                 bench_count, 30);
             mpz_clear(powm_result);
 
-            double recon_avg = recon_sum / bench_count;
-            double total_avg = (fac_sum + recon_sum) / bench_count;
+            double recon_avg = accum_mean(&recon_acc, bench_count);
+            double total_avg = (fac_acc.sum + recon_acc.sum) / bench_count;
 
             printf("\n--- Speedup vs sequential powm ---\n");
             printf("  powm vs reconstruction only:  %.2fx  "
