@@ -37,6 +37,7 @@
 // =============================================================================
 
 #include "k_common.h"
+#include "k_factorization.h"
 
 #include <mpi.h>
 #include <gmp.h>
@@ -68,8 +69,8 @@ typedef enum
 } run_method_t;
 
 // ---------------------------------------------------------------------------
-// Factor list — provided by k_common.h as kfactor_list_t / kfl_* functions.
-// Local aliases preserve the existing sieve/table function signatures.
+// Factor list: kfactor_list_t / kfl_* from k_common.h.
+// Trial division: kf_trial_divide_* from k_factorization.h.
 // ---------------------------------------------------------------------------
 #define factor_list_t kfactor_list_t
 #define fl_init kfl_init
@@ -80,28 +81,7 @@ typedef enum
 // Small prime generator (same as k32.cpp)
 // ---------------------------------------------------------------------------
 
-static unsigned *generate_small_primes(int *count)
-{
-    const int limit = 65536;
-    char *sieve = (char *)calloc((size_t)(limit + 1), 1);
-    memset(sieve, 1, (size_t)(limit + 1));
-    sieve[0] = sieve[1] = 0;
-    for (int i = 2; (long long)i * i <= limit; i++)
-        if (sieve[i])
-            for (int j = i * i; j <= limit; j += i)
-                sieve[j] = 0;
-    *count = 0;
-    for (int i = 2; i <= limit; i++)
-        if (sieve[i])
-            (*count)++;
-    unsigned *primes = (unsigned *)malloc((size_t)(*count) * sizeof(unsigned));
-    int idx = 0;
-    for (int i = 2; i <= limit; i++)
-        if (sieve[i])
-            primes[idx++] = (unsigned)i;
-    free(sieve);
-    return primes;
-}
+// kf_kf_generate_small_primes() — in k_factorization.cpp
 
 // ---------------------------------------------------------------------------
 // Prime table I/O
@@ -114,264 +94,20 @@ static unsigned *generate_small_primes(int *count)
 //   directly to [range_lo, range_hi] — only that slice is read into RAM.
 // ---------------------------------------------------------------------------
 
-static bool generate_and_save_prime_table(const char *path,
-                                          int sp_count, const unsigned *sp)
-{
-    printf("[rank 0] Generating prime table [65537, 2^32] → %s ...\n", path);
-    FILE *f = fopen(path, "wb");
-    if (!f)
-    {
-        fprintf(stderr, "Cannot create %s\n", path);
-        return false;
-    }
-
-    uint64_t magic = PRIME_TABLE_MAGIC, count = 0;
-    fwrite(&magic, 8, 1, f);
-    long count_pos = ftell(f);
-    fwrite(&count, 8, 1, f); // placeholder
-
-    char *seg = (char *)malloc(SEG_SIZE);
-    uint32_t *batch = (uint32_t *)malloc(WRITE_BATCH * sizeof(uint32_t));
-    int bi = 0;
-
-    auto t0 = std::chrono::high_resolution_clock::now();
-
-    for (uint64_t lo = 65537ULL; lo <= (uint64_t)UINT32_MAX; lo += SEG_SIZE)
-    {
-        uint64_t hi = lo + SEG_SIZE - 1;
-        if (hi > (uint64_t)UINT32_MAX)
-            hi = (uint64_t)UINT32_MAX;
-        size_t seg_len = (size_t)(hi - lo + 1);
-
-        memset(seg, 1, seg_len);
-        for (int i = 0; i < sp_count; i++)
-        {
-            uint64_t p = sp[i];
-            uint64_t start = ((lo + p - 1) / p) * p;
-            if (start == p)
-                start += p;
-            for (uint64_t j = start; j <= hi; j += p)
-                seg[j - lo] = 0;
-        }
-        for (uint64_t c = lo; c <= hi; c++)
-        {
-            if (!seg[c - lo])
-                continue;
-            batch[bi++] = (uint32_t)c;
-            count++;
-            if (bi == WRITE_BATCH)
-            {
-                fwrite(batch, 4, (size_t)WRITE_BATCH, f);
-                bi = 0;
-            }
-        }
-    }
-    if (bi > 0)
-        fwrite(batch, 4, (size_t)bi, f);
-    free(seg);
-    free(batch);
-
-    fseek(f, count_pos, SEEK_SET);
-    fwrite(&count, 8, 1, f);
-    fclose(f);
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    printf("[rank 0] Generated %" PRIu64 " primes in %.1f ms  (~%.0f MB)\n",
-           count, ms, (double)(16 + count * 4) / 1e6);
-    return true;
-}
+// kf_generate_and_save_prime_table() — in k_factorization.cpp
 
 // Binary search: index of first prime >= target in the sorted uint32_t file.
 // Primes start at byte offset 16 (after magic + count header).
-static uint64_t prime_file_lower_bound(FILE *f, uint64_t total_count,
-                                       uint32_t target)
-{
-    uint64_t lo = 0, hi = total_count;
-    while (lo < hi)
-    {
-        uint64_t mid = lo + (hi - lo) / 2;
-        uint32_t p;
-        fseek(f, (long)(16LL + (long long)mid * 4LL), SEEK_SET);
-        if (fread(&p, 4, 1, f) != 1)
-            break;
-        if (p < target)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    return lo;
-}
+// prime_file_lower_bound() — internal to kf_load_prime_slice()
 
 // Load only the slice [range_lo, range_hi] of the prime table.
 // Returns a malloc'd uint32_t array; sets *slice_count.
 // Returns NULL on failure (file not found or I/O error).
-static uint32_t *load_prime_slice(uint64_t *slice_count, const char *path,
-                                  uint32_t range_lo, uint32_t range_hi)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return NULL;
+// kf_load_prime_slice() — in k_factorization.cpp
 
-    uint64_t magic, total_count;
-    if (fread(&magic, 8, 1, f) != 1 || magic != PRIME_TABLE_MAGIC ||
-        fread(&total_count, 8, 1, f) != 1)
-    {
-        fclose(f);
-        return NULL;
-    }
+// kf_kf_trial_divide_sieve() — in k_factorization.cpp
 
-    uint64_t start_idx = prime_file_lower_bound(f, total_count, range_lo);
-    uint64_t end_idx;
-    if (range_hi >= (uint32_t)UINT32_MAX)
-        end_idx = total_count;
-    else
-        end_idx = prime_file_lower_bound(f, total_count, range_hi + 1U);
-
-    *slice_count = end_idx - start_idx;
-    if (*slice_count == 0)
-    {
-        fclose(f);
-        return (uint32_t *)malloc(4);
-    } // empty, not NULL
-
-    uint32_t *slice = (uint32_t *)malloc(*slice_count * 4);
-    if (!slice)
-    {
-        fclose(f);
-        return NULL;
-    }
-
-    fseek(f, (long)(16LL + (long long)start_idx * 4LL), SEEK_SET);
-    if (fread(slice, 4, *slice_count, f) != *slice_count)
-    {
-        free(slice);
-        fclose(f);
-        return NULL;
-    }
-    fclose(f);
-    return slice;
-}
-
-// ---------------------------------------------------------------------------
-// Trial division — SIEVE method (segmented sieve + OpenMP, unchanged)
-// ---------------------------------------------------------------------------
-
-static void trial_divide_sieve(const mpz_t challenge,
-                               uint64_t range_lo, uint64_t range_hi,
-                               int sp_count, const unsigned *sp,
-                               factor_list_t *found)
-{
-    int nthreads = 1;
-#ifdef _OPENMP
-    nthreads = omp_get_max_threads();
-#endif
-    factor_list_t *tf = (factor_list_t *)malloc(
-        (size_t)nthreads * sizeof(factor_list_t));
-    for (int t = 0; t < nthreads; t++)
-        fl_init(&tf[t]);
-
-    uint64_t range_size = range_hi - range_lo + 1;
-
-#ifdef _OPENMP
-#pragma omp parallel
-    {
-        int t = omp_get_thread_num();
-        int nt = omp_get_num_threads();
-#else
-    {
-        int t = 0, nt = 1;
-#endif
-        uint64_t t_lo = range_lo + (range_size * (uint64_t)t) / (uint64_t)nt;
-        uint64_t t_hi = range_lo + (range_size * (uint64_t)(t + 1)) / (uint64_t)nt - 1;
-        if (t == nt - 1)
-            t_hi = range_hi;
-
-        char *seg = (char *)malloc(SEG_SIZE);
-
-        for (uint64_t lo = t_lo; lo <= t_hi; lo += SEG_SIZE)
-        {
-            uint64_t hi = lo + SEG_SIZE - 1;
-            if (hi > t_hi)
-                hi = t_hi;
-            size_t seg_len = (size_t)(hi - lo + 1);
-
-            memset(seg, 1, seg_len);
-            for (int i = 0; i < sp_count; i++)
-            {
-                uint64_t p = sp[i];
-                uint64_t start = ((lo + p - 1) / p) * p;
-                if (start == p)
-                    start += p;
-                for (uint64_t j = start; j <= hi; j += p)
-                    seg[j - lo] = 0;
-            }
-            for (uint64_t c = lo; c <= hi; c++)
-            {
-                if (!seg[c - lo])
-                    continue;
-                if (mpz_tdiv_ui(challenge, (unsigned long)c) != 0)
-                    continue;
-                int e = count_exponent(challenge, (unsigned long)c);
-                if (e > 0)
-                    fl_append(&tf[t], c, (uint64_t)e);
-            }
-        }
-        free(seg);
-    }
-
-    for (int t = 0; t < nthreads; t++)
-    {
-        for (int i = 0; i < tf[t].count; i++)
-            fl_append(found, mpz_get_ui(tf[t].items[i].prime), (int)tf[t].items[i].exponent);
-        fl_free(&tf[t]);
-    }
-    free(tf);
-}
-
-// ---------------------------------------------------------------------------
-// Trial division — TABLE method
-// Each rank iterates its own pre-loaded prime slice (loaded before bench loop).
-// ---------------------------------------------------------------------------
-
-static void trial_divide_table(const mpz_t challenge,
-                               const uint32_t *primes, int64_t prime_count,
-                               factor_list_t *found)
-{
-    int nthreads = 1;
-#ifdef _OPENMP
-    nthreads = omp_get_max_threads();
-#endif
-    factor_list_t *tf = (factor_list_t *)malloc(
-        (size_t)nthreads * sizeof(factor_list_t));
-    for (int t = 0; t < nthreads; t++)
-        fl_init(&tf[t]);
-
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-    for (int64_t i = 0; i < prime_count; i++)
-    {
-        int t = 0;
-#ifdef _OPENMP
-        t = omp_get_thread_num();
-#endif
-        unsigned long p = (unsigned long)primes[i];
-        if (mpz_tdiv_ui(challenge, p) != 0)
-            continue;
-        int e = count_exponent(challenge, p);
-        if (e > 0)
-            fl_append(&tf[t], (uint64_t)p, (uint64_t)e);
-    }
-
-    for (int t = 0; t < nthreads; t++)
-    {
-        for (int i = 0; i < tf[t].count; i++)
-            fl_append(found, mpz_get_ui(tf[t].items[i].prime), (int)tf[t].items[i].exponent);
-        fl_free(&tf[t]);
-    }
-    free(tf);
-}
+// kf_kf_trial_divide_table() — in k_factorization.cpp
 
 // ---------------------------------------------------------------------------
 // Local cube root reconstruction — called by EVERY rank
@@ -573,8 +309,8 @@ static int solve_one(
     if (method == METHOD_TABLE)
     {
         uint64_t sc = 0;
-        prime_slice = load_prime_slice(&sc, primes_file,
-                                       (uint32_t)my_lo, (uint32_t)my_hi);
+        prime_slice = kf_load_prime_slice(&sc, primes_file,
+                                          (uint32_t)my_lo, (uint32_t)my_hi);
         slice_count = (int64_t)sc;
         if (!prime_slice)
         {
@@ -625,11 +361,11 @@ static int solve_one(
         auto t_fac0 = std::chrono::high_resolution_clock::now();
 
         if (method == METHOD_SIEVE || method == METHOD_COMPARE)
-            trial_divide_sieve(challenge, my_lo, my_hi,
-                               sp_count, sp, &local_factors);
+            kf_trial_divide_sieve(challenge, my_lo, my_hi,
+                                  sp_count, sp, &local_factors);
         else
-            trial_divide_table(challenge, prime_slice, slice_count,
-                               &local_factors);
+            kf_trial_divide_table(challenge, prime_slice, slice_count,
+                                  &local_factors);
 
         MPI_Barrier(MPI_COMM_WORLD);
         auto t_fac1 = std::chrono::high_resolution_clock::now();
@@ -952,7 +688,7 @@ int main(int argc, char *argv[])
 
     // Small primes — every rank generates these independently (~0.1 ms, no Bcast)
     int sp_count;
-    unsigned *sp = generate_small_primes(&sp_count);
+    unsigned *sp = kf_generate_small_primes(&sp_count);
 
     // Partition [65537, 2^32] evenly across MPI ranks
     const uint64_t RANGE_LO = 65537ULL;
@@ -984,8 +720,8 @@ int main(int argc, char *argv[])
         if (rank == 0)
         {
             int sp2;
-            unsigned *sp2_arr = generate_small_primes(&sp2);
-            generate_and_save_prime_table(primes_file, sp2, sp2_arr);
+            unsigned *sp2_arr = kf_generate_small_primes(&sp2);
+            kf_generate_and_save_prime_table(primes_file, sp2, sp2_arr, "[rank 0] ");
             free(sp2_arr);
         }
         free(sp);
@@ -1005,7 +741,7 @@ int main(int argc, char *argv[])
             {
                 printf("[rank 0] Prime table not found — generating...\n");
                 fflush(stdout);
-                table_ok = generate_and_save_prime_table(primes_file, sp_count, sp) ? 1 : 0;
+                table_ok = kf_generate_and_save_prime_table(primes_file, sp_count, sp, "[rank 0] ") ? 1 : 0;
             }
             else
             {

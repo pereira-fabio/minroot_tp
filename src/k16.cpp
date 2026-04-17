@@ -28,6 +28,7 @@
 // =============================================================================
 
 #include "k_common.h"
+#include "k_factorization.h"
 
 #include <climits>
 #include <gmp.h>
@@ -323,24 +324,9 @@ int main(int argc, char *argv[])
             // raw byte array — no GMP allocation for the ~99.9% of primes that
             // don't divide. count_exponent() (GMP) only called on actual divisors.
             // -----------------------------------------------------------------------
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-            for (int i = 0; i < prime_count; i++)
-            {
-                unsigned long rem = 0;
-                for (size_t b = 0; b < nbytes; b++)
-                    rem = (rem * 256 + challenge_bytes[b]) % primes[i];
-
-                if (rem != 0)
-                {
-                    exponents[i] = 0;
-                    continue;
-                }
-
-                // prime divides — count exact multiplicity
-                exponents[i] = count_exponent(challenge, primes[i]);
-            }
+            // kf_trial_divide_k16() — Horner byte-level trial division in k_factorization.cpp
+            kf_trial_divide_k16(challenge_bytes, nbytes,
+                                challenge, primes, prime_count, exponents);
 
             // -----------------------------------------------------------------------
             // Step 3: verify full factorization
