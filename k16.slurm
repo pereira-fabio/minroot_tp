@@ -34,7 +34,7 @@ cd $SLURM_SUBMIT_DIR
 # Compilation — single-node OpenMP only, no MPI needed
 # ---------------------------------------------------------------------------
 g++ -O3 -std=c++17 -fopenmp -Wall -Wextra \
-    src/k16.cpp src/k_common.cpp \
+    src/k16.cpp src/k_common.cpp src/k_factorization.cpp \
     -lgmp -o k16
 
 if [ $? -ne 0 ]; then echo "Compilation failed"; exit 1; fi
