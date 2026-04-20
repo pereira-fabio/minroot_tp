@@ -93,6 +93,87 @@ void kf_trial_divide_k16(const unsigned char *challenge_bytes, size_t nbytes,
                          int *exponents);
 
 // ---------------------------------------------------------------------------
+// k32 — cbrt cache
+//
+// Persists cbrt(p) mod M for each 32-bit prime found during factorisation.
+// Avoids recomputing mpz_powm on repeated runs with the same modulo file
+// (each powm on a 7000-bit modulus costs ~90 ms).
+//
+// File format (text):
+//   line 1 : count
+//   line i : <prime_decimal> <cbrt_decimal>
+// Filename convention: modulo_32_2048.txt -> modulo_32_2048.cbrt
+// ---------------------------------------------------------------------------
+
+typedef struct
+{
+    unsigned long prime;
+    mpz_t cbrt;
+} cbrt_entry_t;
+
+typedef struct
+{
+    cbrt_entry_t *items;
+    int count;
+    int capacity;
+} cbrt_cache_t;
+
+void kf_cbrt_cache_init(cbrt_cache_t *cache);
+void kf_cbrt_cache_clear(cbrt_cache_t *cache);
+// Returns index of prime in cache, or -1 if not found.
+int kf_cbrt_cache_find(const cbrt_cache_t *cache, unsigned long prime);
+void kf_cbrt_cache_append(cbrt_cache_t *cache, unsigned long prime,
+                          const mpz_t val);
+bool kf_cbrt_cache_load(cbrt_cache_t *cache, const char *path);
+bool kf_cbrt_cache_save(const cbrt_cache_t *cache, const char *path);
+
+// ---------------------------------------------------------------------------
+// k32 — reconstruction from found factors
+//
+//   result = ∏ cbrt(p_i)^e_i  mod M
+//
+// Looks up cbrt(p) in the cache; computes and caches on miss.
+// Sets *cache_dirty = true whenever a new entry is added.
+// ---------------------------------------------------------------------------
+
+void kf_compute_cbrt_from_factors(mpz_t result,
+                                  const kfactor_list_t *found,
+                                  const mpz_t modulo,
+                                  cbrt_cache_t *cache,
+                                  bool *cache_dirty);
+
+// ---------------------------------------------------------------------------
+// k32 — blinding retry loop (Algorithm 2, Biryukov et al. 2024)
+//
+// Implements the smoothness-based cube root attack:
+//   for attempt in 0..max_attempts:
+//     r  = 1            (attempt == 0, fast path for constructed test vectors)
+//         OR rand [2,M) (attempt > 0)
+//     y  = challenge * r^3 mod M
+//     factor y with sieve (prime_table == NULL) or preloaded table
+//     if y == ∏ p_i^e_i  (B-smooth):
+//         cbrt_y = ∏ cbrt(p_i)^e_i  mod M
+//         result = cbrt_y * r^{-1} mod M        (unblinding)
+//         return true
+//   return false  (max_attempts exhausted)
+//
+// Parameters:
+//   prime_table / prime_table_count : pass NULL/0 to use the sieve method.
+//   cache / cache_dirty             : caller manages init, load and save.
+//   attempts_out                    : if non-NULL receives the attempt count.
+// ---------------------------------------------------------------------------
+
+bool kf_factorize_with_blinding(
+    mpz_t result,
+    const mpz_t challenge,
+    const mpz_t modulo,
+    int sp_count, const unsigned *sp,
+    const uint32_t *prime_table, int64_t prime_table_count,
+    cbrt_cache_t *cache, bool *cache_dirty,
+    int max_attempts,
+    int *attempts_out);
+
+// ---------------------------------------------------------------------------
 // k64 — Pollard's rho factorization
 // ---------------------------------------------------------------------------
 

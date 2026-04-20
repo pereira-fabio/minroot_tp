@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <time.h>
 #include <chrono>
 
 #ifdef _OPENMP
@@ -594,4 +595,282 @@ void kf_factor_challenge(const mpz_t challenge, kfactor_list_t *out)
         kfl_append_mpz(out, raw.items[i].prime, exp);
     }
     kfl_free(&raw);
+}
+// ===========================================================================
+// cbrt cache — persistent (prime → cbrt_mod_M) lookup table
+// ===========================================================================
+
+void kf_cbrt_cache_init(cbrt_cache_t *cache)
+{
+    cache->items = NULL;
+    cache->count = 0;
+    cache->capacity = 0;
+}
+
+void kf_cbrt_cache_clear(cbrt_cache_t *cache)
+{
+    for (int i = 0; i < cache->count; i++)
+        mpz_clear(cache->items[i].cbrt);
+    free(cache->items);
+    cache->items = NULL;
+    cache->count = 0;
+    cache->capacity = 0;
+}
+
+int kf_cbrt_cache_find(const cbrt_cache_t *cache, unsigned long prime)
+{
+    for (int i = 0; i < cache->count; i++)
+        if (cache->items[i].prime == prime)
+            return i;
+    return -1;
+}
+
+void kf_cbrt_cache_append(cbrt_cache_t *cache, unsigned long prime,
+                          const mpz_t val)
+{
+    if (cache->count == cache->capacity)
+    {
+        int nc = (cache->capacity == 0) ? 64 : cache->capacity * 2;
+        cache->items = (cbrt_entry_t *)realloc(
+            cache->items, (size_t)nc * sizeof(cbrt_entry_t));
+        cache->capacity = nc;
+    }
+    cache->items[cache->count].prime = prime;
+    mpz_init_set(cache->items[cache->count].cbrt, val);
+    cache->count++;
+}
+
+bool kf_cbrt_cache_load(cbrt_cache_t *cache, const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+
+    int stored = 0;
+    if (fscanf(f, "%d", &stored) != 1 || stored < 0)
+    {
+        fclose(f);
+        return false;
+    }
+
+    kf_cbrt_cache_clear(cache);
+    kf_cbrt_cache_init(cache);
+
+    for (int i = 0; i < stored; i++)
+    {
+        unsigned long p = 0;
+        if (fscanf(f, "%lu", &p) != 1)
+        {
+            fclose(f);
+            kf_cbrt_cache_clear(cache);
+            kf_cbrt_cache_init(cache);
+            return false;
+        }
+        mpz_t v;
+        mpz_init(v);
+        if (mpz_inp_str(v, f, 10) == 0)
+        {
+            mpz_clear(v);
+            fclose(f);
+            kf_cbrt_cache_clear(cache);
+            kf_cbrt_cache_init(cache);
+            return false;
+        }
+        kf_cbrt_cache_append(cache, p, v);
+        mpz_clear(v);
+    }
+
+    fclose(f);
+    printf("Loaded %d cached cbrt entries from %s\n", cache->count, path);
+    return true;
+}
+
+bool kf_cbrt_cache_save(const cbrt_cache_t *cache, const char *path)
+{
+    FILE *f = fopen(path, "w");
+    if (!f)
+    {
+        fprintf(stderr, "Cannot write cbrt cache to %s\n", path);
+        return false;
+    }
+    fprintf(f, "%d\n", cache->count);
+    for (int i = 0; i < cache->count; i++)
+    {
+        fprintf(f, "%lu ", cache->items[i].prime);
+        mpz_out_str(f, 10, cache->items[i].cbrt);
+        fputc('\n', f);
+    }
+    fclose(f);
+    printf("Saved %d cached cbrt entries to %s\n", cache->count, path);
+    return true;
+}
+
+// ===========================================================================
+// k32 — reconstruction: result = ∏ cbrt(p_i)^e_i  mod M
+// ===========================================================================
+
+void kf_compute_cbrt_from_factors(mpz_t result,
+                                  const kfactor_list_t *found,
+                                  const mpz_t modulo,
+                                  cbrt_cache_t *cache,
+                                  bool *cache_dirty)
+{
+    // Precompute e = 3^{-1} mod (M-1) once for this modulo.
+    mpz_t phi, e, three;
+    mpz_inits(phi, e, three, NULL);
+    mpz_sub_ui(phi, modulo, 1);
+    mpz_set_ui(three, 3);
+    mpz_invert(e, three, phi);
+    mpz_clears(phi, three, NULL);
+
+    mpz_set_ui(result, 1);
+
+    for (int i = 0; i < found->count; i++)
+    {
+        unsigned long p = mpz_get_ui(found->items[i].prime);
+        int idx = kf_cbrt_cache_find(cache, p);
+
+        mpz_t cbrt_p;
+        mpz_init(cbrt_p);
+
+        if (idx >= 0)
+        {
+            mpz_set(cbrt_p, cache->items[idx].cbrt);
+        }
+        else
+        {
+            // Cache miss: compute p^e mod M and store for next time.
+            mpz_t p_mpz;
+            mpz_init_set_ui(p_mpz, p);
+            mpz_powm(cbrt_p, p_mpz, e, modulo);
+            mpz_clear(p_mpz);
+            kf_cbrt_cache_append(cache, p, cbrt_p);
+            if (cache_dirty)
+                *cache_dirty = true;
+        }
+
+        if (found->items[i].exponent > 1)
+        {
+            mpz_t powered;
+            mpz_init(powered);
+            mpz_powm_ui(powered, cbrt_p,
+                        (unsigned long)found->items[i].exponent, modulo);
+            mpz_mul(result, result, powered);
+            mpz_clear(powered);
+        }
+        else
+        {
+            mpz_mul(result, result, cbrt_p);
+        }
+        mpz_mod(result, result, modulo);
+        mpz_clear(cbrt_p);
+    }
+
+    mpz_clear(e);
+}
+
+// ===========================================================================
+// kf_factorize_with_blinding — Algorithm 2 retry loop (single-node)
+// ===========================================================================
+//
+// On attempt 0 we set r=1 (try the challenge unblinded first — succeeds
+// immediately for the constructed test vectors where the challenge IS the
+// smooth number).  For attempt > 0 we draw r uniformly from [2, M-1].
+//
+// "Fully factored" check: remove every found (p^e) from the blinded
+// challenge; if the remainder is 1 the factorisation is complete.
+// ===========================================================================
+
+bool kf_factorize_with_blinding(
+    mpz_t result,
+    const mpz_t challenge,
+    const mpz_t modulo,
+    int sp_count, const unsigned *sp,
+    const uint32_t *prime_table, int64_t prime_table_count,
+    cbrt_cache_t *cache, bool *cache_dirty,
+    int max_attempts,
+    int *attempts_out)
+{
+    if (attempts_out)
+        *attempts_out = 0;
+
+    // Seed GMP's Mersenne-Twister RNG.
+    gmp_randstate_t rng;
+    gmp_randinit_mt(rng);
+    gmp_randseed_ui(rng, (unsigned long)time(NULL) ^ (unsigned long)(uintptr_t)&rng);
+
+    mpz_t r, blinded, rem, cbrt_y;
+    mpz_inits(r, blinded, rem, cbrt_y, NULL);
+
+    bool success = false;
+
+    for (int attempt = 0; attempt < max_attempts && !success; attempt++)
+    {
+        if (attempts_out)
+            *attempts_out = attempt + 1;
+
+        // ---- Choose blinding factor r ----
+        if (attempt == 0)
+        {
+            // Fast path: try challenge directly (r = 1).
+            mpz_set_ui(r, 1);
+            mpz_set(blinded, challenge);
+        }
+        else
+        {
+            // Random r in [2, M-1]: urandomm gives [0, M), re-draw if < 2.
+            do
+            {
+                mpz_urandomm(r, rng, modulo);
+            } while (mpz_cmp_ui(r, 2) < 0);
+
+            // blinded = challenge * r^3 mod M
+            blind_challenge(blinded, challenge, r, modulo);
+        }
+
+        // ---- Factor the blinded challenge ----
+        kfactor_list_t found;
+        kfl_init(&found);
+
+        if (prime_table && prime_table_count > 0)
+            kf_trial_divide_table(blinded, prime_table, prime_table_count,
+                                  &found);
+        else
+            kf_trial_divide_sieve(blinded, 65537ULL, (uint64_t)UINT32_MAX,
+                                  sp_count, sp, &found);
+
+        // ---- Check completeness: rem = blinded / ∏ p_i^{e_i} ----
+        mpz_set(rem, blinded);
+        for (int i = 0; i < found.count; i++)
+        {
+            unsigned long p = mpz_get_ui(found.items[i].prime);
+            for (int ex = 0; ex < found.items[i].exponent; ex++)
+                mpz_divexact_ui(rem, rem, p);
+        }
+
+        if (mpz_cmp_ui(rem, 1) == 0)
+        {
+            // ---- Reconstruct cbrt(blinded) ----
+            kf_compute_cbrt_from_factors(cbrt_y, &found, modulo,
+                                         cache, cache_dirty);
+
+            // ---- Unblind: cbrt(challenge) = cbrt(y) * r^{-1} mod M ----
+            if (attempt == 0)
+            {
+                // r = 1 → no unblinding needed
+                mpz_set(result, cbrt_y);
+            }
+            else
+            {
+                unblind_root(result, cbrt_y, r, modulo);
+            }
+            success = true;
+        }
+
+        kfl_free(&found);
+    }
+
+    mpz_clears(r, blinded, rem, cbrt_y, NULL);
+    gmp_randclear(rng);
+    return success;
 }

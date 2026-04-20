@@ -47,6 +47,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <math.h>
+#include <time.h>
 #include <chrono>
 
 #ifdef _OPENMP
@@ -335,6 +336,20 @@ static int solve_one(
     mpz_invert(e_inv, three_mpz, phi);
     mpz_clears(phi, three_mpz, NULL);
 
+    // Blinding state: rank 0 owns r and blinded_challenge; all ranks share
+    // blinded_challenge (received via Bcast at the start of each attempt).
+    mpz_t r, blinded_challenge;
+    mpz_inits(r, blinded_challenge, NULL);
+
+    // GMP RNG — seeded on rank 0 only (r is Bcast, not independently drawn).
+    gmp_randstate_t rng;
+    if (rank == 0)
+    {
+        gmp_randinit_mt(rng);
+        gmp_randseed_ui(rng, (unsigned long)time(NULL) ^
+                                 (unsigned long)(uintptr_t)&rng);
+    }
+
     // Timing accumulators (rank 0 records all; max_local via MPI_Reduce).
     // recon_{sum,sq} track the per-iteration reconstruction total directly
     // (loc + gat + com per run) so that stddev is computed correctly.
@@ -356,33 +371,163 @@ static int solve_one(
         // Per-iteration components at rank 0 — used for correct recon stddev
         double iter_gat = 0.0, iter_com = 0.0;
 
-        // ---- FACTORING ----
+        // ---- BLINDING + FACTORING (retry loop) ----
+        //
+        // Rank 0 draws r, computes blinded = challenge * r^3 mod M, bcasts it.
+        // All ranks factor their slice of blinded.  Rank 0 gathers each rank's
+        // local factor product to check completeness (product == blinded).
+        // On incomplete factorisation rank 0 signals retry via MPI_Bcast.
+        // The factoring barrier and timing envelope span all retry attempts.
+
         MPI_Barrier(MPI_COMM_WORLD);
         auto t_fac0 = std::chrono::high_resolution_clock::now();
 
-        if (method == METHOD_SIEVE || method == METHOD_COMPARE)
-            kf_trial_divide_sieve(challenge, my_lo, my_hi,
-                                  sp_count, sp, &local_factors);
-        else
-            kf_trial_divide_table(challenge, prime_slice, slice_count,
-                                  &local_factors);
+        int attempt = 0;
+        const int MAX_ATTEMPTS = 256;
+        // blinded_nbytes: fixed size large enough for any value < M
+        size_t blinded_nbytes = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
+        unsigned char *blinded_buf = (unsigned char *)malloc(blinded_nbytes);
+
+        for (attempt = 0; attempt < MAX_ATTEMPTS; attempt++)
+        {
+            // -- Rank 0 chooses r and broadcasts blinded challenge --
+            if (rank == 0)
+            {
+                if (attempt == 0)
+                {
+                    // Fast path: try unblinded first (r=1, blinded=challenge).
+                    mpz_set_ui(r, 1);
+                    mpz_set(blinded_challenge, challenge);
+                }
+                else
+                {
+                    // Draw r uniformly from [2, M-1].
+                    do
+                    {
+                        mpz_urandomm(r, rng, modulo);
+                    } while (mpz_cmp_ui(r, 2) < 0);
+                    blind_challenge(blinded_challenge, challenge, r, modulo);
+                }
+
+                // Export blinded_challenge to fixed-size big-endian buffer.
+                memset(blinded_buf, 0, blinded_nbytes);
+                size_t written = 0;
+                unsigned char *tmp = (unsigned char *)mpz_export(
+                    NULL, &written, 1, 1, 0, 0, blinded_challenge);
+                if (tmp && written > 0 && written <= blinded_nbytes)
+                {
+                    memcpy(blinded_buf + blinded_nbytes - written, tmp, written);
+                    free(tmp);
+                }
+            }
+
+            // Broadcast blinded challenge to all ranks.
+            MPI_Bcast(blinded_buf, (int)blinded_nbytes, MPI_UNSIGNED_CHAR,
+                      0, MPI_COMM_WORLD);
+            if (rank != 0)
+                mpz_import(blinded_challenge, blinded_nbytes, 1, 1, 0, 0,
+                           blinded_buf);
+
+            // -- All ranks factor their slice of blinded_challenge --
+            fl_free(&local_factors);
+            fl_init(&local_factors);
+
+            if (method == METHOD_SIEVE || method == METHOD_COMPARE)
+                kf_trial_divide_sieve(blinded_challenge, my_lo, my_hi,
+                                      sp_count, sp, &local_factors);
+            else
+                kf_trial_divide_table(blinded_challenge, prime_slice,
+                                      slice_count, &local_factors);
+
+            // -- Completeness check: gather local factor products to rank 0 --
+            //
+            // Each rank computes local_prod = ∏ p_i^{e_i} for its found factors
+            // and exports it as a fixed-size buffer.  Rank 0 multiplies all
+            // products and checks whether the result equals blinded_challenge.
+
+            mpz_t local_prod;
+            mpz_init_set_ui(local_prod, 1);
+            for (int i = 0; i < local_factors.count; i++)
+            {
+                unsigned long p = mpz_get_ui(local_factors.items[i].prime);
+                for (int ex = 0; ex < local_factors.items[i].exponent; ex++)
+                    mpz_mul_ui(local_prod, local_prod, p);
+            }
+
+            // Export local_prod into a fixed-size buffer (same size as cbrt_bytes
+            // — both are bounded by modulo, which is larger than any factor product).
+            unsigned char *prod_buf = (unsigned char *)calloc(cbrt_bytes, 1);
+            {
+                size_t written = 0;
+                unsigned char *tmp = (unsigned char *)mpz_export(
+                    NULL, &written, 1, 1, 0, 0, local_prod);
+                if (tmp && written > 0 && written <= cbrt_bytes)
+                {
+                    memcpy(prod_buf + cbrt_bytes - written, tmp, written);
+                    free(tmp);
+                }
+            }
+            mpz_clear(local_prod);
+
+            unsigned char *all_prods = NULL;
+            if (rank == 0)
+                all_prods = (unsigned char *)malloc((size_t)nranks * cbrt_bytes);
+
+            MPI_Gather(prod_buf, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
+                       all_prods, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
+                       0, MPI_COMM_WORLD);
+            free(prod_buf);
+
+            // Rank 0 checks completeness; broadcasts result.
+            int complete = 0;
+            if (rank == 0)
+            {
+                mpz_t combined_prod, part;
+                mpz_init_set_ui(combined_prod, 1);
+                mpz_init(part);
+                for (int rk = 0; rk < nranks; rk++)
+                {
+                    mpz_import(part, cbrt_bytes, 1, 1, 0, 0,
+                               all_prods + (size_t)rk * cbrt_bytes);
+                    mpz_mul(combined_prod, combined_prod, part);
+                }
+                mpz_clear(part);
+                free(all_prods);
+
+                complete = (mpz_cmp(combined_prod, blinded_challenge) == 0) ? 1 : 0;
+                mpz_clear(combined_prod);
+
+                if (bench == 0)
+                {
+                    printf("Blinding attempt %d: %s\n", attempt + 1,
+                           complete ? "smooth — proceeding" : "not smooth — retrying");
+                    fflush(stdout);
+                }
+            }
+            MPI_Bcast(&complete, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+            if (complete)
+                break;
+        } // end blinding retry loop
+
+        free(blinded_buf);
 
         MPI_Barrier(MPI_COMM_WORLD);
         auto t_fac1 = std::chrono::high_resolution_clock::now();
 
+        if (rank == 0)
         {
-            double dt = std::chrono::duration<double, std::milli>(t_fac1 - t_fac0).count();
-            if (rank == 0)
+            double dt = std::chrono::duration<double, std::milli>(
+                            t_fac1 - t_fac0)
+                            .count();
+            accum_record(&fac_acc, dt);
+            if (bench == 0)
             {
-                accum_record(&fac_acc, dt);
+                printf("Factors found by rank 0: %d distinct primes "
+                       "(after %d attempt(s))\n",
+                       local_factors.count, attempt + 1);
+                fflush(stdout);
             }
-        }
-
-        if (bench == 0 && rank == 0)
-        {
-            printf("Factors found by rank 0: %d distinct primes\n",
-                   local_factors.count);
-            fflush(stdout);
         }
 
         // ---- DISTRIBUTED RECONSTRUCTION ----
@@ -448,8 +593,9 @@ static int solve_one(
             iter_gat = dt;
         }
 
-        // Step 4 — rank 0 multiplies the nranks partial results together.
-        //   result = ∏_r partial_r  mod M
+        // Step 4 — rank 0 multiplies the nranks partial cbrt results together,
+        //          then unblinds: result = combined_cbrt * r^{-1} mod M.
+        //   result = ∏_rk partial_cbrt_rk  mod M,  then  *= r^{-1}  mod M
         if (rank == 0)
         {
             auto t_com0 = std::chrono::high_resolution_clock::now();
@@ -457,15 +603,19 @@ static int solve_one(
             mpz_set_ui(result, 1);
             mpz_t partial;
             mpz_init(partial);
-            for (int r = 0; r < nranks; r++)
+            for (int rk = 0; rk < nranks; rk++)
             {
                 mpz_import(partial, cbrt_bytes, 1, 1, 0, 0,
-                           all_bufs + (size_t)r * cbrt_bytes);
+                           all_bufs + (size_t)rk * cbrt_bytes);
                 mpz_mul(result, result, partial);
                 mpz_mod(result, result, modulo);
             }
             mpz_clear(partial);
             free(all_bufs);
+
+            // Unblind: if r != 1 (attempt > 0), multiply by r^{-1} mod M.
+            if (mpz_cmp_ui(r, 1) != 0)
+                unblind_root(result, result, r, modulo);
 
             auto t_com1 = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double, std::milli>(t_com1 - t_com0).count();
@@ -553,6 +703,9 @@ static int solve_one(
     }
 
     free(prime_slice);
+    mpz_clears(r, blinded_challenge, NULL);
+    if (rank == 0)
+        gmp_randclear(rng);
     mpz_clear(e_inv);
     mpz_clears(challenge, modulo, result, NULL);
     return 1;
