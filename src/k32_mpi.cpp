@@ -360,6 +360,8 @@ static int solve_one(
     bench_accum_t com_acc = {0, 0};   // combine + unblind on rank 0
     bench_accum_t recon_acc = {0, 0}; // loc + gat + com per iteration
     double cur_max_loc = 0.0;         // carried within one iteration
+    // Blinding attempt counts — rank 0 accumulates; reported alongside timing.
+    double att_sum = 0.0, att_sumsq = 0.0;
 
     // ---- Benchmark loop ----
 
@@ -521,6 +523,9 @@ static int solve_one(
                             t_fac1 - t_fac0)
                             .count();
             accum_record(&fac_acc, dt);
+            double a = (double)(attempt + 1);
+            att_sum += a;
+            att_sumsq += a * a;
             if (bench == 0)
             {
                 printf("Factors found by rank 0: %d distinct primes "
@@ -647,9 +652,13 @@ static int solve_one(
             printf("Reconstruction:    %.3f ms\n", loc_acc.sum + gat_acc.sum + com_acc.sum);
             printf("Total:             %.3f ms\n",
                    fac_acc.sum + loc_acc.sum + gat_acc.sum + com_acc.sum);
+            printf("Blinding attempts: %d\n", (int)att_sum);
         }
         else
         {
+            double att_sd = bench_count > 1
+                                ? compute_stddev_from_moments(att_sum, att_sumsq, bench_count, true)
+                                : 0.0;
             printf("Results over %d runs:\n", bench_count);
             print_stat("Factoring:", fac_acc.sum, fac_acc.sumsq, bench_count);
             print_stat("Local cbrt (max):", loc_acc.sum, loc_acc.sumsq, bench_count);
@@ -658,6 +667,8 @@ static int solve_one(
             print_stat("Reconstruction total:", recon_acc.sum, recon_acc.sumsq, bench_count);
             printf("    %-30s avg=%9.3f ms\n", "Total:",
                    (fac_acc.sum + recon_acc.sum) / bench_count);
+            printf("    %-30s avg=%9.2f      stddev=%6.2f\n",
+                   "Blinding attempts:", att_sum / bench_count, att_sd);
         }
 
         // ---- Sequential powm baseline + speedup (compare mode only) ----
@@ -690,7 +701,10 @@ static int solve_one(
                    total_avg > 0 ? powm_avg / total_avg : 0.0);
             printf("\nNote: 'recon only' is the most direct comparison to the paper's\n"
                    "      Algorithm 2 speedup claim. Total includes factoring overhead\n"
-                   "      which the paper treats as separate precomputation cost.\n");
+                   "      which the paper treats as separate precomputation cost.\n"
+                   "      Avg blinding attempts: %.2f (paper predicts R = 2^24 groups\n"
+                   "      needed; single-node expected attempts = 1/prob_smooth).\n",
+                   bench_count > 0 ? att_sum / bench_count : 0.0);
         }
 
         // Verify

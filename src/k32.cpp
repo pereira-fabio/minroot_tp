@@ -266,6 +266,10 @@ int main(int argc, char *argv[])
     bench_accum_t s_rec = {0, 0}; // sieve reconstruction
     bench_accum_t t_fac = {0, 0}; // table factoring
     bench_accum_t t_rec = {0, 0}; // table reconstruction
+    // Blinding attempt counts — tracked separately as integer accumulators
+    // so avg/stddev can be reported alongside timing (key metric for the paper).
+    double s_att_sum = 0, s_att_sumsq = 0; // sieve attempts
+    double t_att_sum = 0, t_att_sumsq = 0; // table attempts
 
     // ---- Benchmark loop ----
 
@@ -309,6 +313,8 @@ int main(int argc, char *argv[])
             // heuristic when blinding succeeds on attempt 1 (common case).
             accum_record(&s_fac, dt * 0.95); // factoring dominates
             accum_record(&s_rec, dt * 0.05);
+            s_att_sum += attempts;
+            s_att_sumsq += (double)attempts * attempts;
 
             if (bench == 0)
             {
@@ -336,6 +342,8 @@ int main(int argc, char *argv[])
             double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
             accum_record(&t_fac, dt * 0.95);
             accum_record(&t_rec, dt * 0.05);
+            t_att_sum += attempts;
+            t_att_sumsq += (double)attempts * attempts;
 
             if (bench == 0)
             {
@@ -429,6 +437,9 @@ int main(int argc, char *argv[])
     {
         if (method == METHOD_SIEVE)
         {
+            double att_sd = bench_count > 1
+                                ? compute_stddev_from_moments(s_att_sum, s_att_sumsq, bench_count, true)
+                                : 0.0;
             printf("\nSIEVE method:\n");
             print_timing_stat_moments("Factoring:",
                                       s_fac.sum, s_fac.sumsq, bench_count, 26, true);
@@ -436,11 +447,16 @@ int main(int argc, char *argv[])
                                       s_rec.sum, s_rec.sumsq, bench_count, 26, true);
             print_timing_total("Total:",
                                (s_fac.sum + s_rec.sum) / bench_count, 26, NULL);
+            printf("  %-26s  avg=%6.2f      stddev=%6.2f\n",
+                   "Blinding attempts:", s_att_sum / bench_count, att_sd);
         }
 
         if (method == METHOD_TABLE)
         {
             double amortised = table_load_ms / bench_count;
+            double att_sd = bench_count > 1
+                                ? compute_stddev_from_moments(t_att_sum, t_att_sumsq, bench_count, true)
+                                : 0.0;
             char total_extra[64];
             snprintf(total_extra, sizeof(total_extra),
                      "(+ %.1f ms amortised load)", amortised);
@@ -452,6 +468,8 @@ int main(int argc, char *argv[])
                                       t_rec.sum, t_rec.sumsq, bench_count, 26, true);
             print_timing_total("Total:",
                                (t_fac.sum + t_rec.sum) / bench_count, 26, total_extra);
+            printf("  %-26s  avg=%6.2f      stddev=%6.2f\n",
+                   "Blinding attempts:", t_att_sum / bench_count, att_sd);
         }
     }
 

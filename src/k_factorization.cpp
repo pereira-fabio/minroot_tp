@@ -727,26 +727,36 @@ void kf_compute_cbrt_from_factors(mpz_t result,
 
     for (int i = 0; i < found->count; i++)
     {
-        unsigned long p = mpz_get_ui(found->items[i].prime);
-        int idx = kf_cbrt_cache_find(cache, p);
-
         mpz_t cbrt_p;
         mpz_init(cbrt_p);
 
-        if (idx >= 0)
+        if (mpz_fits_ulong_p(found->items[i].prime))
         {
-            mpz_set(cbrt_p, cache->items[idx].cbrt);
+            // Small prime (≤ ULONG_MAX): use unsigned-long-keyed cache.
+            unsigned long p = mpz_get_ui(found->items[i].prime);
+            int idx = kf_cbrt_cache_find(cache, p);
+            if (idx >= 0)
+            {
+                mpz_set(cbrt_p, cache->items[idx].cbrt);
+            }
+            else
+            {
+                mpz_t p_mpz;
+                mpz_init_set_ui(p_mpz, p);
+                mpz_powm(cbrt_p, p_mpz, e, modulo);
+                mpz_clear(p_mpz);
+                kf_cbrt_cache_append(cache, p, cbrt_p);
+                if (cache_dirty)
+                    *cache_dirty = true;
+            }
         }
         else
         {
-            // Cache miss: compute p^e mod M and store for next time.
-            mpz_t p_mpz;
-            mpz_init_set_ui(p_mpz, p);
-            mpz_powm(cbrt_p, p_mpz, e, modulo);
-            mpz_clear(p_mpz);
-            kf_cbrt_cache_append(cache, p, cbrt_p);
-            if (cache_dirty)
-                *cache_dirty = true;
+            // Large prime (> ULONG_MAX, e.g. from Pollard's Rho on cofactor).
+            // Cache keyed by unsigned long cannot store this — compute powm
+            // directly against the full mpz_t.  Large primes appear rarely
+            // (at most one per blinded challenge) so the miss cost is acceptable.
+            mpz_powm(cbrt_p, found->items[i].prime, e, modulo);
         }
 
         if (found->items[i].exponent > 1)
@@ -839,16 +849,64 @@ bool kf_factorize_with_blinding(
             kf_trial_divide_sieve(blinded, 65537ULL, (uint64_t)UINT32_MAX,
                                   sp_count, sp, &found);
 
-        // ---- Check completeness: rem = blinded / ∏ p_i^{e_i} ----
+        // ---- Check completeness and apply Pollard fallback on cofactor ----
+        //
+        // After trial division rem = blinded / ∏ p_i^{e_i}.
+        // If rem == 1: B-smooth, reconstruct immediately.
+        // If rem > 1 and prime: single large-prime cofactor (almost-smooth).
+        //   Compute cbrt(rem) directly and include it.
+        // If rem > 1 and composite: try Pollard's Rho to factor rem fully.
+        //   If Pollard succeeds (all factors found), reconstruct.
+        //   If Pollard fails, discard and retry with a new r.
+
         mpz_set(rem, blinded);
         for (int i = 0; i < found.count; i++)
         {
-            unsigned long p = mpz_get_ui(found.items[i].prime);
             for (int ex = 0; ex < found.items[i].exponent; ex++)
-                mpz_divexact_ui(rem, rem, p);
+                mpz_divexact(rem, rem, found.items[i].prime);
         }
 
-        if (mpz_cmp_ui(rem, 1) == 0)
+        bool fully_factored = (mpz_cmp_ui(rem, 1) == 0);
+
+        if (!fully_factored && mpz_cmp_ui(rem, 1) > 0)
+        {
+            if (kf_is_prime(rem))
+            {
+                // Single large prime cofactor — add it directly with exponent 1.
+                kfl_append_mpz(&found, rem, 1);
+                fully_factored = true;
+            }
+            else
+            {
+                // Composite cofactor — recurse with Pollard's Rho.
+                // kf_factor_challenge consolidates duplicate primes for us.
+                kfactor_list_t cofactors;
+                kfl_init(&cofactors);
+                kf_factor_challenge(rem, &cofactors);
+
+                // Verify Pollard succeeded: rebuild product and compare to rem.
+                mpz_t check;
+                mpz_init_set_ui(check, 1);
+                for (int i = 0; i < cofactors.count; i++)
+                {
+                    unsigned long p = mpz_get_ui(cofactors.items[i].prime);
+                    for (int ex = 0; ex < cofactors.items[i].exponent; ex++)
+                        mpz_mul_ui(check, check, p);
+                }
+                if (mpz_cmp(check, rem) == 0)
+                {
+                    for (int i = 0; i < cofactors.count; i++)
+                        kfl_append_mpz(&found,
+                                       cofactors.items[i].prime,
+                                       cofactors.items[i].exponent);
+                    fully_factored = true;
+                }
+                mpz_clear(check);
+                kfl_free(&cofactors);
+            }
+        }
+
+        if (fully_factored)
         {
             // ---- Reconstruct cbrt(blinded) ----
             kf_compute_cbrt_from_factors(cbrt_y, &found, modulo,
