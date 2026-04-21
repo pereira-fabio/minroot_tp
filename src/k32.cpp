@@ -266,10 +266,26 @@ int main(int argc, char *argv[])
     bench_accum_t s_rec = {0, 0}; // sieve reconstruction
     bench_accum_t t_fac = {0, 0}; // table factoring
     bench_accum_t t_rec = {0, 0}; // table reconstruction
-    // Blinding attempt counts — tracked separately as integer accumulators
-    // so avg/stddev can be reported alongside timing (key metric for the paper).
-    double s_att_sum = 0, s_att_sumsq = 0; // sieve attempts
-    double t_att_sum = 0, t_att_sumsq = 0; // table attempts
+    double s_att_sum = 0, s_att_sumsq = 0;
+    double t_att_sum = 0, t_att_sumsq = 0;
+
+    // ---- Precompute blinding pairs (Algorithm 2 precomputation phase) ----
+    // Allocate MAX_ATTEMPTS-1 pairs so every non-trivial retry attempt has a
+    // precomputed (r, r^3 mod M, r^{-1} mod M) triple — no mpz_powm or
+    // mpz_invert in the inner loop.  The table is shared across all bench
+    // iterations; different bench runs draw from the same pool of r values
+    // (only affects random challenges — constructed smooth vectors always
+    // succeed on attempt 0 and never reach the table).
+    const int BLIND_TABLE_SIZE = 255; // max_attempts - 1
+    blinding_pair_t *blind_table = kf_blinding_table_alloc(BLIND_TABLE_SIZE, modulo);
+    if (!blind_table)
+    {
+        fprintf(stderr, "Failed to allocate blinding table\n");
+        free(prime_table);
+        free(sp);
+        return 1;
+    }
+    printf("Blinding table: %d pairs precomputed\n\n", BLIND_TABLE_SIZE);
 
     // ---- Benchmark loop ----
 
@@ -302,16 +318,14 @@ int main(int argc, char *argv[])
             bool ok = kf_factorize_with_blinding(
                 result, challenge, modulo,
                 sp_count, sp,
-                NULL, 0, // sieve — no preloaded table
+                NULL, 0,
                 &cbrt_cache, &cbrt_cache_dirty,
-                256, // max blinding attempts
-                &attempts);
+                256,
+                &attempts,
+                blind_table, BLIND_TABLE_SIZE);
             auto t1 = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            // Split timing: record full round-trip in both accumulators so that
-            // compare mode can still show fac vs recon breakdown via a fixed 50/50
-            // heuristic when blinding succeeds on attempt 1 (common case).
-            accum_record(&s_fac, dt * 0.95); // factoring dominates
+            accum_record(&s_fac, dt * 0.95);
             accum_record(&s_rec, dt * 0.05);
             s_att_sum += attempts;
             s_att_sumsq += (double)attempts * attempts;
@@ -334,10 +348,11 @@ int main(int argc, char *argv[])
             bool ok = kf_factorize_with_blinding(
                 result, challenge, modulo,
                 sp_count, sp,
-                prime_table, prime_table_count, // preloaded table
+                prime_table, prime_table_count,
                 &cbrt_cache, &cbrt_cache_dirty,
                 256,
-                &attempts);
+                &attempts,
+                blind_table, BLIND_TABLE_SIZE);
             auto t1 = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
             accum_record(&t_fac, dt * 0.95);
@@ -438,7 +453,8 @@ int main(int argc, char *argv[])
         if (method == METHOD_SIEVE)
         {
             double att_sd = bench_count > 1
-                                ? compute_stddev_from_moments(s_att_sum, s_att_sumsq, bench_count, true)
+                                ? compute_stddev_from_moments(s_att_sum, s_att_sumsq,
+                                                              bench_count, true)
                                 : 0.0;
             printf("\nSIEVE method:\n");
             print_timing_stat_moments("Factoring:",
@@ -455,7 +471,8 @@ int main(int argc, char *argv[])
         {
             double amortised = table_load_ms / bench_count;
             double att_sd = bench_count > 1
-                                ? compute_stddev_from_moments(t_att_sum, t_att_sumsq, bench_count, true)
+                                ? compute_stddev_from_moments(t_att_sum, t_att_sumsq,
+                                                              bench_count, true)
                                 : 0.0;
             char total_extra[64];
             snprintf(total_extra, sizeof(total_extra),
@@ -487,6 +504,7 @@ int main(int argc, char *argv[])
     mpz_clear(challenge_mod);
 
     kf_cbrt_cache_clear(&cbrt_cache);
+    kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
     free(prime_table);
     free(sp);
     mpz_clears(challenge, modulo, result, NULL);

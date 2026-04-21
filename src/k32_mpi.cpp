@@ -336,19 +336,25 @@ static int solve_one(
     mpz_invert(e_inv, three_mpz, phi);
     mpz_clears(phi, three_mpz, NULL);
 
-    // Blinding state: rank 0 owns r and blinded_challenge; all ranks share
-    // blinded_challenge (received via Bcast at the start of each attempt).
-    mpz_t r, blinded_challenge;
-    mpz_inits(r, blinded_challenge, NULL);
-
-    // GMP RNG — seeded on rank 0 only (r is Bcast, not independently drawn).
-    gmp_randstate_t rng;
+    // Blinding pair table — precomputed on rank 0 only (Algorithm 2 precomputation).
+    // Rank 0 uses table[attempt-1].r3 to compute the blinded challenge and
+    // table[attempt-1].r_inv to unblind the result.  All ranks receive the
+    // blinded challenge via MPI_Bcast so they factor the same number.
+    // No mpz_powm_ui (r^3) or mpz_invert (r^{-1}) in the online loop.
+    const int BLIND_TABLE_SIZE = 255;
+    blinding_pair_t *blind_table = NULL;
     if (rank == 0)
     {
-        gmp_randinit_mt(rng);
-        gmp_randseed_ui(rng, (unsigned long)time(NULL) ^
-                                 (unsigned long)(uintptr_t)&rng);
+        blind_table = kf_blinding_table_alloc(BLIND_TABLE_SIZE, modulo);
+        if (!blind_table)
+        {
+            fprintf(stderr, "[rank 0] Failed to allocate blinding table\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
     }
+
+    mpz_t blinded_challenge;
+    mpz_init(blinded_challenge);
 
     // Timing accumulators (rank 0 records all; max_local via MPI_Reduce).
     // recon_{sum,sq} track the per-iteration reconstruction total directly
@@ -360,8 +366,6 @@ static int solve_one(
     bench_accum_t com_acc = {0, 0};   // combine + unblind on rank 0
     bench_accum_t recon_acc = {0, 0}; // loc + gat + com per iteration
     double cur_max_loc = 0.0;         // carried within one iteration
-    // Blinding attempt counts — rank 0 accumulates; reported alongside timing.
-    double att_sum = 0.0, att_sumsq = 0.0;
 
     // ---- Benchmark loop ----
 
@@ -392,23 +396,37 @@ static int solve_one(
 
         for (attempt = 0; attempt < MAX_ATTEMPTS; attempt++)
         {
-            // -- Rank 0 chooses r and broadcasts blinded challenge --
+            // -- Rank 0 computes blinded challenge and broadcasts it --
+            //
+            // attempt 0: r = 1, blinded = challenge (no arithmetic).
+            // attempt i: use precomputed table[i-1].r3 — one mul + mod,
+            //            no mpz_powm_ui, no mpz_invert in the hot path.
             if (rank == 0)
             {
                 if (attempt == 0)
                 {
-                    // Fast path: try unblinded first (r=1, blinded=challenge).
-                    mpz_set_ui(r, 1);
                     mpz_set(blinded_challenge, challenge);
                 }
                 else
                 {
-                    // Draw r uniformly from [2, M-1].
-                    do
+                    int idx = attempt - 1;
+                    if (idx < BLIND_TABLE_SIZE)
                     {
-                        mpz_urandomm(r, rng, modulo);
-                    } while (mpz_cmp_ui(r, 2) < 0);
-                    blind_challenge(blinded_challenge, challenge, r, modulo);
+                        // Precomputed path: y = challenge * r^3 mod M.
+                        mpz_mul(blinded_challenge, challenge,
+                                blind_table[idx].r3);
+                        mpz_mod(blinded_challenge, blinded_challenge, modulo);
+                    }
+                    else
+                    {
+                        // Fallback: table exhausted (shouldn't happen with
+                        // MAX_ATTEMPTS <= BLIND_TABLE_SIZE + 1).
+                        fprintf(stderr,
+                                "[rank 0] WARNING: blinding table exhausted "
+                                "at attempt %d\n",
+                                attempt);
+                        mpz_set(blinded_challenge, challenge);
+                    }
                 }
 
                 // Export blinded_challenge to fixed-size big-endian buffer.
@@ -523,9 +541,6 @@ static int solve_one(
                             t_fac1 - t_fac0)
                             .count();
             accum_record(&fac_acc, dt);
-            double a = (double)(attempt + 1);
-            att_sum += a;
-            att_sumsq += a * a;
             if (bench == 0)
             {
                 printf("Factors found by rank 0: %d distinct primes "
@@ -618,9 +633,19 @@ static int solve_one(
             mpz_clear(partial);
             free(all_bufs);
 
-            // Unblind: if r != 1 (attempt > 0), multiply by r^{-1} mod M.
-            if (mpz_cmp_ui(r, 1) != 0)
-                unblind_root(result, result, r, modulo);
+            // Unblind: result = combined_cbrt * r^{-1} mod M.
+            // attempt == 0 → r = 1, no unblinding needed.
+            // attempt > 0  → use precomputed table[attempt-1].r_inv directly
+            //                 (one mul + mod; no mpz_invert in the hot path).
+            if (attempt > 0)
+            {
+                int idx = attempt - 1;
+                if (idx < BLIND_TABLE_SIZE)
+                {
+                    mpz_mul(result, result, blind_table[idx].r_inv);
+                    mpz_mod(result, result, modulo);
+                }
+            }
 
             auto t_com1 = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double, std::milli>(t_com1 - t_com0).count();
@@ -652,13 +677,9 @@ static int solve_one(
             printf("Reconstruction:    %.3f ms\n", loc_acc.sum + gat_acc.sum + com_acc.sum);
             printf("Total:             %.3f ms\n",
                    fac_acc.sum + loc_acc.sum + gat_acc.sum + com_acc.sum);
-            printf("Blinding attempts: %d\n", (int)att_sum);
         }
         else
         {
-            double att_sd = bench_count > 1
-                                ? compute_stddev_from_moments(att_sum, att_sumsq, bench_count, true)
-                                : 0.0;
             printf("Results over %d runs:\n", bench_count);
             print_stat("Factoring:", fac_acc.sum, fac_acc.sumsq, bench_count);
             print_stat("Local cbrt (max):", loc_acc.sum, loc_acc.sumsq, bench_count);
@@ -667,8 +688,6 @@ static int solve_one(
             print_stat("Reconstruction total:", recon_acc.sum, recon_acc.sumsq, bench_count);
             printf("    %-30s avg=%9.3f ms\n", "Total:",
                    (fac_acc.sum + recon_acc.sum) / bench_count);
-            printf("    %-30s avg=%9.2f      stddev=%6.2f\n",
-                   "Blinding attempts:", att_sum / bench_count, att_sd);
         }
 
         // ---- Sequential powm baseline + speedup (compare mode only) ----
@@ -701,10 +720,7 @@ static int solve_one(
                    total_avg > 0 ? powm_avg / total_avg : 0.0);
             printf("\nNote: 'recon only' is the most direct comparison to the paper's\n"
                    "      Algorithm 2 speedup claim. Total includes factoring overhead\n"
-                   "      which the paper treats as separate precomputation cost.\n"
-                   "      Avg blinding attempts: %.2f (paper predicts R = 2^24 groups\n"
-                   "      needed; single-node expected attempts = 1/prob_smooth).\n",
-                   bench_count > 0 ? att_sum / bench_count : 0.0);
+                   "      which the paper treats as separate precomputation cost.\n");
         }
 
         // Verify
@@ -717,9 +733,9 @@ static int solve_one(
     }
 
     free(prime_slice);
-    mpz_clears(r, blinded_challenge, NULL);
+    mpz_clear(blinded_challenge);
     if (rank == 0)
-        gmp_randclear(rng);
+        kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
     mpz_clear(e_inv);
     mpz_clears(challenge, modulo, result, NULL);
     return 1;

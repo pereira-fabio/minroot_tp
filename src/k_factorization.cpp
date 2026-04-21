@@ -727,36 +727,26 @@ void kf_compute_cbrt_from_factors(mpz_t result,
 
     for (int i = 0; i < found->count; i++)
     {
+        unsigned long p = mpz_get_ui(found->items[i].prime);
+        int idx = kf_cbrt_cache_find(cache, p);
+
         mpz_t cbrt_p;
         mpz_init(cbrt_p);
 
-        if (mpz_fits_ulong_p(found->items[i].prime))
+        if (idx >= 0)
         {
-            // Small prime (≤ ULONG_MAX): use unsigned-long-keyed cache.
-            unsigned long p = mpz_get_ui(found->items[i].prime);
-            int idx = kf_cbrt_cache_find(cache, p);
-            if (idx >= 0)
-            {
-                mpz_set(cbrt_p, cache->items[idx].cbrt);
-            }
-            else
-            {
-                mpz_t p_mpz;
-                mpz_init_set_ui(p_mpz, p);
-                mpz_powm(cbrt_p, p_mpz, e, modulo);
-                mpz_clear(p_mpz);
-                kf_cbrt_cache_append(cache, p, cbrt_p);
-                if (cache_dirty)
-                    *cache_dirty = true;
-            }
+            mpz_set(cbrt_p, cache->items[idx].cbrt);
         }
         else
         {
-            // Large prime (> ULONG_MAX, e.g. from Pollard's Rho on cofactor).
-            // Cache keyed by unsigned long cannot store this — compute powm
-            // directly against the full mpz_t.  Large primes appear rarely
-            // (at most one per blinded challenge) so the miss cost is acceptable.
-            mpz_powm(cbrt_p, found->items[i].prime, e, modulo);
+            // Cache miss: compute p^e mod M and store for next time.
+            mpz_t p_mpz;
+            mpz_init_set_ui(p_mpz, p);
+            mpz_powm(cbrt_p, p_mpz, e, modulo);
+            mpz_clear(p_mpz);
+            kf_cbrt_cache_append(cache, p, cbrt_p);
+            if (cache_dirty)
+                *cache_dirty = true;
         }
 
         if (found->items[i].exponent > 1)
@@ -780,15 +770,58 @@ void kf_compute_cbrt_from_factors(mpz_t result,
 }
 
 // ===========================================================================
-// kf_factorize_with_blinding — Algorithm 2 retry loop (single-node)
+// blinding_pair_t table — precomputation phase (Algorithm 2 / Figure 4)
+// ===========================================================================
+
+blinding_pair_t *kf_blinding_table_alloc(int count, const mpz_t modulo)
+{
+    blinding_pair_t *table =
+        (blinding_pair_t *)malloc((size_t)count * sizeof(blinding_pair_t));
+    if (!table)
+        return NULL;
+
+    gmp_randstate_t rng;
+    gmp_randinit_mt(rng);
+    gmp_randseed_ui(rng, (unsigned long)time(NULL) ^ (unsigned long)(uintptr_t)table);
+
+    mpz_t r;
+    mpz_init(r);
+
+    for (int i = 0; i < count; i++)
+    {
+        mpz_inits(table[i].r, table[i].r3, table[i].r_inv, NULL);
+
+        do
+        {
+            mpz_urandomm(r, rng, modulo);
+        } while (mpz_cmp_ui(r, 2) < 0);
+
+        mpz_set(table[i].r, r);
+        mpz_powm_ui(table[i].r3, r, 3, modulo); // r^3 mod M
+        mpz_invert(table[i].r_inv, r, modulo);  // r^{-1} mod M
+    }
+
+    mpz_clear(r);
+    gmp_randclear(rng);
+    return table;
+}
+
+void kf_blinding_table_free(blinding_pair_t *table, int count)
+{
+    if (!table)
+        return;
+    for (int i = 0; i < count; i++)
+        mpz_clears(table[i].r, table[i].r3, table[i].r_inv, NULL);
+    free(table);
+}
+
+// ===========================================================================
+// kf_factorize_with_blinding — Algorithm 2 online phase (single-node)
 // ===========================================================================
 //
-// On attempt 0 we set r=1 (try the challenge unblinded first — succeeds
-// immediately for the constructed test vectors where the challenge IS the
-// smooth number).  For attempt > 0 we draw r uniformly from [2, M-1].
-//
-// "Fully factored" check: remove every found (p^e) from the blinded
-// challenge; if the remainder is 1 the factorisation is complete.
+// attempt 0: r = 1, y = challenge (no arithmetic; fast path for smooth vectors)
+// attempt i: precomputed path uses table[i-1].{r3, r_inv} — no powm, no invert
+//            fallback path generates r on-the-fly when table is absent/exhausted
 // ===========================================================================
 
 bool kf_factorize_with_blinding(
@@ -799,18 +832,22 @@ bool kf_factorize_with_blinding(
     const uint32_t *prime_table, int64_t prime_table_count,
     cbrt_cache_t *cache, bool *cache_dirty,
     int max_attempts,
-    int *attempts_out)
+    int *attempts_out,
+    const blinding_pair_t *table,
+    int table_size)
 {
     if (attempts_out)
         *attempts_out = 0;
 
-    // Seed GMP's Mersenne-Twister RNG.
+    // Fallback RNG — only used when table is exhausted or not provided.
     gmp_randstate_t rng;
     gmp_randinit_mt(rng);
     gmp_randseed_ui(rng, (unsigned long)time(NULL) ^ (unsigned long)(uintptr_t)&rng);
 
-    mpz_t r, blinded, rem, cbrt_y;
-    mpz_inits(r, blinded, rem, cbrt_y, NULL);
+    mpz_t r_inv_tmp;
+    mpz_t blinded, rem, cbrt_y;
+    mpz_init(r_inv_tmp);
+    mpz_inits(blinded, rem, cbrt_y, NULL);
 
     bool success = false;
 
@@ -819,23 +856,37 @@ bool kf_factorize_with_blinding(
         if (attempts_out)
             *attempts_out = attempt + 1;
 
-        // ---- Choose blinding factor r ----
+        // ---- Blinding: compute y = challenge * r^3 mod M ----
+        const mpz_t *r_inv_ptr = NULL;
+
         if (attempt == 0)
         {
-            // Fast path: try challenge directly (r = 1).
-            mpz_set_ui(r, 1);
-            mpz_set(blinded, challenge);
+            mpz_set(blinded, challenge); // r = 1, no multiplication
         }
         else
         {
-            // Random r in [2, M-1]: urandomm gives [0, M), re-draw if < 2.
-            do
+            int idx = attempt - 1;
+            if (table && idx < table_size)
             {
-                mpz_urandomm(r, rng, modulo);
-            } while (mpz_cmp_ui(r, 2) < 0);
-
-            // blinded = challenge * r^3 mod M
-            blind_challenge(blinded, challenge, r, modulo);
+                // Precomputed: one mul + one mod, no powm, no invert.
+                mpz_mul(blinded, challenge, table[idx].r3);
+                mpz_mod(blinded, blinded, modulo);
+                r_inv_ptr = &table[idx].r_inv;
+            }
+            else
+            {
+                // On-the-fly fallback.
+                mpz_t r_tmp;
+                mpz_init(r_tmp);
+                do
+                {
+                    mpz_urandomm(r_tmp, rng, modulo);
+                } while (mpz_cmp_ui(r_tmp, 2) < 0);
+                blind_challenge(blinded, challenge, r_tmp, modulo);
+                mpz_invert(r_inv_tmp, r_tmp, modulo);
+                r_inv_ptr = &r_inv_tmp;
+                mpz_clear(r_tmp);
+            }
         }
 
         // ---- Factor the blinded challenge ----
@@ -843,28 +894,16 @@ bool kf_factorize_with_blinding(
         kfl_init(&found);
 
         if (prime_table && prime_table_count > 0)
-            kf_trial_divide_table(blinded, prime_table, prime_table_count,
-                                  &found);
+            kf_trial_divide_table(blinded, prime_table, prime_table_count, &found);
         else
             kf_trial_divide_sieve(blinded, 65537ULL, (uint64_t)UINT32_MAX,
                                   sp_count, sp, &found);
 
-        // ---- Check completeness and apply Pollard fallback on cofactor ----
-        //
-        // After trial division rem = blinded / ∏ p_i^{e_i}.
-        // If rem == 1: B-smooth, reconstruct immediately.
-        // If rem > 1 and prime: single large-prime cofactor (almost-smooth).
-        //   Compute cbrt(rem) directly and include it.
-        // If rem > 1 and composite: try Pollard's Rho to factor rem fully.
-        //   If Pollard succeeds (all factors found), reconstruct.
-        //   If Pollard fails, discard and retry with a new r.
-
+        // ---- Completeness check + Pollard fallback on cofactor ----
         mpz_set(rem, blinded);
         for (int i = 0; i < found.count; i++)
-        {
             for (int ex = 0; ex < found.items[i].exponent; ex++)
                 mpz_divexact(rem, rem, found.items[i].prime);
-        }
 
         bool fully_factored = (mpz_cmp_ui(rem, 1) == 0);
 
@@ -872,27 +911,19 @@ bool kf_factorize_with_blinding(
         {
             if (kf_is_prime(rem))
             {
-                // Single large prime cofactor — add it directly with exponent 1.
                 kfl_append_mpz(&found, rem, 1);
                 fully_factored = true;
             }
             else
             {
-                // Composite cofactor — recurse with Pollard's Rho.
-                // kf_factor_challenge consolidates duplicate primes for us.
                 kfactor_list_t cofactors;
                 kfl_init(&cofactors);
                 kf_factor_challenge(rem, &cofactors);
-
-                // Verify Pollard succeeded: rebuild product and compare to rem.
                 mpz_t check;
                 mpz_init_set_ui(check, 1);
                 for (int i = 0; i < cofactors.count; i++)
-                {
-                    unsigned long p = mpz_get_ui(cofactors.items[i].prime);
                     for (int ex = 0; ex < cofactors.items[i].exponent; ex++)
-                        mpz_mul_ui(check, check, p);
-                }
+                        mpz_mul(check, check, cofactors.items[i].prime);
                 if (mpz_cmp(check, rem) == 0)
                 {
                     for (int i = 0; i < cofactors.count; i++)
@@ -908,19 +939,17 @@ bool kf_factorize_with_blinding(
 
         if (fully_factored)
         {
-            // ---- Reconstruct cbrt(blinded) ----
             kf_compute_cbrt_from_factors(cbrt_y, &found, modulo,
                                          cache, cache_dirty);
-
-            // ---- Unblind: cbrt(challenge) = cbrt(y) * r^{-1} mod M ----
             if (attempt == 0)
             {
-                // r = 1 → no unblinding needed
                 mpz_set(result, cbrt_y);
             }
             else
             {
-                unblind_root(result, cbrt_y, r, modulo);
+                // result = cbrt_y * r^{-1} mod M (r_inv_ptr non-NULL here)
+                mpz_mul(result, cbrt_y, *r_inv_ptr);
+                mpz_mod(result, result, modulo);
             }
             success = true;
         }
@@ -928,7 +957,7 @@ bool kf_factorize_with_blinding(
         kfl_free(&found);
     }
 
-    mpz_clears(r, blinded, rem, cbrt_y, NULL);
+    mpz_clears(r_inv_tmp, blinded, rem, cbrt_y, NULL);
     gmp_randclear(rng);
     return success;
 }
