@@ -135,8 +135,10 @@ typedef enum
 
 static void compute_local_cbrt(mpz_t result,
                                const factor_list_t *factors,
-                               const mpz_t e, // 3^-1 mod (M-1)
-                               const mpz_t modulo)
+                               const mpz_t e,
+                               const mpz_t modulo,
+                               cbrt_cache_t *cache,
+                               bool *cache_dirty)
 {
     int n = factors->count;
 
@@ -159,22 +161,38 @@ static void compute_local_cbrt(mpz_t result,
 #endif
     for (int i = 0; i < n; i++)
     {
-        mpz_t p, cbrt_p;
-        mpz_inits(p, cbrt_p, NULL);
-        mpz_set_ui(p, mpz_get_ui(factors->items[i].prime));
-        mpz_powm(cbrt_p, p, e, modulo); // cbrt(p) = p^e mod M
+        unsigned long p_ul = mpz_get_ui(factors->items[i].prime);
+        mpz_t cbrt_p;
+        mpz_init(cbrt_p);
 
-        if (factors->items[i].exponent == 1)
+        // Check cache first — avoids mpz_powm on subsequent bench runs.
+        int cache_idx = (cache && p_ul > 0)
+                      ? kf_cbrt_cache_find(cache, p_ul) : -1;
+
+        if (cache_idx >= 0)
         {
-            mpz_set(parts[i], cbrt_p);
+            mpz_set(cbrt_p, cache->items[cache_idx].cbrt);
         }
         else
         {
-            // cbrt(p^k) = cbrt(p)^k — one additional powm_ui per repeated factor
+            mpz_t p_mpz;
+            mpz_init_set_ui(p_mpz, p_ul);
+            mpz_powm(cbrt_p, p_mpz, e, modulo);
+            mpz_clear(p_mpz);
+
+            if (cache && p_ul > 0)
+            {
+                kf_cbrt_cache_append(cache, p_ul, cbrt_p);
+                if (cache_dirty) *cache_dirty = true;
+            }
+        }
+
+        if (factors->items[i].exponent == 1)
+            mpz_set(parts[i], cbrt_p);
+        else
             mpz_powm_ui(parts[i], cbrt_p,
                         (unsigned long)factors->items[i].exponent, modulo);
-        }
-        mpz_clears(p, cbrt_p, NULL);
+        mpz_clear(cbrt_p);
     }
 
     // Combine partial products sequentially (only n multiplications).
@@ -335,6 +353,47 @@ static int solve_one(
     mpz_set_ui(three_mpz, 3);
     mpz_invert(e_inv, three_mpz, phi);
     mpz_clears(phi, three_mpz, NULL);
+
+    // Per-rank cbrt cache — eliminates repeated powm calls across bench runs.
+    // Each rank caches only the primes in its own slice, so cache files are
+    // small (~29 entries × ~900 bytes each = ~26 KB per rank).
+    //
+    // Cache path: <modulo_file_without_extension>.cbrt.<rank>
+    // e.g.  data/challenges/k32/modulo_32_7000.txt
+    //   →   data/challenges/k32/modulo_32_7000.cbrt.0   (rank 0)
+    //   →   data/challenges/k32/modulo_32_7000.cbrt.1   (rank 1) etc.
+    //
+    // On second run: all powms are cache hits → local_cbrt takes ~0 ms.
+    char cbrt_cache_path[600];
+    {
+        // Strip trailing ".txt" if present, append ".cbrt.<rank>"
+        const char *base = modulo_file ? modulo_file : "modulo";
+        char base_stripped[512];
+        strncpy(base_stripped, base, sizeof(base_stripped) - 1);
+        base_stripped[sizeof(base_stripped) - 1] = '\0';
+        size_t blen = strlen(base_stripped);
+        if (blen >= 4 && strcmp(base_stripped + blen - 4, ".txt") == 0)
+            base_stripped[blen - 4] = '\0';
+        snprintf(cbrt_cache_path, sizeof(cbrt_cache_path),
+                 "%s.cbrt.%d", base_stripped, rank);
+    }
+
+    cbrt_cache_t local_cbrt_cache;
+    kf_cbrt_cache_init(&local_cbrt_cache);
+    bool cbrt_cache_dirty = false;
+
+    if (kf_cbrt_cache_load(&local_cbrt_cache, cbrt_cache_path))
+    {
+        if (rank == 0)
+            printf("cbrt cache: loaded %d entries from %s\n",
+                   local_cbrt_cache.count, cbrt_cache_path);
+    }
+    else
+    {
+        if (rank == 0)
+            printf("cbrt cache: not found at %s — will build on first run\n",
+                   cbrt_cache_path);
+    }
 
     // Blinding pair table — precomputed on rank 0 only (Algorithm 2 precomputation).
     // Rank 0 uses table[attempt-1].r3 to compute the blinded challenge and
@@ -559,7 +618,8 @@ static int solve_one(
 
         mpz_t local_cbrt;
         mpz_init(local_cbrt);
-        compute_local_cbrt(local_cbrt, &local_factors, e_inv, modulo);
+        compute_local_cbrt(local_cbrt, &local_factors, e_inv, modulo,
+                           &local_cbrt_cache, &cbrt_cache_dirty);
 
         auto t_loc1 = std::chrono::high_resolution_clock::now();
         double local_dt = std::chrono::duration<double, std::milli>(t_loc1 - t_loc0).count();
@@ -736,6 +796,12 @@ static int solve_one(
     mpz_clear(blinded_challenge);
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
+
+    // Save per-rank cbrt cache if new entries were computed this run.
+    if (cbrt_cache_dirty)
+        kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
+    kf_cbrt_cache_clear(&local_cbrt_cache);
+
     mpz_clear(e_inv);
     mpz_clears(challenge, modulo, result, NULL);
     return 1;
