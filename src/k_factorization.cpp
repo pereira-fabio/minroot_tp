@@ -238,6 +238,15 @@ void kf_trial_divide_sieve(const mpz_t n,
     for (int t = 0; t < nthreads; t++)
         kfl_init(&tf[t]);
 
+    // Shared cofactor for early termination.
+    // Each thread divides out its found factors under a mutex.
+    // When cofactor reaches 1, all factors have been found — stop scanning.
+    mpz_t cofactor;
+    mpz_init_set(cofactor, n);
+    omp_lock_t cof_lock;
+    omp_init_lock(&cof_lock);
+    volatile int done = 0;  // set to 1 when cofactor == 1
+
     uint64_t range_size = range_hi - range_lo + 1;
 
 #ifdef _OPENMP
@@ -256,7 +265,7 @@ void kf_trial_divide_sieve(const mpz_t n,
 
         char *seg = (char *)malloc(KF_SEG_SIZE);
 
-        for (uint64_t lo = t_lo; lo <= t_hi; lo += KF_SEG_SIZE)
+        for (uint64_t lo = t_lo; lo <= t_hi && !done; lo += KF_SEG_SIZE)
         {
             uint64_t hi = lo + KF_SEG_SIZE - 1;
             if (hi > t_hi)
@@ -277,15 +286,31 @@ void kf_trial_divide_sieve(const mpz_t n,
             {
                 if (!seg[c - lo])
                     continue;
-                if (mpz_tdiv_ui(n, (unsigned long)c) != 0)
+                // Test against shrinking cofactor (not original n).
+                // As factors are stripped, cofactor shrinks → each test
+                // is proportionally cheaper (limb count drops).
+                if (mpz_tdiv_ui(cofactor, (unsigned long)c) != 0)
                     continue;
-                int e = count_exponent(n, (unsigned long)c);
+                // Factor found — extract full exponent from shared cofactor
+                omp_set_lock(&cof_lock);
+                int e = 0;
+                while (mpz_divisible_ui_p(cofactor, (unsigned long)c))
+                {
+                    mpz_divexact_ui(cofactor, cofactor, (unsigned long)c);
+                    e++;
+                }
+                if (mpz_cmp_ui(cofactor, 1) == 0)
+                    done = 1;
+                omp_unset_lock(&cof_lock);
                 if (e > 0)
                     kfl_append_ul(&tf[t], (unsigned long)c, e);
             }
         }
         free(seg);
     }
+
+    omp_destroy_lock(&cof_lock);
+    mpz_clear(cofactor);
 
     for (int t = 0; t < nthreads; t++)
     {
@@ -313,22 +338,46 @@ void kf_trial_divide_table(const mpz_t n,
     for (int t = 0; t < nthreads; t++)
         kfl_init(&tf[t]);
 
+    // Shared cofactor for early termination.
+    mpz_t cofactor;
+    mpz_init_set(cofactor, n);
+    omp_lock_t cof_lock;
+    omp_init_lock(&cof_lock);
+    volatile int64_t stop_idx = prime_count; // threads stop when idx >= stop_idx
+
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
     for (int64_t i = 0; i < prime_count; i++)
     {
+        if (i >= stop_idx)
+            continue; // early exit: all factors found
+
         int t = 0;
 #ifdef _OPENMP
         t = omp_get_thread_num();
 #endif
-        unsigned long p = (unsigned long)primes[i];
-        if (mpz_tdiv_ui(n, p) != 0)
+        uint64_t p = (uint64_t)primes[i];
+        // Test against shrinking cofactor — cheaper as factors are stripped.
+        if (mpz_tdiv_ui(cofactor, (unsigned long)p) != 0)
             continue;
-        int e = count_exponent(n, p);
+
+        omp_set_lock(&cof_lock);
+        int e = 0;
+        while (mpz_divisible_ui_p(cofactor, (unsigned long)p))
+        {
+            mpz_divexact_ui(cofactor, cofactor, (unsigned long)p);
+            e++;
+        }
+        if (mpz_cmp_ui(cofactor, 1) == 0)
+            stop_idx = i + 1; // signal all threads to stop after this batch
+        omp_unset_lock(&cof_lock);
         if (e > 0)
             kfl_append_ul(&tf[t], p, e);
     }
+
+    omp_destroy_lock(&cof_lock);
+    mpz_clear(cofactor);
 
     for (int t = 0; t < nthreads; t++)
     {
@@ -770,7 +819,7 @@ void kf_compute_cbrt_from_factors(mpz_t result,
 }
 
 // ===========================================================================
-// blinding_pair_t table — precomputation phase (Algorithm 2 / Figure 4)
+// blinding_pair_t table — precomputation phase 
 // ===========================================================================
 
 blinding_pair_t *kf_blinding_table_alloc(int count, const mpz_t modulo)
