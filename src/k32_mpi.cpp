@@ -154,48 +154,56 @@ static void compute_local_cbrt(mpz_t result,
     for (int i = 0; i < n; i++)
         mpz_init_set_ui(parts[i], 1);
 
-    // All powm calls are independent — parallelize across OMP threads.
-    // Each thread allocates its own GMP temporaries (thread-private).
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static)
-#endif
+    // Phase 1 (sequential): resolve cbrt(p) for each factor via cache or powm.
+    // Cache lookups and appends are NOT thread-safe (realloc), so this phase
+    // must run sequentially. With a warm cache every call is a cheap array
+    // lookup (~0 ms total), so sequential cost is negligible.
+    mpz_t *cbrt_vals = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
     for (int i = 0; i < n; i++)
     {
+        mpz_init(cbrt_vals[i]);
         unsigned long p_ul = mpz_get_ui(factors->items[i].prime);
-        mpz_t cbrt_p;
-        mpz_init(cbrt_p);
-
-        // Check cache first — avoids mpz_powm on subsequent bench runs.
         int cache_idx = (cache && p_ul > 0)
                       ? kf_cbrt_cache_find(cache, p_ul) : -1;
 
         if (cache_idx >= 0)
         {
-            mpz_set(cbrt_p, cache->items[cache_idx].cbrt);
+            mpz_set(cbrt_vals[i], cache->items[cache_idx].cbrt);
         }
         else
         {
             mpz_t p_mpz;
             mpz_init_set_ui(p_mpz, p_ul);
-            mpz_powm(cbrt_p, p_mpz, e, modulo);
+            mpz_powm(cbrt_vals[i], p_mpz, e, modulo);
             mpz_clear(p_mpz);
 
             if (cache && p_ul > 0)
             {
-                kf_cbrt_cache_append(cache, p_ul, cbrt_p);
+                kf_cbrt_cache_append(cache, p_ul, cbrt_vals[i]);
                 if (cache_dirty) *cache_dirty = true;
             }
         }
-
-        if (factors->items[i].exponent == 1)
-            mpz_set(parts[i], cbrt_p);
-        else
-            mpz_powm_ui(parts[i], cbrt_p,
-                        (unsigned long)factors->items[i].exponent, modulo);
-        mpz_clear(cbrt_p);
     }
 
-    // Combine partial products sequentially (only n multiplications).
+    // Phase 2 (parallel): parts[i] = cbrt_vals[i]^exponent mod M.
+    // Each iteration reads only its own independent cbrt_vals[i] slot.
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (int i = 0; i < n; i++)
+    {
+        if (factors->items[i].exponent == 1)
+            mpz_set(parts[i], cbrt_vals[i]);
+        else
+            mpz_powm_ui(parts[i], cbrt_vals[i],
+                        (unsigned long)factors->items[i].exponent, modulo);
+    }
+
+    for (int i = 0; i < n; i++)
+        mpz_clear(cbrt_vals[i]);
+    free(cbrt_vals);
+
+    // Combine partial products sequentially.
     mpz_set_ui(result, 1);
     for (int i = 0; i < n; i++)
     {
@@ -354,28 +362,21 @@ static int solve_one(
     mpz_invert(e_inv, three_mpz, phi);
     mpz_clears(phi, three_mpz, NULL);
 
-    // Per-rank cbrt cache — eliminates repeated powm calls across bench runs.
-    // Each rank caches only the primes in its own slice, so cache files are
-    // small (~29 entries × ~900 bytes each = ~26 KB per rank).
-    //
-    // Cache path: <modulo_file_without_extension>.cbrt.<rank>
-    // e.g.  data/challenges/k32/modulo_32_7000.txt
-    //   →   data/challenges/k32/modulo_32_7000.cbrt.0   (rank 0)
-    //   →   data/challenges/k32/modulo_32_7000.cbrt.1   (rank 1) etc.
-    //
-    // On second run: all powms are cache hits → local_cbrt takes ~0 ms.
+    // Per-rank cbrt cache — persists cbrt(p) values across bench iterations.
+    // Path: <modulo_without_ext>.cbrt.<rank>
+    // On a warm run (cache file present) all powms are skipped → ~0 ms recon.
     char cbrt_cache_path[600];
     {
         // Strip trailing ".txt" if present, append ".cbrt.<rank>"
         const char *base = modulo_file ? modulo_file : "modulo";
-        char base_stripped[512];
-        strncpy(base_stripped, base, sizeof(base_stripped) - 1);
-        base_stripped[sizeof(base_stripped) - 1] = '\0';
-        size_t blen = strlen(base_stripped);
-        if (blen >= 4 && strcmp(base_stripped + blen - 4, ".txt") == 0)
-            base_stripped[blen - 4] = '\0';
+        char stripped[512];
+        strncpy(stripped, base, sizeof(stripped) - 1);
+        stripped[sizeof(stripped) - 1] = '\0';
+        size_t blen = strlen(stripped);
+        if (blen >= 4 && strcmp(stripped + blen - 4, ".txt") == 0)
+            stripped[blen - 4] = '\0';
         snprintf(cbrt_cache_path, sizeof(cbrt_cache_path),
-                 "%s.cbrt.%d", base_stripped, rank);
+                 "%s.cbrt.%d", stripped, rank);
     }
 
     cbrt_cache_t local_cbrt_cache;
@@ -388,12 +389,9 @@ static int solve_one(
             printf("cbrt cache: loaded %d entries from %s\n",
                    local_cbrt_cache.count, cbrt_cache_path);
     }
-    else
-    {
-        if (rank == 0)
-            printf("cbrt cache: not found at %s — will build on first run\n",
-                   cbrt_cache_path);
-    }
+    else if (rank == 0)
+        printf("cbrt cache: not found at %s — will build on first run\n",
+               cbrt_cache_path);
 
     // Blinding pair table — precomputed on rank 0 only (Algorithm 2 precomputation).
     // Rank 0 uses table[attempt-1].r3 to compute the blinded challenge and
