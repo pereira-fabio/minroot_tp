@@ -430,7 +430,6 @@ void solve_one(int rank, int nranks, const char *challenge_file,
     {
         kf_cbrt_cache_save(&cbrt_cache, cbrt_file);
     }
-    kf_cbrt_cache_free(&cbrt_cache);
 
     if (rank == 0)
     {
@@ -605,7 +604,33 @@ int main(int argc, char *argv[])
         }
         MPI_Barrier(MPI_COMM_WORLD);
 
-        prime_table = kf_load_prime_table_distributed(primes_file, rank, nranks, &prime_table_count);
+        FILE *f = fopen(primes_file, "rb");
+        if (f)
+        {
+            uint64_t magic, total_primes;
+            // Verify magic header and read the total prime count
+            if (fread(&magic, sizeof(uint64_t), 1, f) == 1 && magic == KF_PRIME_TABLE_MAGIC)
+            {
+                if (fread(&total_primes, sizeof(uint64_t), 1, f) == 1)
+                {
+
+                    // Calculate this rank's specific slice of the prime table
+                    uint64_t slice = total_primes / (uint64_t)nranks;
+                    prime_table_count = (rank == nranks - 1) ? (total_primes - (uint64_t)rank * slice) : slice;
+                    prime_table = (uint32_t *)malloc((size_t)prime_table_count * sizeof(uint32_t));
+
+                    // Seek to the exact offset for this rank and load
+                    fseek(f, sizeof(uint64_t) * 2 + rank * slice * sizeof(uint32_t), SEEK_SET);
+                    if (fread(prime_table, sizeof(uint32_t), (size_t)prime_table_count, f) != (size_t)prime_table_count)
+                    {
+                        free(prime_table);
+                        prime_table = NULL;
+                    }
+                }
+            }
+            fclose(f);
+        }
+
         if (!prime_table)
         {
             fprintf(stderr, "Rank %d failed to load prime table\n", rank);
