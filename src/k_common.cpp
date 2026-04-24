@@ -510,45 +510,64 @@ void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
         perror("[ERROR] fopen failed for JSON");
         return;
     }
+
+    // Helper lambda to write double arrays cleanly
+    auto write_dbl_arr = [&](const char *key, const std::vector<double> &vec, bool is_last = false)
+    {
+        if (vec.empty())
+            return;
+        fprintf(f, "    \"%s\": [", key);
+        for (size_t i = 0; i < vec.size(); ++i)
+        {
+            fprintf(f, "%.3f%s", vec[i], (i == vec.size() - 1) ? "" : ", ");
+        }
+        fprintf(f, "]%s\n", is_last ? "" : ",");
+    };
+
+    // Helper lambda to write int arrays
+    auto write_int_arr = [&](const char *key, const std::vector<int> &vec, bool is_last = false)
+    {
+        if (vec.empty())
+            return;
+        fprintf(f, "    \"%s\": [", key);
+        for (size_t i = 0; i < vec.size(); ++i)
+        {
+            fprintf(f, "%d%s", vec[i], (i == vec.size() - 1) ? "" : ", ");
+        }
+        fprintf(f, "]%s\n", is_last ? "" : ",");
+    };
+
     fprintf(f, "{\n");
     fprintf(f, "  \"metadata\": {\n");
     fprintf(f, "    \"k_size\": %d,\n", res.k_size);
     fprintf(f, "    \"challenge_bits\": %zu,\n", res.challenge_bits);
     fprintf(f, "    \"method\": \"%s\",\n", res.method_name);
-    fprintf(f, "    \"threads\": %d,\n", res.num_threads);
+    fprintf(f, "    \"threads_per_rank\": %d,\n", res.num_threads);
+    fprintf(f, "    \"mpi_ranks\": %d,\n", res.mpi_ranks);
     fprintf(f, "    \"runs\": %d\n", res.bench_count);
     fprintf(f, "  },\n");
 
     fprintf(f, "  \"powm_baseline_ms\": %.3f,\n", res.powm_baseline_ms);
 
-    // Individual Factor Times
     fprintf(f, "  \"raw_data\": {\n");
-    fprintf(f, "    \"factor_ms\": [");
-    for (size_t i = 0; i < res.factor_times.size(); ++i)
-    {
-        fprintf(f, "%.3f%s", res.factor_times[i], (i == res.factor_times.size() - 1) ? "" : ", ");
-    }
-    fprintf(f, "],\n");
 
-    // Individual Recon Times
-    fprintf(f, "    \"recon_ms\": [");
-    for (size_t i = 0; i < res.recon_times.size(); ++i)
-    {
-        fprintf(f, "%.3f%s", res.recon_times[i], (i == res.recon_times.size() - 1) ? "" : ", ");
-    }
-    fprintf(f, "],\n");
+    // Core Timings
+    write_dbl_arr("factor_ms", res.factor_times);
+    write_dbl_arr("recon_ms", res.recon_times);
 
-    // Individual Totals
-    fprintf(f, "    \"total_ms\": [");
-    for (size_t i = 0; i < res.total_times.size(); ++i)
-    {
-        fprintf(f, "%.3f%s", res.total_times[i], (i == res.total_times.size() - 1) ? "" : ", ");
-    }
-    fprintf(f, "]\n");
+    // MPI Timings (Only prints if populated)
+    write_dbl_arr("local_cbrt_ms", res.local_cbrt_times);
+    write_dbl_arr("gather_ms", res.gather_times);
+    write_dbl_arr("combine_ms", res.combine_times);
+    write_int_arr("blinding_attempts", res.blinding_attempts);
+
+    // Total always printed last
+    write_dbl_arr("total_ms", res.total_times, true);
+
     fprintf(f, "  }\n");
     fprintf(f, "}\n");
     fclose(f);
-    printf("[INFO] JSON benchmark with raw data written to %s\n", filepath);
+    printf("[INFO] JSON benchmark written to %s\n", filepath);
 }
 
 // ---------------------------------------------------------------------------

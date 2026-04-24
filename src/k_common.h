@@ -238,14 +238,21 @@ typedef struct
     size_t challenge_bits;
     const char *method_name;
     int num_threads;
+    int mpi_ranks; 
     int bench_count;
 
-    // Detailed timing lists
+    // Detailed timing lists (raw data)
     std::vector<double> factor_times;
     std::vector<double> recon_times;
     std::vector<double> total_times;
 
-    double powm_baseline_ms; // We usually only run the baseline once
+    // MPI-Specific timing lists (left empty for k16/k32 non-MPI)
+    std::vector<double> local_cbrt_times;
+    std::vector<double> gather_times;
+    std::vector<double> combine_times;
+    std::vector<int> blinding_attempts;
+
+    double powm_baseline_ms;
 } benchmark_results_t;
 
 void write_benchmark_json(const char *filepath, const benchmark_results_t &results);

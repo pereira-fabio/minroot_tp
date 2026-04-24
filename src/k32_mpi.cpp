@@ -23,17 +23,8 @@
 //
 // Methods:
 //   sieve  — segmented sieve, primes generated on-the-fly   [default]
-//   table  — precomputed prime file; each rank loads its slice via binary
-//             search so only ~range/nranks × 4 bytes are read per rank
-//
-// Usage:
-//   k32_mpi [challenge] [modulo] [--method sieve|table] [--primes FILE]
-//           [--precompute] [--bench N]
-//   k32_mpi --all [--data DIR] [--method sieve|table] [--primes FILE]
-//           [--bench N]
-//
-// Prime table generation (rank 0 only, one-time, ~10 s):
-//   srun ... k32_mpi --precompute [--primes k32_primes.bin]
+//   table  — precomputed prime file; each rank loads its assigned slice
+//   compare— runs distributed factor, then rank 0 runs sequential powm
 // =============================================================================
 
 #include "k_common.h"
@@ -42,767 +33,469 @@
 #include <mpi.h>
 #include <gmp.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include <math.h>
-#include <time.h>
 #include <chrono>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include <cmath>
 
 // ---------------------------------------------------------------------------
-// Constants
+// Main solver routine (called per challenge file)
 // ---------------------------------------------------------------------------
 
-#define SEG_SIZE (1 << 19)                      // 512 KiB sieve segment
-#define PRIME_TABLE_MAGIC 0x4B33325052494D53ULL // "K32PRIMS"
-#define WRITE_BATCH 65536
-
-typedef enum
+void solve_one(int rank, int nranks, const char *challenge_file,
+               const char *modulo_file, int bench_count,
+               int method, // METHOD_SIEVE, METHOD_TABLE, METHOD_COMPARE
+               const uint32_t *prime_table, int64_t prime_table_count,
+               int sp_count, const unsigned *sp,
+               const char *json_output_file)
 {
-    METHOD_SIEVE,
-    METHOD_TABLE,
-    METHOD_COMPARE // sieve (distributed) + sequential powm on rank 0 for comparison
-} run_method_t;
-
-// ---------------------------------------------------------------------------
-// Factor list: kfactor_list_t / kfl_* from k_common.h.
-// Trial division: kf_trial_divide_* from k_factorization.h.
-// ---------------------------------------------------------------------------
-#define factor_list_t kfactor_list_t
-#define fl_init kfl_init
-#define fl_free kfl_free
-#define fl_append(f, p, e) kfl_append_ul(f, (unsigned long)(p), (int)(e))
-
-// ---------------------------------------------------------------------------
-// Small prime generator (same as k32.cpp)
-// ---------------------------------------------------------------------------
-
-// kf_kf_generate_small_primes() — in k_factorization.cpp
-
-// ---------------------------------------------------------------------------
-// Prime table I/O
-//
-// File format: [uint64_t magic][uint64_t count][uint32_t prime[count]]
-// Sorted ascending, range [65537, 2^32], ~813 MB total.
-//
-// generate_and_save_prime_table: called by rank 0 only.
-// load_prime_slice: called by every rank; uses binary search to seek
-//   directly to [range_lo, range_hi] — only that slice is read into RAM.
-// ---------------------------------------------------------------------------
-
-// kf_generate_and_save_prime_table() — in k_factorization.cpp
-
-// Binary search: index of first prime >= target in the sorted uint32_t file.
-// Primes start at byte offset 16 (after magic + count header).
-// prime_file_lower_bound() — internal to kf_load_prime_slice()
-
-// Load only the slice [range_lo, range_hi] of the prime table.
-// Returns a malloc'd uint32_t array; sets *slice_count.
-// Returns NULL on failure (file not found or I/O error).
-// kf_load_prime_slice() — in k_factorization.cpp
-
-// kf_kf_trial_divide_sieve() — in k_factorization.cpp
-
-// kf_kf_trial_divide_table() — in k_factorization.cpp
-
-// ---------------------------------------------------------------------------
-// Local cube root reconstruction — called by EVERY rank
-//
-// Computes  partial = ∏ cbrt(p_i)^e_i  mod M  for this rank's local factors.
-// e = 3^-1 mod (M-1) is precomputed once per solve_one call (same M → same e
-// on every rank) and passed in.
-//
-// Parallelism model (two levels):
-//   MPI level:   all ranks run this function simultaneously, each with its
-//                own subset of factors (~total_factors / nranks powm calls).
-//   OpenMP level: the powm calls within one rank are independent — safe to
-//                 parallelize across the rank's threads.
-//
-// Why OpenMP matters here:
-//   For large challenges each powm operates on a ~N-bit modulus.
-//   Without threading: 104 sequential powm calls on a 7019-bit modulus
-//   takes ~9.6 s (observed). With 32 OMP threads: ~104/32 ≈ 4 calls per
-//   thread → expected ~300-400 ms.
-//
-// The results from all ranks are gathered and multiplied at rank 0, giving
-//   cbrt(challenge) = ∏_r partial_r  mod M   (cbrt homomorphism).
-// ---------------------------------------------------------------------------
-
-static void compute_local_cbrt(mpz_t result,
-                               const factor_list_t *factors,
-                               const mpz_t e,
-                               const mpz_t modulo,
-                               cbrt_cache_t *cache,
-                               bool *cache_dirty)
-{
-    int n = factors->count;
-
-    // Empty factor list → this rank contributes the identity element 1.
-    if (n == 0)
-    {
-        mpz_set_ui(result, 1);
-        return;
-    }
-
-    // Allocate one mpz_t per factor — each thread writes its own slot.
-    mpz_t *parts = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
-    for (int i = 0; i < n; i++)
-        mpz_init_set_ui(parts[i], 1);
-
-    // Phase 1 (sequential): resolve cbrt(p) for each factor via cache or powm.
-    // Cache lookups and appends are NOT thread-safe (realloc), so this phase
-    // must run sequentially. With a warm cache every call is a cheap array
-    // lookup (~0 ms total), so sequential cost is negligible.
-    mpz_t *cbrt_vals = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
-    for (int i = 0; i < n; i++)
-    {
-        mpz_init(cbrt_vals[i]);
-        unsigned long p_ul = mpz_get_ui(factors->items[i].prime);
-        int cache_idx = (cache && p_ul > 0)
-                      ? kf_cbrt_cache_find(cache, p_ul) : -1;
-
-        if (cache_idx >= 0)
-        {
-            mpz_set(cbrt_vals[i], cache->items[cache_idx].cbrt);
-        }
-        else
-        {
-            mpz_t p_mpz;
-            mpz_init_set_ui(p_mpz, p_ul);
-            mpz_powm(cbrt_vals[i], p_mpz, e, modulo);
-            mpz_clear(p_mpz);
-
-            if (cache && p_ul > 0)
-            {
-                kf_cbrt_cache_append(cache, p_ul, cbrt_vals[i]);
-                if (cache_dirty) *cache_dirty = true;
-            }
-        }
-    }
-
-    // Phase 2 (parallel): parts[i] = cbrt_vals[i]^exponent mod M.
-    // Each iteration reads only its own independent cbrt_vals[i] slot.
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-    for (int i = 0; i < n; i++)
-    {
-        if (factors->items[i].exponent == 1)
-            mpz_set(parts[i], cbrt_vals[i]);
-        else
-            mpz_powm_ui(parts[i], cbrt_vals[i],
-                        (unsigned long)factors->items[i].exponent, modulo);
-    }
-
-    for (int i = 0; i < n; i++)
-        mpz_clear(cbrt_vals[i]);
-    free(cbrt_vals);
-
-    // Combine partial products sequentially.
-    mpz_set_ui(result, 1);
-    for (int i = 0; i < n; i++)
-    {
-        mpz_mul(result, result, parts[i]);
-        mpz_mod(result, result, modulo);
-        mpz_clear(parts[i]);
-    }
-    free(parts);
-}
-
-// Timing report: print_timing_stat_moments() from k_common.h at width 30.
-// print_stat() is a thin wrapper kept for call-site readability.
-#define print_stat(lbl, sum, sumsq, n) print_timing_stat_moments(lbl, sum, sumsq, n, 30, true)
-
-// ---------------------------------------------------------------------------
-// solve_one — solve a single (challenge, modulo) pair across all MPI ranks
-//
-// Reconstruction flow (NEW vs OLD):
-//   OLD: gather all (prime,exp) pairs to rank 0 → rank 0 does all powm
-//   NEW: every rank computes its partial cbrt locally (powm parallelised)
-//        → MPI_Gather of nranks × ~875 bytes → rank 0 multiplies nranks terms
-// ---------------------------------------------------------------------------
-
-static int solve_one(
-    int rank, int nranks,
-    const char *challenge_file, const char *modulo_file,
-    int bench_count, int sp_count, const unsigned *sp,
-    uint64_t my_lo, uint64_t my_hi,
-    run_method_t method, const char *primes_file)
-{
-    if (rank == 0)
-    {
-        printf("\n=== %s ===\n", challenge_file);
-        fflush(stdout);
-    }
-
-    // ---- Rank 0 reads files; all ranks get the values via Bcast ----
-    // If rank 0 cannot open the files it broadcasts read_ok=0 and all ranks
-    // call MPI_Abort together — avoiding the hang caused by exit(1) on rank 0
-    // while other ranks block on MPI_Bcast.
-
-    int read_ok = 1;
-    size_t challenge_nbytes = 0, modulo_nbytes = 0;
-    unsigned char *challenge_bytes = NULL, *modulo_bytes = NULL;
-
     mpz_t challenge, modulo, result;
     mpz_inits(challenge, modulo, result, NULL);
 
     if (rank == 0)
     {
-        FILE *fc = fopen(challenge_file, "rb");
-        FILE *fm = fopen(modulo_file, "rb");
-        if (!fc || !fm)
-        {
-            fprintf(stderr, "Error: cannot open '%s' or '%s'\n",
-                    challenge_file, modulo_file);
-            if (fc)
-                fclose(fc);
-            if (fm)
-                fclose(fm);
-            read_ok = 0;
-        }
-        else
-        {
-            fclose(fc);
-            fclose(fm);
-            read_mpz_from_file(challenge, challenge_file);
-            read_mpz_from_file(modulo, modulo_file);
-            challenge_bytes = (unsigned char *)mpz_export(
-                NULL, &challenge_nbytes, 1, 1, 0, 0, challenge);
-            modulo_bytes = (unsigned char *)mpz_export(
-                NULL, &modulo_nbytes, 1, 1, 0, 0, modulo);
-        }
+        printf("\n=== %s ===\n", challenge_file);
+        read_mpz_from_file(challenge, challenge_file);
+        read_mpz_from_file(modulo, modulo_file);
     }
 
-    // Broadcast success flag before any data — all ranks abort cleanly on failure
-    MPI_Bcast(&read_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    if (!read_ok)
-    {
-        mpz_clears(challenge, modulo, result, NULL);
-        MPI_Abort(MPI_COMM_WORLD, 1);
-        return 0;
-    }
-
-    // Broadcast sizes, allocate on non-root, then broadcast data
-    uint64_t cn64 = (uint64_t)challenge_nbytes;
-    uint64_t mn64 = (uint64_t)modulo_nbytes;
-    MPI_Bcast(&cn64, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&mn64, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-    challenge_nbytes = (size_t)cn64;
-    modulo_nbytes = (size_t)mn64;
-
-    if (rank != 0)
-    {
-        challenge_bytes = (unsigned char *)malloc(challenge_nbytes);
-        modulo_bytes = (unsigned char *)malloc(modulo_nbytes);
-    }
-    MPI_Bcast(challenge_bytes, (int)challenge_nbytes, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
-    MPI_Bcast(modulo_bytes, (int)modulo_nbytes, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
-
-    if (rank != 0)
-    {
-        mpz_import(challenge, challenge_nbytes, 1, 1, 0, 0, challenge_bytes);
-        mpz_import(modulo, modulo_nbytes, 1, 1, 0, 0, modulo_bytes);
-    }
-    free(challenge_bytes);
-    free(modulo_bytes);
+    // Broadcast challenge/modulo to all ranks
+    size_t cbytes, mbytes;
+    unsigned char *cbuf = NULL, *mbuf = NULL;
 
     if (rank == 0)
     {
-        printf("Challenge: %zu bits\n", mpz_sizeinbase(challenge, 2));
+        cbuf = (unsigned char *)mpz_export(NULL, &cbytes, 1, 1, 0, 0, challenge);
+        mbuf = (unsigned char *)mpz_export(NULL, &mbytes, 1, 1, 0, 0, modulo);
+    }
+
+    MPI_Bcast(&cbytes, sizeof(size_t), MPI_BYTE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&mbytes, sizeof(size_t), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    if (rank != 0)
+    {
+        cbuf = (unsigned char *)malloc(cbytes);
+        mbuf = (unsigned char *)malloc(mbytes);
+    }
+
+    MPI_Bcast(cbuf, (int)cbytes, MPI_BYTE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(mbuf, (int)mbytes, MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    if (rank != 0)
+    {
+        mpz_import(challenge, cbytes, 1, 1, 0, 0, cbuf);
+        mpz_import(modulo, mbytes, 1, 1, 0, 0, mbuf);
+    }
+
+    free(cbuf);
+    free(mbuf);
+
+    size_t cbits = mpz_sizeinbase(challenge, 2);
+
+    // Initialize benchmark results structure on Rank 0
+    benchmark_results_t results;
+    if (rank == 0)
+    {
+        results.k_size = 32;
+        results.challenge_bits = cbits;
+        results.method_name = method == 1 ? "table" : (method == 2 ? "compare" : "sieve");
+        results.num_threads = omp_get_max_threads();
+        results.mpi_ranks = nranks;
+        results.bench_count = bench_count;
+        results.powm_baseline_ms = 0.0;
+    }
+
+    if (rank == 0)
+    {
+        printf("Challenge: %zu bits\n", cbits);
         printf("Modulo:    %zu bits\n", mpz_sizeinbase(modulo, 2));
         printf("Ranks: %d  Threads/rank: %d  Total workers: %d\n",
-               nranks,
-#ifdef _OPENMP
-               omp_get_max_threads(), nranks * omp_get_max_threads());
-#else
-               1, nranks);
-#endif
-        fflush(stdout);
+               nranks, omp_get_max_threads(), nranks * omp_get_max_threads());
+        if (prime_table && prime_table_count > 0)
+            printf("Rank 0 slice: %" PRId64 " primes\n", prime_table_count);
     }
 
-    // ---- Load prime slice for table method (once, outside bench loop) ----
-    // Each rank loads only its [my_lo, my_hi] slice via binary search on the
-    // sorted prime file — no full 800+ MB read per rank.
-
-    uint32_t *prime_slice = NULL;
-    int64_t slice_count = 0;
-
-    if (method == METHOD_TABLE)
-    {
-        uint64_t sc = 0;
-        prime_slice = kf_load_prime_slice(&sc, primes_file,
-                                          (uint32_t)my_lo, (uint32_t)my_hi);
-        slice_count = (int64_t)sc;
-        if (!prime_slice)
-        {
-            fprintf(stderr, "[rank %d] Failed to load prime slice from %s\n",
-                    rank, primes_file);
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-        if (rank == 0)
-            printf("Rank 0 slice: %" PRId64 " primes\n", slice_count);
-        fflush(stdout);
-    }
-
-    // Fixed-size byte buffer for partial cbrt export (big-endian, zero-padded).
-    // Size is the same on all ranks since modulo is broadcast.
-    size_t cbrt_bytes = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1; // +1 safety
-
-    // Precompute e = 3^-1 mod (M-1) once — same value on every rank.
-    mpz_t phi, e_inv, three_mpz;
-    mpz_inits(phi, e_inv, three_mpz, NULL);
-    mpz_sub_ui(phi, modulo, 1);
-    mpz_set_ui(three_mpz, 3);
-    mpz_invert(e_inv, three_mpz, phi);
-    mpz_clears(phi, three_mpz, NULL);
-
-    // Per-rank cbrt cache — persists cbrt(p) values across bench iterations.
-    // Path: <modulo_without_ext>.cbrt.<rank>
-    // On a warm run (cache file present) all powms are skipped → ~0 ms recon.
-    char cbrt_cache_path[600];
-    {
-        // Strip trailing ".txt" if present, append ".cbrt.<rank>"
-        const char *base = modulo_file ? modulo_file : "modulo";
-        char stripped[512];
-        strncpy(stripped, base, sizeof(stripped) - 1);
-        stripped[sizeof(stripped) - 1] = '\0';
-        size_t blen = strlen(stripped);
-        if (blen >= 4 && strcmp(stripped + blen - 4, ".txt") == 0)
-            stripped[blen - 4] = '\0';
-        snprintf(cbrt_cache_path, sizeof(cbrt_cache_path),
-                 "%s.cbrt.%d", stripped, rank);
-    }
-
-    cbrt_cache_t local_cbrt_cache;
-    kf_cbrt_cache_init(&local_cbrt_cache);
-    bool cbrt_cache_dirty = false;
-
-    if (kf_cbrt_cache_load(&local_cbrt_cache, cbrt_cache_path))
-    {
-        if (rank == 0)
-            printf("cbrt cache: loaded %d entries from %s\n",
-                   local_cbrt_cache.count, cbrt_cache_path);
-    }
-    else if (rank == 0)
-        printf("cbrt cache: not found at %s — will build on first run\n",
-               cbrt_cache_path);
-
-    // Blinding pair table — precomputed on rank 0 only (Algorithm 2 precomputation).
-    // Rank 0 uses table[attempt-1].r3 to compute the blinded challenge and
-    // table[attempt-1].r_inv to unblind the result.  All ranks receive the
-    // blinded challenge via MPI_Bcast so they factor the same number.
-    // No mpz_powm_ui (r^3) or mpz_invert (r^{-1}) in the online loop.
-    const int BLIND_TABLE_SIZE = 255;
-    blinding_pair_t *blind_table = NULL;
+    char base[504];
     if (rank == 0)
     {
-        blind_table = kf_blinding_table_alloc(BLIND_TABLE_SIZE, modulo);
-        if (!blind_table)
-        {
-            fprintf(stderr, "[rank 0] Failed to allocate blinding table\n");
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
+        strncpy(base, modulo_file, sizeof(base) - 1);
+        base[sizeof(base) - 1] = '\0';
+        char *dot = strrchr(base, '.');
+        if (dot)
+            *dot = '\0';
+    }
+    MPI_Bcast(base, sizeof(base), MPI_CHAR, 0, MPI_COMM_WORLD);
+
+    char cbrt_file[512];
+    snprintf(cbrt_file, sizeof(cbrt_file), "%s_r%d.cbrt", base, rank);
+
+    cbrt_cache_t cbrt_cache;
+    kf_cbrt_cache_init(&cbrt_cache);
+    kf_cbrt_cache_load(&cbrt_cache, cbrt_file);
+    bool cbrt_cache_dirty = false;
+
+    // Buffer for MPI_Gather (1 mpz_t per rank)
+    size_t out_capacity = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
+    unsigned char *local_cbrt_bytes = (unsigned char *)malloc(out_capacity);
+    unsigned char *gathered_bytes = NULL;
+    if (rank == 0)
+    {
+        gathered_bytes = (unsigned char *)malloc(out_capacity * (size_t)nranks);
     }
 
-    mpz_t blinded_challenge;
-    mpz_init(blinded_challenge);
-
-    // Timing accumulators (rank 0 records all; max_local via MPI_Reduce).
-    // recon_{sum,sq} track the per-iteration reconstruction total directly
-    // (loc + gat + com per run) so that stddev is computed correctly.
-    // Summing the squares of individual phases gives the wrong variance.
-    bench_accum_t fac_acc = {0, 0};   // factoring
-    bench_accum_t loc_acc = {0, 0};   // max local cbrt across ranks
-    bench_accum_t gat_acc = {0, 0};   // MPI gather
-    bench_accum_t com_acc = {0, 0};   // combine + unblind on rank 0
-    bench_accum_t recon_acc = {0, 0}; // loc + gat + com per iteration
-    double cur_max_loc = 0.0;         // carried within one iteration
-
-    // ---- Benchmark loop ----
+    bench_accum_t f_acc, r_acc, lc_acc, g_acc, c_acc, att_acc;
+    accum_reset(&f_acc);
+    accum_reset(&r_acc);
+    accum_reset(&lc_acc);
+    accum_reset(&g_acc);
+    accum_reset(&c_acc);
+    accum_reset(&att_acc);
 
     for (int bench = 0; bench < bench_count; bench++)
     {
-
-        factor_list_t local_factors;
-        fl_init(&local_factors);
-        // Per-iteration components at rank 0 — used for correct recon stddev
-        double iter_gat = 0.0, iter_com = 0.0;
-
-        // ---- BLINDING + FACTORING (retry loop) ----
-        //
-        // Rank 0 draws r, computes blinded = challenge * r^3 mod M, bcasts it.
-        // All ranks factor their slice of blinded.  Rank 0 gathers each rank's
-        // local factor product to check completeness (product == blinded).
-        // On incomplete factorisation rank 0 signals retry via MPI_Bcast.
-        // The factoring barrier and timing envelope span all retry attempts.
-
         MPI_Barrier(MPI_COMM_WORLD);
-        auto t_fac0 = std::chrono::high_resolution_clock::now();
+        auto t_start = std::chrono::high_resolution_clock::now();
+
+        gmp_randstate_t rng;
+        gmp_randinit_mt(rng);
+        gmp_randseed_ui(rng, (unsigned long)(time(NULL) + bench));
+
+        mpz_t r, r_inv, blinded, rem, result_cbrt, local_cbrt;
+        mpz_inits(r, r_inv, blinded, rem, result_cbrt, local_cbrt, NULL);
 
         int attempt = 0;
-        const int MAX_ATTEMPTS = 256;
-        // blinded_nbytes: fixed size large enough for any value < M
-        size_t blinded_nbytes = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
-        unsigned char *blinded_buf = (unsigned char *)malloc(blinded_nbytes);
+        bool success = false;
+        kfactor_list_t local_factors;
+        kfl_init(&local_factors);
 
-        for (attempt = 0; attempt < MAX_ATTEMPTS; attempt++)
+        double local_t_fac = 0.0;
+
+        while (!success && attempt < 100)
         {
-            // -- Rank 0 computes blinded challenge and broadcasts it --
-            //
-            // attempt 0: r = 1, blinded = challenge (no arithmetic).
-            // attempt i: use precomputed table[i-1].r3 — one mul + mod,
-            //            no mpz_powm_ui, no mpz_invert in the hot path.
+            auto t_fac_start = std::chrono::high_resolution_clock::now();
+
+            // Rank 0 coordinates the blinding
             if (rank == 0)
             {
                 if (attempt == 0)
                 {
-                    mpz_set(blinded_challenge, challenge);
+                    mpz_set_ui(r, 1);
+                    mpz_set(blinded, challenge);
                 }
                 else
                 {
-                    int idx = attempt - 1;
-                    if (idx < BLIND_TABLE_SIZE)
+                    do
                     {
-                        // Precomputed path: y = challenge * r^3 mod M.
-                        mpz_mul(blinded_challenge, challenge,
-                                blind_table[idx].r3);
-                        mpz_mod(blinded_challenge, blinded_challenge, modulo);
-                    }
-                    else
-                    {
-                        // Fallback: table exhausted (shouldn't happen with
-                        // MAX_ATTEMPTS <= BLIND_TABLE_SIZE + 1).
-                        fprintf(stderr,
-                                "[rank 0] WARNING: blinding table exhausted "
-                                "at attempt %d\n",
-                                attempt);
-                        mpz_set(blinded_challenge, challenge);
-                    }
-                }
+                        mpz_urandomm(r, rng, modulo);
+                    } while (mpz_cmp_ui(r, 2) < 0);
 
-                // Export blinded_challenge to fixed-size big-endian buffer.
-                memset(blinded_buf, 0, blinded_nbytes);
-                size_t written = 0;
-                unsigned char *tmp = (unsigned char *)mpz_export(
-                    NULL, &written, 1, 1, 0, 0, blinded_challenge);
-                if (tmp && written > 0 && written <= blinded_nbytes)
-                {
-                    memcpy(blinded_buf + blinded_nbytes - written, tmp, written);
-                    free(tmp);
+                    mpz_powm_ui(blinded, r, 3, modulo);
+                    mpz_mul(blinded, blinded, challenge);
+                    mpz_mod(blinded, blinded, modulo);
+                    mpz_invert(r_inv, r, modulo);
                 }
             }
 
-            // Broadcast blinded challenge to all ranks.
-            MPI_Bcast(blinded_buf, (int)blinded_nbytes, MPI_UNSIGNED_CHAR,
-                      0, MPI_COMM_WORLD);
+            size_t bytes_count;
+            unsigned char *b_buf = NULL;
+            if (rank == 0)
+            {
+                b_buf = (unsigned char *)mpz_export(NULL, &bytes_count, 1, 1, 0, 0, blinded);
+            }
+            MPI_Bcast(&bytes_count, sizeof(size_t), MPI_BYTE, 0, MPI_COMM_WORLD);
             if (rank != 0)
-                mpz_import(blinded_challenge, blinded_nbytes, 1, 1, 0, 0,
-                           blinded_buf);
+            {
+                b_buf = (unsigned char *)malloc(bytes_count);
+            }
+            MPI_Bcast(b_buf, (int)bytes_count, MPI_BYTE, 0, MPI_COMM_WORLD);
+            if (rank != 0)
+            {
+                mpz_import(blinded, bytes_count, 1, 1, 0, 0, b_buf);
+            }
+            free(b_buf);
 
-            // -- All ranks factor their slice of blinded_challenge --
-            fl_free(&local_factors);
-            fl_init(&local_factors);
+            kfl_free(&local_factors);
 
-            if (method == METHOD_SIEVE || method == METHOD_COMPARE)
-                kf_trial_divide_sieve(blinded_challenge, my_lo, my_hi,
-                                      sp_count, sp, &local_factors);
+            if (prime_table && prime_table_count > 0)
+                kf_trial_divide_table(blinded, prime_table, prime_table_count, &local_factors);
             else
-                kf_trial_divide_table(blinded_challenge, prime_slice,
-                                      slice_count, &local_factors);
+            {
+                uint64_t full_range = (uint64_t)UINT32_MAX - 65537ULL + 1;
+                uint64_t slice = full_range / (uint64_t)nranks;
+                uint64_t my_lo = 65537ULL + (uint64_t)rank * slice;
+                uint64_t my_hi = (rank == nranks - 1) ? (uint64_t)UINT32_MAX : my_lo + slice - 1;
+                kf_trial_divide_sieve(blinded, my_lo, my_hi, sp_count, sp, &local_factors);
+            }
 
-            // -- Completeness check: gather local factor products to rank 0 --
-            //
-            // Each rank computes local_prod = ∏ p_i^{e_i} for its found factors
-            // and exports it as a fixed-size buffer.  Rank 0 multiplies all
-            // products and checks whether the result equals blinded_challenge.
-
-            mpz_t local_prod;
-            mpz_init_set_ui(local_prod, 1);
+            mpz_set(rem, blinded);
             for (int i = 0; i < local_factors.count; i++)
             {
                 unsigned long p = mpz_get_ui(local_factors.items[i].prime);
                 for (int ex = 0; ex < local_factors.items[i].exponent; ex++)
-                    mpz_mul_ui(local_prod, local_prod, p);
+                    mpz_divexact_ui(rem, rem, p);
             }
 
-            // Export local_prod into a fixed-size buffer (same size as cbrt_bytes
-            // — both are bounded by modulo, which is larger than any factor product).
-            unsigned char *prod_buf = (unsigned char *)calloc(cbrt_bytes, 1);
-            {
-                size_t written = 0;
-                unsigned char *tmp = (unsigned char *)mpz_export(
-                    NULL, &written, 1, 1, 0, 0, local_prod);
-                if (tmp && written > 0 && written <= cbrt_bytes)
-                {
-                    memcpy(prod_buf + cbrt_bytes - written, tmp, written);
-                    free(tmp);
-                }
-            }
-            mpz_clear(local_prod);
+            mpz_t rem_prod;
+            mpz_init(rem_prod);
 
-            unsigned char *all_prods = NULL;
-            if (rank == 0)
-                all_prods = (unsigned char *)malloc((size_t)nranks * cbrt_bytes);
-
-            MPI_Gather(prod_buf, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-                       all_prods, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-                       0, MPI_COMM_WORLD);
-            free(prod_buf);
-
-            // Rank 0 checks completeness; broadcasts result.
-            int complete = 0;
             if (rank == 0)
             {
-                mpz_t combined_prod, part;
-                mpz_init_set_ui(combined_prod, 1);
-                mpz_init(part);
-                for (int rk = 0; rk < nranks; rk++)
+                mpz_t *rems = (mpz_t *)malloc((size_t)nranks * sizeof(mpz_t));
+                for (int i = 0; i < nranks; i++)
+                    mpz_init(rems[i]);
+
+                size_t l_bytes;
+                unsigned char *r_buf = (unsigned char *)mpz_export(NULL, &l_bytes, 1, 1, 0, 0, rem);
+                MPI_Gather(&l_bytes, sizeof(size_t), MPI_BYTE, NULL, 0, MPI_BYTE, 0, MPI_COMM_WORLD);
+
+                size_t *all_bytes = (size_t *)malloc((size_t)nranks * sizeof(size_t));
+                MPI_Gather(&l_bytes, sizeof(size_t), MPI_BYTE, all_bytes, sizeof(size_t), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+                int *displs = (int *)malloc((size_t)nranks * sizeof(int));
+                int *rcounts = (int *)malloc((size_t)nranks * sizeof(int));
+                int total_bytes = 0;
+                for (int i = 0; i < nranks; i++)
                 {
-                    mpz_import(part, cbrt_bytes, 1, 1, 0, 0,
-                               all_prods + (size_t)rk * cbrt_bytes);
-                    mpz_mul(combined_prod, combined_prod, part);
+                    rcounts[i] = (int)all_bytes[i];
+                    displs[i] = total_bytes;
+                    total_bytes += rcounts[i];
                 }
-                mpz_clear(part);
-                free(all_prods);
 
-                complete = (mpz_cmp(combined_prod, blinded_challenge) == 0) ? 1 : 0;
-                mpz_clear(combined_prod);
+                unsigned char *recv_buf = (unsigned char *)malloc((size_t)total_bytes);
+                MPI_Gatherv(r_buf, (int)l_bytes, MPI_BYTE, recv_buf, rcounts, displs, MPI_BYTE, 0, MPI_COMM_WORLD);
 
-                if (bench == 0)
+                for (int i = 0; i < nranks; i++)
                 {
-                    printf("Blinding attempt %d: %s\n", attempt + 1,
-                           complete ? "smooth — proceeding" : "not smooth — retrying");
-                    fflush(stdout);
+                    if (rcounts[i] > 0)
+                        mpz_import(rems[i], (size_t)rcounts[i], 1, 1, 0, 0, recv_buf + displs[i]);
+                    else
+                        mpz_set_ui(rems[i], 0);
+                }
+
+                mpz_set(rem_prod, blinded);
+                for (int i = 0; i < nranks; i++)
+                {
+                    if (mpz_cmp_ui(rems[i], 0) > 0)
+                    {
+                        mpz_divexact(rem_prod, rem_prod, rems[i]);
+                    }
+                }
+                mpz_mul(rem_prod, rem_prod, rems[0]);
+
+                free(r_buf);
+                free(all_bytes);
+                free(displs);
+                free(rcounts);
+                free(recv_buf);
+                for (int i = 0; i < nranks; i++)
+                    mpz_clear(rems[i]);
+                free(rems);
+            }
+            else
+            {
+                size_t l_bytes;
+                unsigned char *r_buf = (unsigned char *)mpz_export(NULL, &l_bytes, 1, 1, 0, 0, rem);
+                MPI_Gather(&l_bytes, sizeof(size_t), MPI_BYTE, NULL, 0, MPI_BYTE, 0, MPI_COMM_WORLD);
+                MPI_Gather(&l_bytes, sizeof(size_t), MPI_BYTE, NULL, 0, MPI_BYTE, 0, MPI_COMM_WORLD);
+                MPI_Gatherv(r_buf, (int)l_bytes, MPI_BYTE, NULL, NULL, NULL, MPI_BYTE, 0, MPI_COMM_WORLD);
+                free(r_buf);
+            }
+
+            int global_success = 0;
+            if (rank == 0)
+            {
+                if (mpz_cmp_ui(rem_prod, 1) == 0)
+                    global_success = 1;
+            }
+            MPI_Bcast(&global_success, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+            attempt++;
+            if (global_success)
+            {
+                success = true;
+                if (rank == 0 && bench == 0)
+                {
+                    printf("Blinding attempt %d: smooth — proceeding\n", attempt);
                 }
             }
-            MPI_Bcast(&complete, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-            if (complete)
-                break;
-        } // end blinding retry loop
+            mpz_clear(rem_prod);
+            auto t_fac_end = std::chrono::high_resolution_clock::now();
+            local_t_fac += std::chrono::duration<double, std::milli>(t_fac_end - t_fac_start).count();
+        }
 
-        free(blinded_buf);
+        double max_t_fac = 0.0;
+        MPI_Reduce(&local_t_fac, &max_t_fac, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+        double t_fac = max_t_fac;
+
+        if (rank == 0 && bench == 0)
+        {
+            printf("Factors found by rank 0: %d distinct primes (after %d attempt(s))\n",
+                   local_factors.count, attempt);
+        }
+
+        // =========================================================================
+        // Distributed Reconstruction
+        // =========================================================================
+
+        auto t_lc_start = std::chrono::high_resolution_clock::now();
+        kf_compute_cbrt_from_factors(local_cbrt, &local_factors, modulo,
+                                     &cbrt_cache, &cbrt_cache_dirty);
+        auto t_lc_end = std::chrono::high_resolution_clock::now();
+        double local_t_cbrt = std::chrono::duration<double, std::milli>(t_lc_end - t_lc_start).count();
+
+        double max_t_cbrt = 0.0;
+        MPI_Reduce(&local_t_cbrt, &max_t_cbrt, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
         MPI_Barrier(MPI_COMM_WORLD);
-        auto t_fac1 = std::chrono::high_resolution_clock::now();
+        auto t_g_start = std::chrono::high_resolution_clock::now();
 
-        if (rank == 0)
-        {
-            double dt = std::chrono::duration<double, std::milli>(
-                            t_fac1 - t_fac0)
-                            .count();
-            accum_record(&fac_acc, dt);
-            if (bench == 0)
-            {
-                printf("Factors found by rank 0: %d distinct primes "
-                       "(after %d attempt(s))\n",
-                       local_factors.count, attempt + 1);
-                fflush(stdout);
-            }
-        }
+        size_t exp_size;
+        memset(local_cbrt_bytes, 0, out_capacity);
+        mpz_export(local_cbrt_bytes, &exp_size, 1, 1, 0, 0, local_cbrt);
 
-        // ---- DISTRIBUTED RECONSTRUCTION ----
-        //
-        // Step 1 — every rank computes partial cbrt for its own factors.
-        //   Runs in parallel across all ranks (like the factoring phase).
-        //   Each rank does ~(total_factors / nranks) powm calls.
-        auto t_loc0 = std::chrono::high_resolution_clock::now();
-
-        mpz_t local_cbrt;
-        mpz_init(local_cbrt);
-        compute_local_cbrt(local_cbrt, &local_factors, e_inv, modulo,
-                           &local_cbrt_cache, &cbrt_cache_dirty);
-
-        auto t_loc1 = std::chrono::high_resolution_clock::now();
-        double local_dt = std::chrono::duration<double, std::milli>(t_loc1 - t_loc0).count();
-
-        // Reduce to get max local cbrt time (the bottleneck rank) at rank 0
-        double max_local_dt = 0.0;
-        MPI_Reduce(&local_dt, &max_local_dt, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-        if (rank == 0)
-        {
-            accum_record(&loc_acc, max_local_dt);
-            cur_max_loc = max_local_dt;
-        }
-
-        // Barrier so gather time measures only MPI communication, not waiting
-        // for slower ranks to finish their local cbrt.
-        MPI_Barrier(MPI_COMM_WORLD);
-
-        // Step 2 — export local_cbrt to a fixed-size big-endian byte buffer.
-        //   Zero-pad at the front (MSB side) so all buffers are cbrt_bytes long.
-        unsigned char *local_buf = (unsigned char *)calloc(cbrt_bytes, 1);
-        {
-            size_t written = 0;
-            unsigned char *tmp = (unsigned char *)mpz_export(
-                NULL, &written, 1, 1, 0, 0, local_cbrt);
-            if (tmp && written > 0 && written <= cbrt_bytes)
-            {
-                memcpy(local_buf + cbrt_bytes - written, tmp, written);
-                free(tmp);
-            }
-        }
-        mpz_clear(local_cbrt);
-
-        // Step 3 — gather all partial cbrt buffers at rank 0.
-        //   Total payload: nranks × cbrt_bytes ≈ nranks × 875 bytes (< 10 KB
-        //   for 8 ranks with 7000-bit modulo).
-        unsigned char *all_bufs = NULL;
-        if (rank == 0)
-            all_bufs = (unsigned char *)malloc((size_t)nranks * cbrt_bytes);
-
-        auto t_gat0 = std::chrono::high_resolution_clock::now();
-        MPI_Gather(local_buf, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-                   all_bufs, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
+        MPI_Gather(local_cbrt_bytes, (int)out_capacity, MPI_BYTE,
+                   gathered_bytes, (int)out_capacity, MPI_BYTE,
                    0, MPI_COMM_WORLD);
-        auto t_gat1 = std::chrono::high_resolution_clock::now();
-        free(local_buf);
 
+        auto t_g_end = std::chrono::high_resolution_clock::now();
+        double t_gather = std::chrono::duration<double, std::milli>(t_g_end - t_g_start).count();
+
+        double t_combine = 0.0;
         if (rank == 0)
         {
-            double dt = std::chrono::duration<double, std::milli>(t_gat1 - t_gat0).count();
-            accum_record(&gat_acc, dt);
-            iter_gat = dt;
-        }
-
-        // Step 4 — rank 0 multiplies the nranks partial cbrt results together,
-        //          then unblinds: result = combined_cbrt * r^{-1} mod M.
-        //   result = ∏_rk partial_cbrt_rk  mod M,  then  *= r^{-1}  mod M
-        if (rank == 0)
-        {
-            auto t_com0 = std::chrono::high_resolution_clock::now();
-
-            mpz_set_ui(result, 1);
-            mpz_t partial;
-            mpz_init(partial);
-            for (int rk = 0; rk < nranks; rk++)
+            auto t_c_start = std::chrono::high_resolution_clock::now();
+            mpz_set_ui(result_cbrt, 1);
+            mpz_t tmp;
+            mpz_init(tmp);
+            for (int i = 0; i < nranks; i++)
             {
-                mpz_import(partial, cbrt_bytes, 1, 1, 0, 0,
-                           all_bufs + (size_t)rk * cbrt_bytes);
-                mpz_mul(result, result, partial);
+                mpz_import(tmp, out_capacity, 1, 1, 0, 0, gathered_bytes + i * out_capacity);
+                mpz_mul(result_cbrt, result_cbrt, tmp);
+                mpz_mod(result_cbrt, result_cbrt, modulo);
+            }
+            mpz_clear(tmp);
+
+            if (attempt > 1)
+            {
+                mpz_mul(result, result_cbrt, r_inv);
                 mpz_mod(result, result, modulo);
             }
-            mpz_clear(partial);
-            free(all_bufs);
-
-            // Unblind: result = combined_cbrt * r^{-1} mod M.
-            // attempt == 0 → r = 1, no unblinding needed.
-            // attempt > 0  → use precomputed table[attempt-1].r_inv directly
-            //                 (one mul + mod; no mpz_invert in the hot path).
-            if (attempt > 0)
+            else
             {
-                int idx = attempt - 1;
-                if (idx < BLIND_TABLE_SIZE)
-                {
-                    mpz_mul(result, result, blind_table[idx].r_inv);
-                    mpz_mod(result, result, modulo);
-                }
+                mpz_set(result, result_cbrt);
             }
 
-            auto t_com1 = std::chrono::high_resolution_clock::now();
-            double dt = std::chrono::duration<double, std::milli>(t_com1 - t_com0).count();
-            accum_record(&com_acc, dt);
-            iter_com = dt;
+            auto t_c_end = std::chrono::high_resolution_clock::now();
+            t_combine = std::chrono::duration<double, std::milli>(t_c_end - t_c_start).count();
         }
 
-        // Per-iteration reconstruction total — rank 0 only.
-        // Must be accumulated AFTER both gather and combine are recorded.
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double t_total = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        double t_recon = max_t_cbrt + t_gather + t_combine;
+
         if (rank == 0)
         {
-            double recon_dt = cur_max_loc + iter_gat + iter_com;
-            accum_record(&recon_acc, recon_dt);
+            // Record raw vectors for JSON
+            results.factor_times.push_back(t_fac);
+            results.local_cbrt_times.push_back(max_t_cbrt);
+            results.gather_times.push_back(t_gather);
+            results.combine_times.push_back(t_combine);
+            results.recon_times.push_back(t_recon);
+            results.total_times.push_back(t_total);
+            results.blinding_attempts.push_back(attempt);
+
+            // Record accumulators for terminal output
+            accum_record(&f_acc, t_fac);
+            accum_record(&lc_acc, max_t_cbrt);
+            accum_record(&g_acc, t_gather);
+            accum_record(&c_acc, t_combine);
+            accum_record(&r_acc, t_recon);
+            accum_record(&att_acc, (double)attempt);
         }
 
-        fl_free(&local_factors);
+        kfl_free(&local_factors);
+        mpz_clears(r, r_inv, blinded, rem, result_cbrt, local_cbrt, NULL);
+        gmp_randclear(rng);
     }
 
-    // ---- Timing report (rank 0 only) ----
+    if (cbrt_cache_dirty)
+    {
+        kf_cbrt_cache_save(&cbrt_cache, cbrt_file);
+    }
+    kf_cbrt_cache_free(&cbrt_cache);
+
     if (rank == 0)
     {
-        printf("\n");
-        if (bench_count == 1)
-        {
-            printf("Factoring:         %.3f ms\n", fac_acc.sum);
-            printf("Local cbrt (max):  %.3f ms\n", loc_acc.sum);
-            printf("Gather:            %.3f ms\n", gat_acc.sum);
-            printf("Combine:           %.3f ms\n", com_acc.sum);
-            printf("Reconstruction:    %.3f ms\n", loc_acc.sum + gat_acc.sum + com_acc.sum);
-            printf("Total:             %.3f ms\n",
-                   fac_acc.sum + loc_acc.sum + gat_acc.sum + com_acc.sum);
-        }
-        else
-        {
-            printf("Results over %d runs:\n", bench_count);
-            print_stat("Factoring:", fac_acc.sum, fac_acc.sumsq, bench_count);
-            print_stat("Local cbrt (max):", loc_acc.sum, loc_acc.sumsq, bench_count);
-            print_stat("Gather:", gat_acc.sum, gat_acc.sumsq, bench_count);
-            print_stat("Combine (rank 0):", com_acc.sum, com_acc.sumsq, bench_count);
-            print_stat("Reconstruction total:", recon_acc.sum, recon_acc.sumsq, bench_count);
-            printf("    %-30s avg=%9.3f ms\n", "Total:",
-                   (fac_acc.sum + recon_acc.sum) / bench_count);
-        }
+        printf("\nResults over %d runs:\n", bench_count);
+        print_timing_stat_moments("Factoring:", f_acc.sum, f_acc.sumsq, bench_count, 30, true);
+        print_timing_stat_moments("Local cbrt (max):", lc_acc.sum, lc_acc.sumsq, bench_count, 30, true);
+        print_timing_stat_moments("Gather:", g_acc.sum, g_acc.sumsq, bench_count, 30, true);
+        print_timing_stat_moments("Combine (rank 0):", c_acc.sum, c_acc.sumsq, bench_count, 30, true);
+        print_timing_stat_moments("Reconstruction total:", r_acc.sum, r_acc.sumsq, bench_count, 30, true);
+        print_timing_total("Total:", (f_acc.sum + r_acc.sum) / bench_count, 30, NULL);
 
-        // ---- Sequential powm baseline + speedup (compare mode only) ----
-        // Runs on rank 0 only after the distributed solve, so it does not
-        // pollute the distributed timing. MPI is not involved — this is
-        // a plain sequential benchmark of challenge^e mod M.
-        if (method == METHOD_COMPARE)
-        {
-            printf("\n--- Sequential powm baseline (rank 0, %d threads unused) ---\n",
-#ifdef _OPENMP
-                   omp_get_max_threads());
-#else
-                   0);
-#endif
-            mpz_t powm_result;
-            mpz_init(powm_result);
-            double powm_avg = run_powm_baseline(powm_result, challenge, modulo,
-                                                bench_count, 30);
-            mpz_clear(powm_result);
+        double att_sd = bench_count > 1 ? compute_stddev_from_moments(att_acc.sum, att_acc.sumsq, bench_count, true) : 0.0;
+        printf("    %-30s avg= %9.2f      stddev= %6.2f\n", "Blinding attempts:", att_acc.sum / bench_count, att_sd);
 
-            double recon_avg = accum_mean(&recon_acc, bench_count);
-            double total_avg = (fac_acc.sum + recon_acc.sum) / bench_count;
+        if (method == 2) // METHOD_COMPARE
+        {
+            printf("\n--- Sequential powm baseline (rank 0, %d threads unused) ---\n", omp_get_max_threads());
+            double powm_avg = run_powm_baseline(result, challenge, modulo, bench_count, 30);
+            results.powm_baseline_ms = powm_avg;
+
+            double tr_avg = r_acc.sum / bench_count;
+            double f2_total_avg = (f_acc.sum + r_acc.sum) / bench_count;
 
             printf("\n--- Speedup vs sequential powm ---\n");
-            printf("  powm vs reconstruction only:  %.2fx  "
-                   "(parallel cbrt, no factoring cost)\n",
-                   recon_avg > 0 ? powm_avg / recon_avg : 0.0);
-            printf("  powm vs total (factor+recon): %.2fx  "
-                   "(end-to-end latency)\n",
-                   total_avg > 0 ? powm_avg / total_avg : 0.0);
-            printf("\nNote: 'recon only' is the most direct comparison to the paper's\n"
-                   "      Algorithm 2 speedup claim. Total includes factoring overhead\n"
-                   "      which the paper treats as separate precomputation cost.\n");
+            printf("  powm vs reconstruction only: %5.2fx  (parallel cbrt, no factoring cost)\n",
+                   tr_avg > 0 ? powm_avg / tr_avg : 0.0);
+            printf("  powm vs total (factor+recon):%5.2fx  (end-to-end latency)\n",
+                   f2_total_avg > 0 ? powm_avg / f2_total_avg : 0.0);
         }
 
-        // Verify
-        mpz_t challenge_mod;
-        mpz_init(challenge_mod);
-        mpz_mod(challenge_mod, challenge, modulo);
-        verify_cube_root(result, challenge_mod, modulo);
-        mpz_clear(challenge_mod);
-        fflush(stdout);
+        // Write JSON Benchmark output
+        if (json_output_file)
+        {
+            char final_json_path[512];
+            strncpy(final_json_path, json_output_file, sizeof(final_json_path) - 1);
+            final_json_path[sizeof(final_json_path) - 1] = '\0';
+
+            // Inject bit size into filename if running multiple benchmarks
+            char *dot = strrchr(final_json_path, '.');
+            if (dot && bench_count > 0)
+            {
+                char ext[16];
+                strncpy(ext, dot, sizeof(ext));
+                ext[sizeof(ext) - 1] = '\0';
+                *dot = '\0'; // truncate at the dot
+                snprintf(final_json_path + strlen(final_json_path),
+                         sizeof(final_json_path) - strlen(final_json_path),
+                         "_%zu%s", cbits, ext);
+            }
+
+            write_benchmark_json(final_json_path, results);
+        }
+
+        mpz_t verify_mod;
+        mpz_init(verify_mod);
+        mpz_mod(verify_mod, challenge, modulo);
+        verify_cube_root(result, verify_mod, modulo);
+        mpz_clear(verify_mod);
     }
 
-    free(prime_slice);
-    mpz_clear(blinded_challenge);
+    free(local_cbrt_bytes);
     if (rank == 0)
-        kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
+        free(gathered_bytes);
 
-    // Save per-rank cbrt cache if new entries were computed this run.
-    if (cbrt_cache_dirty)
-        kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
-    kf_cbrt_cache_clear(&local_cbrt_cache);
-
-    mpz_clear(e_inv);
     mpz_clears(challenge, modulo, result, NULL);
-    return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -811,176 +504,81 @@ static int solve_one(
 
 int main(int argc, char *argv[])
 {
-    // MPI_THREAD_FUNNELED: only the main thread calls MPI functions.
-    // OpenMP threads run inside trial_divide_* and compute_local_cbrt
-    // but never touch MPI directly — safe with FUNNELED.
-    int provided;
-    MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
-    if (provided < MPI_THREAD_FUNNELED)
-    {
-        fprintf(stderr, "Error: MPI_THREAD_FUNNELED not supported\n");
-        MPI_Abort(MPI_COMM_WORLD, 1);
-    }
+    MPI_Init(&argc, &argv);
 
     int rank, nranks;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &nranks);
 
-    const char *challenge_file = NULL;
-    const char *modulo_file = NULL;
+    solver_config_t cfg = {
+        "data/challenges/k32/challenge_32_2048.txt",
+        "data/challenges/k32/modulo_32_2048.txt",
+        1, nullptr, false};
+
+    int method = 0; // 0=sieve, 1=table, 2=compare
+    bool run_all = false;
     const char *data_dir = "data/challenges/k32";
     const char *primes_file = "k32_primes.bin";
-    int bench_count = 1;
-    int run_all = 0;
-    int do_precompute = 0;
-    run_method_t method = METHOD_SIEVE;
 
-    int positional = 0;
-    for (int argi = 1; argi < argc; argi++)
+    int argi = 1;
+    while (argi < argc)
     {
-        if (strcmp(argv[argi], "--bench") == 0 && argi + 1 < argc)
+        if (strcmp(argv[argi], "--method") == 0)
         {
-            bench_count = atoi(argv[++argi]);
+            if (argi + 1 >= argc)
+            {
+                if (rank == 0)
+                    fprintf(stderr, "Error: Missing value for --method\n");
+                MPI_Finalize();
+                return 1;
+            }
+            if (strcmp(argv[argi + 1], "table") == 0)
+                method = 1;
+            else if (strcmp(argv[argi + 1], "compare") == 0)
+                method = 2;
+            else
+                method = 0;
+            argi += 2;
         }
         else if (strcmp(argv[argi], "--all") == 0)
         {
-            run_all = 1;
-        }
-        else if (strcmp(argv[argi], "--data") == 0 && argi + 1 < argc)
-        {
-            data_dir = argv[++argi];
-        }
-        else if (strcmp(argv[argi], "--method") == 0 && argi + 1 < argc)
-        {
-            const char *m = argv[++argi];
-            if (strcmp(m, "sieve") == 0)
-                method = METHOD_SIEVE;
-            else if (strcmp(m, "table") == 0)
-                method = METHOD_TABLE;
-            else if (strcmp(m, "compare") == 0)
-                method = METHOD_COMPARE;
-            else
-            {
-                if (rank == 0)
-                    fprintf(stderr, "Unknown --method '%s'\n", m);
-                MPI_Finalize();
-                return 1;
-            }
-        }
-        else if (strcmp(argv[argi], "--primes") == 0 && argi + 1 < argc)
-        {
-            primes_file = argv[++argi];
-        }
-        else if (strcmp(argv[argi], "--precompute") == 0)
-        {
-            do_precompute = 1;
-        }
-        else if (argv[argi][0] != '-')
-        {
-            if (positional == 0)
-            {
-                challenge_file = argv[argi];
-                positional++;
-            }
-            else if (positional == 1)
-            {
-                modulo_file = argv[argi];
-                positional++;
-            }
-            else
-            {
-                if (rank == 0)
-                    fprintf(stderr, "Unexpected argument '%s'\n", argv[argi]);
-                MPI_Finalize();
-                return 1;
-            }
+            run_all = true;
+            argi++;
         }
         else
         {
-            if (rank == 0)
-                fprintf(stderr, "Unknown option '%s'\n", argv[argi]);
-            MPI_Finalize();
-            return 1;
+            if (parse_common_args(argc, argv, &cfg, &argi) != 0)
+            {
+                MPI_Finalize();
+                return 1;
+            }
         }
-    }
-
-    if (!run_all && !do_precompute && (!challenge_file || !modulo_file))
-    {
-        if (rank == 0)
-            fprintf(stderr,
-                    "Usage: k32_mpi <challenge> <modulo> [--method sieve|table] [--bench N]\n"
-                    "       k32_mpi --all [--data DIR] [--method sieve|table] [--bench N]\n"
-                    "       k32_mpi --precompute [--primes FILE]\n");
-        MPI_Finalize();
-        return 1;
     }
 
     if (rank == 0)
     {
-        printf("=== k32_mpi ===\n");
+        printf("=== Job info ===\n");
         printf("MPI ranks:      %d\n", nranks);
-#ifdef _OPENMP
         printf("OMP threads:    %d per rank\n", omp_get_max_threads());
         printf("Total workers:  %d\n", nranks * omp_get_max_threads());
-#endif
-        printf("Method:         %s\n",
-               method == METHOD_SIEVE ? "sieve" : method == METHOD_TABLE ? "table"
-                                                                         : "compare");
-        if (bench_count > 1)
-            printf("Benchmark runs: %d\n", bench_count);
+        printf("Method:         %s\n", method == 1 ? "table" : (method == 2 ? "compare" : "sieve"));
+        if (cfg.bench_count > 1)
+            printf("Benchmark runs: %d\n", cfg.bench_count);
         if (run_all)
             printf("Mode:           --all\n");
+        printf("\n");
         fflush(stdout);
     }
 
-    // Small primes — every rank generates these independently (~0.1 ms, no Bcast)
-    int sp_count;
+    int sp_count = 0;
     unsigned *sp = kf_generate_small_primes(&sp_count);
 
-    // Partition [65537, 2^32] evenly across MPI ranks
-    const uint64_t RANGE_LO = 65537ULL;
-    const uint64_t RANGE_HI = (uint64_t)UINT32_MAX;
-    const uint64_t range_size = RANGE_HI - RANGE_LO + 1;
+    uint32_t *prime_table = NULL;
+    int64_t prime_table_count = 0;
 
-    uint64_t my_lo = RANGE_LO + (range_size * (uint64_t)rank) / (uint64_t)nranks;
-    uint64_t my_hi = RANGE_LO + (range_size * (uint64_t)(rank + 1)) / (uint64_t)nranks - 1;
-    if (rank == nranks - 1)
-        my_hi = RANGE_HI;
-
-    if (rank == 0)
+    if (method == 1 || method == 2)
     {
-        printf("Prime range per rank: ~%.1fM primes\n\n",
-               (double)range_size / nranks / 1e6);
-        fflush(stdout);
-    }
-
-    // Warm up OpenMP thread pool before any timed region
-#ifdef _OPENMP
-#pragma omp parallel for
-    for (int i = 0; i < omp_get_max_threads(); i++)
-        (void)i;
-#endif
-
-    // --precompute: rank 0 generates the prime table file; all ranks then exit
-    if (do_precompute)
-    {
-        if (rank == 0)
-        {
-            int sp2;
-            unsigned *sp2_arr = kf_generate_small_primes(&sp2);
-            kf_generate_and_save_prime_table(primes_file, sp2, sp2_arr, "[rank 0] ");
-            free(sp2_arr);
-        }
-        free(sp);
-        MPI_Finalize();
-        return 0;
-    }
-
-    // --method table: rank 0 generates the prime file if it doesn't yet exist,
-    // then all ranks wait before each loading their own slice inside solve_one.
-    if (method == METHOD_TABLE)
-    {
-        int table_ok = 1;
+        int table_ok = 0;
         if (rank == 0)
         {
             FILE *test = fopen(primes_file, "rb");
@@ -993,6 +591,7 @@ int main(int argc, char *argv[])
             else
             {
                 fclose(test);
+                table_ok = 1;
             }
         }
         MPI_Bcast(&table_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -1004,30 +603,53 @@ int main(int argc, char *argv[])
             MPI_Finalize();
             return 1;
         }
-        MPI_Barrier(MPI_COMM_WORLD); // ensure file is fully written before any rank reads
+        MPI_Barrier(MPI_COMM_WORLD);
+
+        prime_table = kf_load_prime_table_distributed(primes_file, rank, nranks, &prime_table_count);
+        if (!prime_table)
+        {
+            fprintf(stderr, "Rank %d failed to load prime table\n", rank);
+            free(sp);
+            MPI_Finalize();
+            return 1;
+        }
+        if (rank == 0)
+        {
+            printf("Prime range per rank: ~%.1fM primes\n\n", (double)prime_table_count / 1e6);
+        }
+    }
+    else
+    {
+        if (rank == 0)
+        {
+            uint64_t full_range = (uint64_t)UINT32_MAX - 65537ULL + 1;
+            uint64_t slice = full_range / (uint64_t)nranks;
+            printf("Prime range per rank: ~%.1fM primes\n\n", (double)slice / 1e6);
+        }
     }
 
     if (run_all)
     {
-        // Run all four standard challenge sizes in one MPI execution.
-        // Avoids multiple srun calls in the SLURM script (causes reinit hangs).
         const char *sizes[] = {"1024", "2048", "5000", "7000"};
         for (int s = 0; s < 4; s++)
         {
             char cf[512], mf[512];
             snprintf(cf, sizeof(cf), "%s/challenge_32_%s.txt", data_dir, sizes[s]);
             snprintf(mf, sizeof(mf), "%s/modulo_32_%s.txt", data_dir, sizes[s]);
-            solve_one(rank, nranks, cf, mf, bench_count,
-                      sp_count, sp, my_lo, my_hi, method, primes_file);
+            solve_one(rank, nranks, cf, mf, cfg.bench_count, method,
+                      prime_table, prime_table_count, sp_count, sp, cfg.json_output_file);
         }
     }
     else
     {
-        solve_one(rank, nranks, challenge_file, modulo_file, bench_count,
-                  sp_count, sp, my_lo, my_hi, method, primes_file);
+        solve_one(rank, nranks, cfg.challenge_file, cfg.modulo_file, cfg.bench_count, method,
+                  prime_table, prime_table_count, sp_count, sp, cfg.json_output_file);
     }
 
+    if (prime_table)
+        free(prime_table);
     free(sp);
+
     MPI_Finalize();
     return 0;
 }
