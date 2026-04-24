@@ -151,11 +151,13 @@ int main(int argc, char *argv[])
             results.recon_times.push_back(0.0);
         }
 
-        // Use the first run or the average as a baseline if needed
-        results.powm_baseline_ms = results.total_times[0];
+        // Average over all runs for a stable baseline
+        double powm_sum = 0.0;
+        for (double t : results.total_times) powm_sum += t;
+        results.powm_baseline_ms = powm_sum / (double)cfg.bench_count;
 
-        printf("[RUN] Sequential powm (500 runs) finished. First run: %.3f ms\n",
-               results.total_times[0]);
+        printf("[RUN] Sequential powm finished. avg=%.3f ms\n",
+               results.powm_baseline_ms);
     }
 
     // =========================================================================
@@ -259,12 +261,23 @@ int main(int argc, char *argv[])
             free(challenge_bytes);
         }
 
+        // Run powm baseline for ALL methods — always needed for JSON and speedup reporting.
+        results.powm_baseline_ms = run_powm_baseline(result, challenge, modulo, cfg.bench_count, 30);
+
+        double total_avg = (fac_acc.sum + rec_acc.sum) / cfg.bench_count;
+        double recon_avg = rec_acc.sum / cfg.bench_count;
+
         if (method == METHOD_COMPARE)
         {
             results.method_name = "compare";
-            results.powm_baseline_ms = run_powm_baseline(result, challenge, modulo, cfg.bench_count, 30);
-            printf("  [1] powm baseline:      %.3f ms\n", results.powm_baseline_ms);
-            printf("  [2] factor total avg:   %.3f ms\n", (fac_acc.sum + rec_acc.sum) / cfg.bench_count);
+            printf("\n=== Comparison over %d runs ===\n", cfg.bench_count);
+            printf("  [1] powm baseline:             avg=%9.3f ms\n", results.powm_baseline_ms);
+            printf("  [2] factor (parallel recon):   avg=%9.3f ms\n", total_avg);
+            printf("\n--- Speedup vs sequential powm ---\n");
+            printf("  powm vs recon only:  %.2fx  <-- Algorithm 2 speedup\n",
+                   recon_avg > 0 ? results.powm_baseline_ms / recon_avg : 0.0);
+            printf("  powm vs total:       %.2fx  (end-to-end including factoring)\n",
+                   total_avg > 0 ? results.powm_baseline_ms / total_avg : 0.0);
         }
         else
         {
@@ -275,7 +288,12 @@ int main(int argc, char *argv[])
             }
             print_timing_stat_moments("Reconstruction:", rec_acc.sum, rec_acc.sumsq, cfg.bench_count, 22, true);
             printf("----------------------------------------------------------\n");
-            print_timing_total("Total Time:", (fac_acc.sum + rec_acc.sum) / cfg.bench_count, 22, NULL);
+            print_timing_total("Total Time:", total_avg, 22, NULL);
+            printf("  powm baseline:     avg=%9.3f ms\n", results.powm_baseline_ms);
+            printf("  powm vs recon:     %.2fx\n",
+                   recon_avg > 0 ? results.powm_baseline_ms / recon_avg : 0.0);
+            printf("  powm vs total:     %.2fx\n",
+                   total_avg > 0 ? results.powm_baseline_ms / total_avg : 0.0);
         }
     }
 
