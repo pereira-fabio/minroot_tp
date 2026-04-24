@@ -421,17 +421,17 @@ static int solve_one(
     // recon_{sum,sq} track the per-iteration reconstruction total directly
     // (loc + gat + com per run) so that stddev is computed correctly.
     // Summing the squares of individual phases gives the wrong variance.
-    bench_accum_t fac_acc = {0, 0};   // factoring
-    bench_accum_t loc_acc = {0, 0};   // max local cbrt across ranks
-    bench_accum_t gat_acc = {0, 0};   // MPI gather
-    bench_accum_t com_acc = {0, 0};   // combine + unblind on rank 0
-    bench_accum_t recon_acc = {0, 0}; // loc + gat + com per iteration
-    double cur_max_loc = 0.0;         // carried within one iteration
+    bench_accum_t fac_acc = {0, 0};
+    bench_accum_t loc_acc = {0, 0};
+    bench_accum_t gat_acc = {0, 0};
+    bench_accum_t com_acc = {0, 0};
+    bench_accum_t recon_acc = {0, 0};
+    double cur_max_loc = 0.0;
 
-    // JSON output — populated on rank 0 only
-    int n_threads_local = 1;
+    // JSON results — populated on rank 0, bench 0 excluded (warmup)
+    int n_threads_json = 1;
 #ifdef _OPENMP
-    n_threads_local = omp_get_max_threads();
+    n_threads_json = omp_get_max_threads();
 #endif
     benchmark_results_t json_results;
     json_results.k_size = 32;
@@ -439,9 +439,9 @@ static int solve_one(
     json_results.method_name = (method == METHOD_TABLE)     ? "table"
                                : (method == METHOD_COMPARE) ? "compare"
                                                             : "sieve";
-    json_results.num_threads = n_threads_local;
+    json_results.num_threads = n_threads_json;
     json_results.mpi_ranks = nranks;
-    json_results.bench_count = bench_count;
+    json_results.bench_count = bench_count - 1; // run 0 = warmup, excluded
     json_results.powm_baseline_ms = 0.0;
 
     // ---- Benchmark loop ----
@@ -618,7 +618,7 @@ static int solve_one(
                             t_fac1 - t_fac0)
                             .count();
             accum_record(&fac_acc, dt);
-            if (rank == 0)
+            if (rank == 0 && bench > 0)
                 json_results.factor_times.push_back(dt);
             if (bench == 0)
             {
@@ -627,7 +627,7 @@ static int solve_one(
                        local_factors.count, attempt + 1);
                 fflush(stdout);
             }
-            if (rank == 0)
+            if (rank == 0 && bench > 0)
                 json_results.blinding_attempts.push_back(attempt + 1);
         }
 
@@ -653,7 +653,8 @@ static int solve_one(
         {
             accum_record(&loc_acc, max_local_dt);
             cur_max_loc = max_local_dt;
-            json_results.local_cbrt_times.push_back(max_local_dt);
+            if (bench > 0)
+                json_results.local_cbrt_times.push_back(max_local_dt);
         }
 
         // Barrier so gather time measures only MPI communication, not waiting
@@ -693,8 +694,9 @@ static int solve_one(
         {
             double dt = std::chrono::duration<double, std::milli>(t_gat1 - t_gat0).count();
             accum_record(&gat_acc, dt);
-            json_results.gather_times.push_back(dt);
             iter_gat = dt;
+            if (bench > 0)
+                json_results.gather_times.push_back(dt);
         }
 
         // Step 4 — rank 0 multiplies the nranks partial cbrt results together,
@@ -734,8 +736,9 @@ static int solve_one(
             auto t_com1 = std::chrono::high_resolution_clock::now();
             double dt = std::chrono::duration<double, std::milli>(t_com1 - t_com0).count();
             accum_record(&com_acc, dt);
-            json_results.combine_times.push_back(dt);
             iter_com = dt;
+            if (bench > 0)
+                json_results.combine_times.push_back(dt);
         }
 
         // Per-iteration reconstruction total — rank 0 only.
@@ -744,10 +747,13 @@ static int solve_one(
         {
             double recon_dt = cur_max_loc + iter_gat + iter_com;
             accum_record(&recon_acc, recon_dt);
-            json_results.recon_times.push_back(recon_dt);
-            if (!json_results.factor_times.empty())
-                json_results.total_times.push_back(
-                    json_results.factor_times.back() + recon_dt);
+            if (bench > 0)
+            {
+                json_results.recon_times.push_back(recon_dt);
+                if (!json_results.factor_times.empty())
+                    json_results.total_times.push_back(
+                        json_results.factor_times.back() + recon_dt);
+            }
         }
 
         fl_free(&local_factors);
@@ -779,11 +785,10 @@ static int solve_one(
                    (fac_acc.sum + recon_acc.sum) / bench_count);
         }
 
-        // ---- Sequential powm baseline + speedup (compare mode only) ----
-        // Runs on rank 0 only after the distributed solve, so it does not
-        // pollute the distributed timing. MPI is not involved — this is
-        // a plain sequential benchmark of challenge^e mod M.
-        if (method == METHOD_COMPARE)
+        // ---- Sequential powm baseline (rank 0, ALL methods) ----
+        // Measured after the bench loop so it never pollutes factoring
+        // timings. Stored in JSON for every method, not just compare.
+        if (rank == 0)
         {
             printf("\n--- Sequential powm baseline (rank 0, %d threads unused) ---\n",
 #ifdef _OPENMP
@@ -808,9 +813,10 @@ static int solve_one(
             printf("  powm vs total (factor+recon): %.2fx  "
                    "(end-to-end latency)\n",
                    total_avg > 0 ? powm_avg / total_avg : 0.0);
-            printf("\nNote: 'recon only' is the most direct comparison to the paper's\n"
-                   "      Algorithm 2 speedup claim. Total includes factoring overhead\n"
-                   "      which the paper treats as separate precomputation cost.\n");
+            if (method == METHOD_COMPARE || method == METHOD_SIEVE || method == METHOD_TABLE)
+                printf("\nNote: 'recon only' is the most direct comparison to the paper's\n"
+                       "      Algorithm 2 speedup claim. Total includes factoring overhead\n"
+                       "      which the paper treats as separate precomputation cost.\n");
         }
 
         // Verify
@@ -835,7 +841,6 @@ static int solve_one(
     mpz_clear(e_inv);
     mpz_clears(challenge, modulo, result, NULL);
 
-    // Write JSON — rank 0 only, after all timing data collected.
     if (rank == 0 && json_output_file && json_output_file[0] != '\0')
         write_benchmark_json(json_output_file, json_results);
 
