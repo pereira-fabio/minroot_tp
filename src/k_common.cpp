@@ -328,60 +328,125 @@ void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
         return;
     }
 
-    // Helper lambda to write double arrays cleanly
-    auto write_dbl_arr = [&](const char *key, const std::vector<double> &vec, bool is_last = false)
+    // ---------------------------------------------------------------------------
+    // JSON layout
+    //
+    // Run 0 is always a cold-start run: instruction cache, data cache, and
+    // branch predictor are all cold. It is kept in the output under "cold_run"
+    // so it is visible and clearly labelled rather than silently discarded.
+    //
+    // Runs 1..N are warm steady-state runs. Their values go into "warm_runs".
+    // All statistical analysis (avg, stddev, speedup) should use warm_runs only.
+    //
+    // "runs_total"  = bench_count (includes run 0)
+    // "runs_warm"   = bench_count - 1 (excludes run 0)
+    // ---------------------------------------------------------------------------
+
+    // Helpers — write a slice [from, to) of a vector
+    auto write_slice_dbl = [&](const char *key,
+                               const std::vector<double> &vec,
+                               size_t from, size_t to,
+                               bool is_last = false)
     {
-        if (vec.empty())
+        if (vec.empty() || from >= vec.size())
             return;
-        fprintf(f, "    \"%s\": [", key);
-        for (size_t i = 0; i < vec.size(); ++i)
-        {
-            fprintf(f, "%.3f%s", vec[i], (i == vec.size() - 1) ? "" : ", ");
-        }
+        to = (to > vec.size()) ? vec.size() : to;
+        fprintf(f, "      \"%s\": [", key);
+        for (size_t i = from; i < to; ++i)
+            fprintf(f, "%.3f%s", vec[i], (i == to - 1) ? "" : ", ");
         fprintf(f, "]%s\n", is_last ? "" : ",");
     };
 
-    // Helper lambda to write int arrays
-    auto write_int_arr = [&](const char *key, const std::vector<int> &vec, bool is_last = false)
+    auto write_slice_int = [&](const char *key,
+                               const std::vector<int> &vec,
+                               size_t from, size_t to,
+                               bool is_last = false)
     {
-        if (vec.empty())
+        if (vec.empty() || from >= vec.size())
             return;
-        fprintf(f, "    \"%s\": [", key);
-        for (size_t i = 0; i < vec.size(); ++i)
-        {
-            fprintf(f, "%d%s", vec[i], (i == vec.size() - 1) ? "" : ", ");
-        }
+        to = (to > vec.size()) ? vec.size() : to;
+        fprintf(f, "      \"%s\": [", key);
+        for (size_t i = from; i < to; ++i)
+            fprintf(f, "%d%s", vec[i], (i == to - 1) ? "" : ", ");
         fprintf(f, "]%s\n", is_last ? "" : ",");
     };
+
+    // Scalar from index helper (returns -1 if out of range)
+    auto dbl_at = [&](const std::vector<double> &v, size_t i) -> double
+    {
+        return (i < v.size()) ? v[i] : -1.0;
+    };
+
+    int n_total = res.bench_count;
+    int n_warm = (n_total > 1) ? n_total - 1 : 0;
+
+    // Compute warm averages for the speedup fields
+    double warm_factor_avg = 0.0, warm_recon_avg = 0.0, warm_total_avg = 0.0;
+    if (n_warm > 0)
+    {
+        for (int i = 1; i <= n_warm; i++)
+        {
+            if (i < (int)res.factor_times.size())
+                warm_factor_avg += res.factor_times[i];
+            if (i < (int)res.recon_times.size())
+                warm_recon_avg += res.recon_times[i];
+            if (i < (int)res.total_times.size())
+                warm_total_avg += res.total_times[i];
+        }
+        warm_factor_avg /= n_warm;
+        warm_recon_avg /= n_warm;
+        warm_total_avg /= n_warm;
+    }
 
     fprintf(f, "{\n");
+
+    // ---- metadata ----
     fprintf(f, "  \"metadata\": {\n");
     fprintf(f, "    \"k_size\": %d,\n", res.k_size);
     fprintf(f, "    \"challenge_bits\": %zu,\n", res.challenge_bits);
     fprintf(f, "    \"method\": \"%s\",\n", res.method_name);
     fprintf(f, "    \"threads_per_rank\": %d,\n", res.num_threads);
     fprintf(f, "    \"mpi_ranks\": %d,\n", res.mpi_ranks);
-    fprintf(f, "    \"runs\": %d\n", res.bench_count);
+    fprintf(f, "    \"runs_total\": %d,\n", n_total);
+    fprintf(f, "    \"runs_warm\": %d,\n", n_warm);
+    fprintf(f, "    \"note\": \"run 0 is cold-start (excluded from warm_runs)\",\n");
+    fprintf(f, "    \"powm_baseline_ms\": %.3f\n", res.powm_baseline_ms);
     fprintf(f, "  },\n");
 
-    fprintf(f, "  \"powm_baseline_ms\": %.3f,\n", res.powm_baseline_ms);
+    // ---- warm averages (the numbers to use for analysis) ----
+    fprintf(f, "  \"warm_avg\": {\n");
+    fprintf(f, "    \"factor_ms\": %.3f,\n", warm_factor_avg);
+    fprintf(f, "    \"recon_ms\": %.3f,\n", warm_recon_avg);
+    fprintf(f, "    \"total_ms\": %.3f,\n", warm_total_avg);
+    if (res.powm_baseline_ms > 0 && warm_recon_avg > 0)
+        fprintf(f, "    \"speedup_recon\": %.2f,\n",
+                res.powm_baseline_ms / warm_recon_avg);
+    if (res.powm_baseline_ms > 0 && warm_total_avg > 0)
+        fprintf(f, "    \"speedup_total\": %.2f\n",
+                res.powm_baseline_ms / warm_total_avg);
+    else
+        fprintf(f, "    \"speedup_total\": 0.0\n");
+    fprintf(f, "  },\n");
 
-    fprintf(f, "  \"raw_data\": {\n");
+    // ---- cold run (run 0) — kept for transparency ----
+    fprintf(f, "  \"cold_run\": {\n");
+    fprintf(f, "    \"note\": \"cold cache — do not use for performance comparison\",\n");
+    fprintf(f, "    \"factor_ms\": %.3f,\n", dbl_at(res.factor_times, 0));
+    fprintf(f, "    \"recon_ms\": %.3f,\n", dbl_at(res.recon_times, 0));
+    fprintf(f, "    \"total_ms\": %.3f\n", dbl_at(res.total_times, 0));
+    fprintf(f, "  },\n");
 
-    // Core Timings
-    write_dbl_arr("factor_ms", res.factor_times);
-    write_dbl_arr("recon_ms", res.recon_times);
-
-    // MPI Timings (Only prints if populated)
-    write_dbl_arr("local_cbrt_ms", res.local_cbrt_times);
-    write_dbl_arr("gather_ms", res.gather_times);
-    write_dbl_arr("combine_ms", res.combine_times);
-    write_int_arr("blinding_attempts", res.blinding_attempts);
-
-    // Total always printed last
-    write_dbl_arr("total_ms", res.total_times, true);
-
+    // ---- warm runs (runs 1..N) ----
+    fprintf(f, "  \"warm_runs\": {\n");
+    write_slice_dbl("factor_ms", res.factor_times, 1, (size_t)n_total);
+    write_slice_dbl("recon_ms", res.recon_times, 1, (size_t)n_total);
+    write_slice_dbl("local_cbrt_ms", res.local_cbrt_times, 1, (size_t)n_total);
+    write_slice_dbl("gather_ms", res.gather_times, 1, (size_t)n_total);
+    write_slice_dbl("combine_ms", res.combine_times, 1, (size_t)n_total);
+    write_slice_int("blinding_attempts", res.blinding_attempts, 1, (size_t)n_total);
+    write_slice_dbl("total_ms", res.total_times, 1, (size_t)n_total, true);
     fprintf(f, "  }\n");
+
     fprintf(f, "}\n");
     fclose(f);
     printf("[INFO] JSON benchmark written to %s\n", filepath);
