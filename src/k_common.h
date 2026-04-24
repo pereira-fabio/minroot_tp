@@ -48,40 +48,6 @@ void read_mpz_from_file(mpz_t num, const char *filename);
 bool compute_cube_root_mod_prime(mpz_t result, const mpz_t value, const mpz_t modulo);
 
 // ---------------------------------------------------------------------------
-// Cube root — factorization-based reconstruction (k16 METHOD_FACTOR)
-// ---------------------------------------------------------------------------
-
-// Reconstruct cbrt(challenge) from its factorization, using precomputed
-// cube roots of each small prime:
-//   result = prod_{i: exponents[i]>0} cbrt_table[i]^exponents[i]  mod M
-//
-// exponents[i]  = multiplicity of primes[i] in the challenge (0 if absent).
-// cbrt_table[i] = primes[i]^e mod M, built once by precompute_cbrt_table().
-// prime_count   = length of both arrays (6542 for k16).
-//
-// Complexity: O(prime_count) multiplications — no powm on large numbers.
-// Inner loop parallelized with OpenMP; partial products merged at the end.
-void compute_cube_root_from_factors(mpz_t result, const int *exponents,
-                                    const mpz_t *cbrt_table, int prime_count,
-                                    const mpz_t modulo);
-
-// ---------------------------------------------------------------------------
-// Precomputed cube root table (k16)
-// ---------------------------------------------------------------------------
-
-// Fill cbrt_table[i] = primes[i]^e mod modulo for all 6542 k16 primes.
-// e = 3^-1 mod (modulo-1) is computed once; loop is OpenMP-parallelized.
-// cbrt_table must be pre-allocated as mpz_t[prime_count].
-void precompute_cbrt_table(mpz_t *cbrt_table, const unsigned long *primes,
-                           int prime_count, const mpz_t modulo);
-
-// Persist the table to disk (one decimal per line, header = prime_count).
-// Filename convention: modulo_16_2048.txt -> modulo_16_2048.cbrt
-// load_cbrt_table returns false if file is absent or prime_count mismatches.
-void save_cbrt_table(const mpz_t *cbrt_table, int prime_count, const char *filename);
-bool load_cbrt_table(mpz_t *cbrt_table, int prime_count, const char *filename);
-
-// ---------------------------------------------------------------------------
 // Verification
 // ---------------------------------------------------------------------------
 

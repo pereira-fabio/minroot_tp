@@ -119,8 +119,15 @@ int main(int argc, char *argv[])
     int prime_count = 0;
     unsigned long *primes = nullptr;
 
-    // Initialize benchmark results structure with empty vectors
-    benchmark_results_t results = {16, cbits, "factor", n_threads, cfg.bench_count, {}, {}, {}, 0.0};
+    // Initialize benchmark results structure
+    benchmark_results_t results;
+    results.k_size             = 16;
+    results.challenge_bits     = cbits;
+    results.method_name        = "factor";
+    results.num_threads        = n_threads;
+    results.mpi_ranks          = 1;
+    results.bench_count        = cfg.bench_count;
+    results.powm_baseline_ms   = 0.0;
 
     // =========================================================================
     // METHOD_POWM
