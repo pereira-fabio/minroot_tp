@@ -245,17 +245,17 @@ void solve_one(int rank, int nranks, const char *challenge_file,
             mpz_t rem_prod;
             mpz_init(rem_prod);
 
+            size_t l_bytes;
+            unsigned char *r_buf = (unsigned char *)mpz_export(NULL, &l_bytes, 1, 1, 0, 0, rem);
+
             if (rank == 0)
             {
                 mpz_t *rems = (mpz_t *)malloc((size_t)nranks * sizeof(mpz_t));
                 for (int i = 0; i < nranks; i++)
                     mpz_init(rems[i]);
 
-                size_t l_bytes;
-                unsigned char *r_buf = (unsigned char *)mpz_export(NULL, &l_bytes, 1, 1, 0, 0, rem);
-                MPI_Gather(&l_bytes, sizeof(size_t), MPI_BYTE, NULL, 0, MPI_BYTE, 0, MPI_COMM_WORLD);
-
                 size_t *all_bytes = (size_t *)malloc((size_t)nranks * sizeof(size_t));
+                // Only ONE Gather for the sizes
                 MPI_Gather(&l_bytes, sizeof(size_t), MPI_BYTE, all_bytes, sizeof(size_t), MPI_BYTE, 0, MPI_COMM_WORLD);
 
                 int *displs = (int *)malloc((size_t)nranks * sizeof(int));
@@ -283,13 +283,10 @@ void solve_one(int rank, int nranks, const char *challenge_file,
                 for (int i = 0; i < nranks; i++)
                 {
                     if (mpz_cmp_ui(rems[i], 0) > 0)
-                    {
                         mpz_divexact(rem_prod, rem_prod, rems[i]);
-                    }
                 }
                 mpz_mul(rem_prod, rem_prod, rems[0]);
 
-                free(r_buf);
                 free(all_bytes);
                 free(displs);
                 free(rcounts);
@@ -300,14 +297,11 @@ void solve_one(int rank, int nranks, const char *challenge_file,
             }
             else
             {
-                size_t l_bytes;
-                unsigned char *r_buf = (unsigned char *)mpz_export(NULL, &l_bytes, 1, 1, 0, 0, rem);
-                MPI_Gather(&l_bytes, sizeof(size_t), MPI_BYTE, NULL, 0, MPI_BYTE, 0, MPI_COMM_WORLD);
+                // Worker ranks send their size, then their data
                 MPI_Gather(&l_bytes, sizeof(size_t), MPI_BYTE, NULL, 0, MPI_BYTE, 0, MPI_COMM_WORLD);
                 MPI_Gatherv(r_buf, (int)l_bytes, MPI_BYTE, NULL, NULL, NULL, MPI_BYTE, 0, MPI_COMM_WORLD);
-                free(r_buf);
             }
-
+            free(r_buf);
             int global_success = 0;
             if (rank == 0)
             {
