@@ -222,3 +222,15 @@ bool kf_pollard_rho_brent(mpz_t factor, const mpz_t n, unsigned long c_val);
 void kf_factor_recursive(const mpz_t n, kfactor_list_t *factors,
                          unsigned long c_start);
 void kf_factor_challenge(const mpz_t challenge, kfactor_list_t *out);
+
+// ---------------------------------------------------------------------------
+// k16 — Precompute and reconstruct
+// ---------------------------------------------------------------------------
+
+void kf_precompute_cbrt_table_k16(mpz_t *cbrt_table, const unsigned long *primes,
+                                  int prime_count, const mpz_t modulo);
+void kf_save_cbrt_table_k16(const mpz_t *cbrt_table, int prime_count, const char *filename);
+bool kf_load_cbrt_table_k16(mpz_t *cbrt_table, int prime_count, const char *filename);
+void kf_compute_cube_root_from_factors_k16(mpz_t result, const int *exponents,
+                                           const mpz_t *cbrt_table, int prime_count,
+                                           const mpz_t modulo);

@@ -502,6 +502,55 @@ void kfl_free(kfactor_list_t *f)
     f->capacity = 0;
 }
 
+void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
+{
+    FILE *f = fopen(filepath, "w");
+    if (!f)
+    {
+        perror("[ERROR] fopen failed for JSON");
+        return;
+    }
+    fprintf(f, "{\n");
+    fprintf(f, "  \"metadata\": {\n");
+    fprintf(f, "    \"k_size\": %d,\n", res.k_size);
+    fprintf(f, "    \"challenge_bits\": %zu,\n", res.challenge_bits);
+    fprintf(f, "    \"method\": \"%s\",\n", res.method_name);
+    fprintf(f, "    \"threads\": %d,\n", res.num_threads);
+    fprintf(f, "    \"runs\": %d\n", res.bench_count);
+    fprintf(f, "  },\n");
+
+    fprintf(f, "  \"powm_baseline_ms\": %.3f,\n", res.powm_baseline_ms);
+
+    // Individual Factor Times
+    fprintf(f, "  \"raw_data\": {\n");
+    fprintf(f, "    \"factor_ms\": [");
+    for (size_t i = 0; i < res.factor_times.size(); ++i)
+    {
+        fprintf(f, "%.3f%s", res.factor_times[i], (i == res.factor_times.size() - 1) ? "" : ", ");
+    }
+    fprintf(f, "],\n");
+
+    // Individual Recon Times
+    fprintf(f, "    \"recon_ms\": [");
+    for (size_t i = 0; i < res.recon_times.size(); ++i)
+    {
+        fprintf(f, "%.3f%s", res.recon_times[i], (i == res.recon_times.size() - 1) ? "" : ", ");
+    }
+    fprintf(f, "],\n");
+
+    // Individual Totals
+    fprintf(f, "    \"total_ms\": [");
+    for (size_t i = 0; i < res.total_times.size(); ++i)
+    {
+        fprintf(f, "%.3f%s", res.total_times[i], (i == res.total_times.size() - 1) ? "" : ", ");
+    }
+    fprintf(f, "]\n");
+    fprintf(f, "  }\n");
+    fprintf(f, "}\n");
+    fclose(f);
+    printf("[INFO] JSON benchmark with raw data written to %s\n", filepath);
+}
+
 // ---------------------------------------------------------------------------
 // Common argument parser
 // ---------------------------------------------------------------------------
@@ -549,6 +598,16 @@ int parse_common_args(int argc, char **argv, solver_config_t *cfg,
                 // More positional args — caller handles them
                 break;
             }
+        }
+        else if (strcmp(argv[argi], "--json") == 0 && argi + 1 < argc)
+        {
+            cfg->json_output_file = argv[++argi];
+            argi++;
+        }
+        else if (strcmp(argv[argi], "--force-factor") == 0)
+        {
+            cfg->force_factor = true;
+            argi++;
         }
         else
         {

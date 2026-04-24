@@ -20,7 +20,7 @@
 // =============================================================================
 
 #include <gmp.h>
-
+#include <vector>
 // ---------------------------------------------------------------------------
 // Prime generation
 // ---------------------------------------------------------------------------
@@ -188,6 +188,8 @@ typedef struct
     const char *challenge_file;
     const char *modulo_file;
     int bench_count;
+    const char *json_output_file;
+    bool force_factor;
 } solver_config_t;
 
 // Parse positional <challenge> <modulo> and --bench N from argv.
@@ -229,3 +231,21 @@ static inline double accum_mean(const bench_accum_t *a, int n)
 {
     return n > 0 ? a->sum / n : 0.0;
 }
+
+typedef struct
+{
+    int k_size;
+    size_t challenge_bits;
+    const char *method_name;
+    int num_threads;
+    int bench_count;
+
+    // Detailed timing lists
+    std::vector<double> factor_times;
+    std::vector<double> recon_times;
+    std::vector<double> total_times;
+
+    double powm_baseline_ms; // We usually only run the baseline once
+} benchmark_results_t;
+
+void write_benchmark_json(const char *filepath, const benchmark_results_t &results);

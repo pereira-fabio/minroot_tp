@@ -245,7 +245,7 @@ void kf_trial_divide_sieve(const mpz_t n,
     mpz_init_set(cofactor, n);
     omp_lock_t cof_lock;
     omp_init_lock(&cof_lock);
-    volatile int done = 0;  // set to 1 when cofactor == 1
+    volatile int done = 0; // set to 1 when cofactor == 1
 
     uint64_t range_size = range_hi - range_lo + 1;
 
@@ -819,7 +819,7 @@ void kf_compute_cbrt_from_factors(mpz_t result,
 }
 
 // ===========================================================================
-// blinding_pair_t table — precomputation phase 
+// blinding_pair_t table — precomputation phase
 // ===========================================================================
 
 blinding_pair_t *kf_blinding_table_alloc(int count, const mpz_t modulo)
@@ -1009,4 +1009,112 @@ bool kf_factorize_with_blinding(
     mpz_clears(r_inv_tmp, blinded, rem, cbrt_y, NULL);
     gmp_randclear(rng);
     return success;
+}
+
+// ===========================================================================
+// k16 — Precompute and reconstruct
+// ===========================================================================
+
+/**
+ * Precomputes cube roots for all 16-bit primes for a given modulo.
+ * e = 3^-1 mod (M-1)
+ */
+void kf_precompute_cbrt_table_k16(mpz_t *cbrt_table, const unsigned long *primes,
+                                  int prime_count, const mpz_t modulo)
+{
+    mpz_t phi, e, three;
+    mpz_inits(phi, e, three, NULL);
+
+    mpz_sub_ui(phi, modulo, 1);
+    mpz_set_ui(three, 3);
+
+    // e = 3^-1 mod (M-1)
+    if (!mpz_invert(e, three, phi))
+    {
+        fprintf(stderr, "[ERROR] Modulo not suitable for cube roots (gcd(3, M-1) != 1)\n");
+        exit(1);
+    }
+
+    printf("[SETUP] Precomputing %d cube roots...\n", prime_count);
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (int i = 0; i < prime_count; i++)
+    {
+        mpz_t p;
+        mpz_init_set_ui(p, primes[i]);
+        mpz_init(cbrt_table[i]);
+        mpz_powm(cbrt_table[i], p, e, modulo);
+        mpz_clear(p);
+    }
+
+    mpz_clears(phi, e, three, NULL);
+}
+
+void kf_save_cbrt_table_k16(const mpz_t *cbrt_table, int prime_count, const char *filename)
+{
+    FILE *f = fopen(filename, "wb");
+    if (!f)
+        return;
+    fwrite(&prime_count, sizeof(int), 1, f);
+    for (int i = 0; i < prime_count; i++)
+    {
+        mpz_out_raw(f, cbrt_table[i]);
+    }
+    fclose(f);
+}
+
+bool kf_load_cbrt_table_k16(mpz_t *cbrt_table, int prime_count, const char *filename)
+{
+    FILE *f = fopen(filename, "rb");
+    if (!f)
+        return false;
+    int stored_count;
+    if (fread(&stored_count, sizeof(int), 1, f) != 1 || stored_count != prime_count)
+    {
+        fclose(f);
+        return false;
+    }
+    for (int i = 0; i < prime_count; i++)
+    {
+        mpz_init(cbrt_table[i]);
+        if (mpz_inp_raw(cbrt_table[i], f) == 0)
+        {
+            fclose(f);
+            return false;
+        }
+    }
+    fclose(f);
+    return true;
+}
+
+/**
+ * Reconstructs the final cube root using the homomorphic property:
+ * result = prod(cbrt_table[i]^exponents[i]) mod M
+ */
+void kf_compute_cube_root_from_factors_k16(mpz_t result, const int *exponents,
+                                           const mpz_t *cbrt_table, int prime_count,
+                                           const mpz_t modulo)
+{
+    mpz_set_ui(result, 1);
+    for (int i = 0; i < prime_count; i++)
+    {
+        if (exponents[i] == 0)
+            continue;
+
+        if (exponents[i] == 1)
+        {
+            mpz_mul(result, result, cbrt_table[i]);
+        }
+        else
+        {
+            mpz_t tmp;
+            mpz_init(tmp);
+            mpz_powm_ui(tmp, cbrt_table[i], (unsigned long)exponents[i], modulo);
+            mpz_mul(result, result, tmp);
+            mpz_clear(tmp);
+        }
+        mpz_mod(result, result, modulo);
+    }
 }
