@@ -67,7 +67,6 @@ typedef enum
 {
     METHOD_SIEVE,
     METHOD_TABLE,
-    METHOD_COMPARE // sieve (distributed) + sequential powm on rank 0 for comparison
 } run_method_t;
 
 // ---------------------------------------------------------------------------
@@ -437,11 +436,10 @@ static int solve_one(
     json_results.k_size = 32;
     json_results.challenge_bits = (rank == 0) ? mpz_sizeinbase(challenge, 2) : 0;
     json_results.method_name = (method == METHOD_TABLE)     ? "table"
-                               : (method == METHOD_COMPARE) ? "compare"
                                                             : "sieve";
     json_results.num_threads = n_threads_json;
     json_results.mpi_ranks = nranks;
-    json_results.bench_count = bench_count - 1; // run 0 = warmup, excluded
+    json_results.bench_count = bench_count; // write_benchmark_json splits cold/warm
     json_results.powm_baseline_ms = 0.0;
 
     // ---- Benchmark loop ----
@@ -529,7 +527,7 @@ static int solve_one(
             fl_free(&local_factors);
             fl_init(&local_factors);
 
-            if (method == METHOD_SIEVE || method == METHOD_COMPARE)
+            if (method == METHOD_SIEVE)
                 kf_trial_divide_sieve(blinded_challenge, my_lo, my_hi,
                                       sp_count, sp, &local_factors);
             else
@@ -813,7 +811,7 @@ static int solve_one(
             printf("  powm vs total (factor+recon): %.2fx  "
                    "(end-to-end latency)\n",
                    total_avg > 0 ? powm_avg / total_avg : 0.0);
-            if (method == METHOD_COMPARE || method == METHOD_SIEVE || method == METHOD_TABLE)
+            if (method == METHOD_SIEVE || method == METHOD_TABLE)
                 printf("\nNote: 'recon only' is the most direct comparison to the paper's\n"
                        "      Algorithm 2 speedup claim. Total includes factoring overhead\n"
                        "      which the paper treats as separate precomputation cost.\n");
@@ -900,8 +898,6 @@ int main(int argc, char *argv[])
                 method = METHOD_SIEVE;
             else if (strcmp(m, "table") == 0)
                 method = METHOD_TABLE;
-            else if (strcmp(m, "compare") == 0)
-                method = METHOD_COMPARE;
             else
             {
                 if (rank == 0)
@@ -971,8 +967,7 @@ int main(int argc, char *argv[])
         printf("Total workers:  %d\n", nranks * omp_get_max_threads());
 #endif
         printf("Method:         %s\n",
-               method == METHOD_SIEVE ? "sieve" : method == METHOD_TABLE ? "table"
-                                                                         : "compare");
+               method == METHOD_SIEVE ? "sieve" : "table");
         if (bench_count > 1)
             printf("Benchmark runs: %d\n", bench_count);
         if (run_all)

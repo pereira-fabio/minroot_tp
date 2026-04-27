@@ -61,7 +61,6 @@ int main(int argc, char *argv[])
     {
         METHOD_FACTOR,
         METHOD_POWM,
-        METHOD_COMPARE
     };
 
     solver_config_t cfg = {
@@ -80,8 +79,6 @@ int main(int argc, char *argv[])
                 method = METHOD_FACTOR;
             else if (strcmp(m, "powm") == 0)
                 method = METHOD_POWM;
-            else if (strcmp(m, "compare") == 0)
-                method = METHOD_COMPARE;
             else
             {
                 fprintf(stderr, "[ERROR] Invalid method\n");
@@ -151,23 +148,28 @@ int main(int argc, char *argv[])
             results.recon_times.push_back(0.0);
         }
 
-        // Use the first run or the average as a baseline if needed
-        results.powm_baseline_ms = results.total_times[0];
+        // Average warm runs (skip run 0 cold start) for a stable baseline
+        double powm_sum = 0.0;
+        int powm_n = (int)results.total_times.size();
+        int powm_start = (powm_n > 1) ? 1 : 0; // skip cold run if possible
+        for (int i = powm_start; i < powm_n; i++)
+            powm_sum += results.total_times[i];
+        results.powm_baseline_ms = powm_sum / (powm_n - powm_start);
 
-        printf("[RUN] Sequential powm (500 runs) finished. First run: %.3f ms\n",
-               results.total_times[0]);
+        printf("[RUN] Sequential powm finished. warm avg=%.3f ms\n",
+               results.powm_baseline_ms);
     }
 
     // =========================================================================
-    // METHOD_FACTOR & COMPARE
+    // METHOD_FACTOR
     // =========================================================================
-    if (method == METHOD_FACTOR || method == METHOD_COMPARE)
+    if (method == METHOD_FACTOR)
     {
 
         bench_accum_t fac_acc = {0, 0};
         bench_accum_t rec_acc = {0, 0};
 
-        bool use_fast_path = (cbits <= 1500 && method != METHOD_COMPARE && !cfg.force_factor);
+        bool use_fast_path = (cbits <= 1500 && !cfg.force_factor);
 
         if (use_fast_path)
         {
@@ -259,24 +261,25 @@ int main(int argc, char *argv[])
             free(challenge_bytes);
         }
 
-        if (method == METHOD_COMPARE)
+        // Run powm baseline so JSON always has a meaningful comparison value
+        results.powm_baseline_ms = run_powm_baseline(
+            result, challenge, modulo, cfg.bench_count, 22);
+
+        printf("\n=== Results (%d runs) ===\n", cfg.bench_count);
+        if (!use_fast_path)
         {
-            results.method_name = "compare";
-            results.powm_baseline_ms = run_powm_baseline(result, challenge, modulo, cfg.bench_count, 30);
-            printf("  [1] powm baseline:      %.3f ms\n", results.powm_baseline_ms);
-            printf("  [2] factor total avg:   %.3f ms\n", (fac_acc.sum + rec_acc.sum) / cfg.bench_count);
+            print_timing_stat_moments("Factoring:", fac_acc.sum, fac_acc.sumsq, cfg.bench_count, 22, true);
         }
-        else
-        {
-            printf("\n=== Results (%d runs) ===\n", cfg.bench_count);
-            if (!use_fast_path)
-            {
-                print_timing_stat_moments("Factoring:", fac_acc.sum, fac_acc.sumsq, cfg.bench_count, 22, true);
-            }
-            print_timing_stat_moments("Reconstruction:", rec_acc.sum, rec_acc.sumsq, cfg.bench_count, 22, true);
-            printf("----------------------------------------------------------\n");
-            print_timing_total("Total Time:", (fac_acc.sum + rec_acc.sum) / cfg.bench_count, 22, NULL);
-        }
+        print_timing_stat_moments("Reconstruction:", rec_acc.sum, rec_acc.sumsq, cfg.bench_count, 22, true);
+        printf("----------------------------------------------------------\n");
+        print_timing_total("Total Time:", (fac_acc.sum + rec_acc.sum) / cfg.bench_count, 22, NULL);
+        printf("  powm baseline:  %.3f ms\n", results.powm_baseline_ms);
+        printf("  speedup recon:  %.2fx\n",
+               rec_acc.sum > 0 ? results.powm_baseline_ms * cfg.bench_count / rec_acc.sum : 0.0);
+        printf("  speedup total:  %.2fx\n",
+               (fac_acc.sum + rec_acc.sum) > 0
+                   ? results.powm_baseline_ms * cfg.bench_count / (fac_acc.sum + rec_acc.sum)
+                   : 0.0);
     }
 
     if (cfg.json_output_file)
