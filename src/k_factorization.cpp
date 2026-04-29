@@ -227,7 +227,9 @@ uint32_t *kf_load_prime_slice(uint64_t *slice_count, const char *path,
 void kf_trial_divide_sieve(const mpz_t n,
                            uint64_t range_lo, uint64_t range_hi,
                            int sp_count, const unsigned *sp,
-                           kfactor_list_t *found)
+                           kfactor_list_t *found,
+                           int64_t *thread_tested, int *thread_found,
+                           int nthreads_out)
 {
     int nthreads = 1;
 #ifdef _OPENMP
@@ -327,7 +329,9 @@ void kf_trial_divide_sieve(const mpz_t n,
 
 void kf_trial_divide_table(const mpz_t n,
                            const uint32_t *primes, int64_t prime_count,
-                           kfactor_list_t *found)
+                           kfactor_list_t *found,
+                           int64_t *thread_tested, int *thread_found,
+                           int nthreads_out)
 {
     int nthreads = 1;
 #ifdef _OPENMP
@@ -358,6 +362,8 @@ void kf_trial_divide_table(const mpz_t n,
         t = omp_get_thread_num();
 #endif
         uint64_t p = (uint64_t)primes[i];
+        if (thread_tested && t < nthreads_out)
+            thread_tested[t]++;
         // Test against shrinking cofactor — cheaper as factors are stripped.
         if (mpz_tdiv_ui(cofactor, (unsigned long)p) != 0)
             continue;
@@ -370,10 +376,14 @@ void kf_trial_divide_table(const mpz_t n,
             e++;
         }
         if (mpz_cmp_ui(cofactor, 1) == 0)
-            stop_idx = i + 1; // signal all threads to stop after this batch
+            stop_idx = i + 1;
         omp_unset_lock(&cof_lock);
         if (e > 0)
+        {
             kfl_append_ul(&tf[t], p, e);
+            if (thread_found && t < nthreads_out)
+                thread_found[t]++;
+        }
     }
 
     omp_destroy_lock(&cof_lock);

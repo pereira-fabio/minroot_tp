@@ -80,11 +80,17 @@ uint32_t *kf_load_prime_slice(uint64_t *slice_count, const char *path,
 void kf_trial_divide_sieve(const mpz_t n,
                            uint64_t range_lo, uint64_t range_hi,
                            int sp_count, const unsigned *sp,
-                           kfactor_list_t *found);
+                           kfactor_list_t *found,
+                           int64_t *thread_tested = nullptr,
+                           int *thread_found = nullptr,
+                           int nthreads_out = 0);
 
 void kf_trial_divide_table(const mpz_t n,
                            const uint32_t *primes, int64_t prime_count,
-                           kfactor_list_t *found);
+                           kfactor_list_t *found,
+                           int64_t *thread_tested = nullptr,
+                           int *thread_found = nullptr,
+                           int nthreads_out = 0);
 
 // k16 — Horner byte-level trial division
 void kf_trial_divide_k16(const unsigned char *challenge_bytes, size_t nbytes,

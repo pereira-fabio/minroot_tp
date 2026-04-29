@@ -67,6 +67,7 @@ typedef enum
 {
     METHOD_SIEVE,
     METHOD_TABLE,
+    METHOD_POWM,
 } run_method_t;
 
 // ---------------------------------------------------------------------------
@@ -138,7 +139,12 @@ static void compute_local_cbrt(mpz_t result,
                                const mpz_t e,
                                const mpz_t modulo,
                                cbrt_cache_t *cache,
-                               bool *cache_dirty)
+                               bool *cache_dirty,
+                               double *hit_ms_out = nullptr,
+                               double *miss_ms_out = nullptr,
+                               int *hits_out = nullptr,
+                               int *misses_out = nullptr,
+                               bool record = true)
 {
     int n = factors->count;
 
@@ -167,9 +173,15 @@ static void compute_local_cbrt(mpz_t result,
                             ? kf_cbrt_cache_find(cache, p_ul)
                             : -1;
 
+        auto _ct0 = std::chrono::high_resolution_clock::now();
         if (cache_idx >= 0)
         {
             mpz_set(cbrt_vals[i], cache->items[cache_idx].cbrt);
+            auto _ct1 = std::chrono::high_resolution_clock::now();
+            if (record && hit_ms_out)
+                *hit_ms_out += std::chrono::duration<double, std::milli>(_ct1 - _ct0).count();
+            if (record && hits_out)
+                (*hits_out)++;
         }
         else
         {
@@ -177,6 +189,11 @@ static void compute_local_cbrt(mpz_t result,
             mpz_init_set_ui(p_mpz, p_ul);
             mpz_powm(cbrt_vals[i], p_mpz, e, modulo);
             mpz_clear(p_mpz);
+            auto _ct1 = std::chrono::high_resolution_clock::now();
+            if (record && miss_ms_out)
+                *miss_ms_out += std::chrono::duration<double, std::milli>(_ct1 - _ct0).count();
+            if (record && misses_out)
+                (*misses_out)++;
 
             if (cache && p_ul > 0)
             {
@@ -435,12 +452,64 @@ static int solve_one(
     benchmark_results_t json_results;
     json_results.k_size = 32;
     json_results.challenge_bits = (rank == 0) ? mpz_sizeinbase(challenge, 2) : 0;
-    json_results.method_name = (method == METHOD_TABLE)     ? "table"
-                                                            : "sieve";
+    json_results.method_name = (method == METHOD_TABLE) ? "table"
+                                                        : "sieve";
     json_results.num_threads = n_threads_json;
     json_results.mpi_ranks = nranks;
     json_results.bench_count = bench_count; // write_benchmark_json splits cold/warm
     json_results.powm_baseline_ms = 0.0;
+
+    // ---- 2 warmup runs (silent, primes CPU caches before bench loop) ----
+    // Runs the full factoring + reconstruction pipeline twice without
+    // recording any timing. This ensures instruction cache, data cache,
+    // and branch predictor are all hot before the first timed iteration.
+    if (method != METHOD_POWM)
+    {
+        for (int wu = 0; wu < 2; wu++)
+        {
+            factor_list_t wu_factors;
+            fl_init(&wu_factors);
+            // Blind and broadcast challenge (same as bench loop, r=1)
+            size_t wu_nb = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
+            unsigned char *wu_buf = (unsigned char *)calloc(wu_nb, 1);
+            if (rank == 0)
+            {
+                size_t wr = 0;
+                unsigned char *tmp = (unsigned char *)
+                    mpz_export(NULL, &wr, 1, 1, 0, 0, challenge);
+                if (tmp && wr > 0 && wr <= wu_nb)
+                {
+                    memcpy(wu_buf + wu_nb - wr, tmp, wr);
+                    free(tmp);
+                }
+            }
+            MPI_Bcast(wu_buf, (int)wu_nb, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
+            mpz_t wu_ch;
+            mpz_init(wu_ch);
+            mpz_import(wu_ch, wu_nb, 1, 1, 0, 0, wu_buf);
+            free(wu_buf);
+            if (method == METHOD_SIEVE)
+                kf_trial_divide_sieve(wu_ch, my_lo, my_hi, sp_count, sp, &wu_factors);
+            else
+                kf_trial_divide_table(wu_ch, prime_slice, slice_count, &wu_factors);
+            mpz_t wu_cbrt;
+            mpz_init(wu_cbrt);
+            // dummy cbrt (populates cache on first warmup)
+            bool wu_dirty = false;
+            auto wu_t0 = std::chrono::high_resolution_clock::now();
+            compute_local_cbrt(wu_cbrt, &wu_factors, e_inv, modulo,
+                               &local_cbrt_cache, &wu_dirty);
+            auto wu_t1 = std::chrono::high_resolution_clock::now();
+            if (wu_dirty)
+                cbrt_cache_dirty = true;
+            if (rank == 0)
+                json_results.warmup_total_ms.push_back(
+                    std::chrono::duration<double, std::milli>(wu_t1 - wu_t0).count());
+            mpz_clears(wu_ch, wu_cbrt, NULL);
+            fl_free(&wu_factors);
+            MPI_Barrier(MPI_COMM_WORLD);
+        }
+    }
 
     // ---- Benchmark loop ----
 
@@ -531,8 +600,29 @@ static int solve_one(
                 kf_trial_divide_sieve(blinded_challenge, my_lo, my_hi,
                                       sp_count, sp, &local_factors);
             else
+            {
+                int nT = 1;
+#ifdef _OPENMP
+                nT = omp_get_max_threads();
+#endif
+                bool do_thr = (bench == 1 && rank == 0);
+                std::vector<int64_t> thr_tested(do_thr ? nT : 0, 0);
+                std::vector<int> thr_found(do_thr ? nT : 0, 0);
                 kf_trial_divide_table(blinded_challenge, prime_slice,
-                                      slice_count, &local_factors);
+                                      slice_count, &local_factors,
+                                      do_thr ? thr_tested.data() : nullptr,
+                                      do_thr ? thr_found.data() : nullptr,
+                                      do_thr ? nT : 0);
+                if (do_thr)
+                {
+                    json_results.thread_primes_tested.insert(
+                        json_results.thread_primes_tested.end(),
+                        thr_tested.begin(), thr_tested.end());
+                    json_results.thread_primes_found.insert(
+                        json_results.thread_primes_found.end(),
+                        thr_found.begin(), thr_found.end());
+                }
+            }
 
             // -- Completeness check: gather local factor products to rank 0 --
             //
@@ -638,11 +728,54 @@ static int solve_one(
 
         mpz_t local_cbrt;
         mpz_init(local_cbrt);
+        double cbrt_hit_ms = 0.0, cbrt_miss_ms = 0.0;
+        int cbrt_hits = 0, cbrt_misses = 0;
+        bool record_cbrt = (bench > 0); // only warm runs
         compute_local_cbrt(local_cbrt, &local_factors, e_inv, modulo,
-                           &local_cbrt_cache, &cbrt_cache_dirty);
+                           &local_cbrt_cache, &cbrt_cache_dirty,
+                           &cbrt_hit_ms, &cbrt_miss_ms,
+                           &cbrt_hits, &cbrt_misses, record_cbrt);
 
         auto t_loc1 = std::chrono::high_resolution_clock::now();
         double local_dt = std::chrono::duration<double, std::milli>(t_loc1 - t_loc0).count();
+
+        // Gather primes_found count from all ranks → rank 0 (first warm run only)
+        if (bench == 1 && rank == 0)
+        {
+            int local_found = local_factors.count;
+            std::vector<int> all_found(nranks);
+            MPI_Gather(&local_found, 1, MPI_INT,
+                       all_found.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+            for (int r = 0; r < nranks; r++)
+                json_results.primes_found_per_rank.push_back(all_found[r]);
+            // Record primes tested (static per rank — slice_count or sieve range)
+            for (int r = 0; r < nranks; r++)
+            {
+                // Compute each rank's prime range [lo, hi] as done in main()
+                const uint64_t _RLO = 65537ULL;
+                const uint64_t _RHI = (uint64_t)UINT32_MAX;
+                const uint64_t _RSZ = _RHI - _RLO + 1;
+                uint64_t r_lo = _RLO + (_RSZ * (uint64_t)r) / (uint64_t)nranks;
+                uint64_t r_hi = _RLO + (_RSZ * (uint64_t)(r + 1)) / (uint64_t)nranks - 1;
+                if (r == nranks - 1)
+                    r_hi = _RHI;
+                json_results.primes_tested_per_rank.push_back((int64_t)(r_hi - r_lo + 1));
+            }
+        }
+        else if (bench == 1 && rank != 0)
+        {
+            int local_found = local_factors.count;
+            MPI_Gather(&local_found, 1, MPI_INT, nullptr, 0, MPI_INT, 0, MPI_COMM_WORLD);
+        }
+
+        // Record cbrt hit/miss stats for warm runs
+        if (rank == 0 && bench > 0)
+        {
+            json_results.cbrt_hit_ms.push_back(cbrt_hit_ms);
+            json_results.cbrt_miss_ms.push_back(cbrt_miss_ms);
+            json_results.cbrt_hits.push_back(cbrt_hits);
+            json_results.cbrt_misses.push_back(cbrt_misses);
+        }
 
         // Reduce to get max local cbrt time (the bottleneck rank) at rank 0
         double max_local_dt = 0.0;
