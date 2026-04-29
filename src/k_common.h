@@ -21,6 +21,8 @@
 
 #include <gmp.h>
 #include <vector>
+#include <cstdint>
+#include <cinttypes>
 // ---------------------------------------------------------------------------
 // Prime generation
 // ---------------------------------------------------------------------------
@@ -204,19 +206,38 @@ typedef struct
     size_t challenge_bits;
     const char *method_name;
     int num_threads;
-    int mpi_ranks; 
+    int mpi_ranks;
     int bench_count;
 
-    // Detailed timing lists (raw data)
+    // Detailed timing lists (raw data) — one entry per warm bench run
     std::vector<double> factor_times;
     std::vector<double> recon_times;
     std::vector<double> total_times;
 
-    // MPI-Specific timing lists (left empty for k16/k32 non-MPI)
+    // MPI-specific timing lists (empty for single-node solvers)
     std::vector<double> local_cbrt_times;
     std::vector<double> gather_times;
     std::vector<double> combine_times;
     std::vector<int> blinding_attempts;
+
+    // cbrt cache breakdown (from compute_local_cbrt, warm runs)
+    std::vector<double> cbrt_hit_ms;  // time spent on cache hits (array lookups)
+    std::vector<double> cbrt_miss_ms; // time spent on cache misses (mpz_powm calls)
+    std::vector<int> cbrt_hits;       // number of cache hits per run
+    std::vector<int> cbrt_misses;     // number of cache misses per run
+
+    // Prime statistics — recorded once (from first warm run)
+    // primes_tested_per_rank[r] = how many primes rank r tested
+    // primes_found_per_rank[r]  = how many factors rank r found
+    std::vector<int64_t> primes_tested_per_rank;
+    std::vector<int> primes_found_per_rank;
+
+    // Per-thread load balancing (from first warm run, OMP threads within rank 0)
+    std::vector<int64_t> thread_primes_tested; // per OMP thread
+    std::vector<int> thread_primes_found;      // per OMP thread
+
+    // Warmup run timings (2 runs before bench loop, recorded for transparency)
+    std::vector<double> warmup_total_ms;
 
     double powm_baseline_ms;
 } benchmark_results_t;

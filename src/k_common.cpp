@@ -1,4 +1,5 @@
 #include "k_common.h"
+#include <cinttypes>
 
 #include <gmp.h>
 #include <math.h>
@@ -441,11 +442,69 @@ void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
     write_slice_dbl("factor_ms", res.factor_times, 1, (size_t)n_total);
     write_slice_dbl("recon_ms", res.recon_times, 1, (size_t)n_total);
     write_slice_dbl("local_cbrt_ms", res.local_cbrt_times, 1, (size_t)n_total);
+    write_slice_dbl("cbrt_hit_ms", res.cbrt_hit_ms, 1, (size_t)n_total);
+    write_slice_dbl("cbrt_miss_ms", res.cbrt_miss_ms, 1, (size_t)n_total);
+    write_slice_int("cbrt_hits", res.cbrt_hits, 1, (size_t)n_total);
+    write_slice_int("cbrt_misses", res.cbrt_misses, 1, (size_t)n_total);
     write_slice_dbl("gather_ms", res.gather_times, 1, (size_t)n_total);
     write_slice_dbl("combine_ms", res.combine_times, 1, (size_t)n_total);
     write_slice_int("blinding_attempts", res.blinding_attempts, 1, (size_t)n_total);
     write_slice_dbl("total_ms", res.total_times, 1, (size_t)n_total, true);
-    fprintf(f, "  }\n");
+    fprintf(f, "  },\n");
+
+    // Warmup runs
+    if (!res.warmup_total_ms.empty())
+    {
+        fprintf(f, "  \"warmup_runs\": {\n");
+        fprintf(f, "    \"note\": \"2 silent runs before bench loop to prime CPU caches\",\n");
+        fprintf(f, "    \"total_ms\": [");
+        for (size_t i = 0; i < res.warmup_total_ms.size(); i++)
+            fprintf(f, "%.3f%s", res.warmup_total_ms[i],
+                    i == res.warmup_total_ms.size() - 1 ? "" : ", ");
+        fprintf(f, "]\n  },\n");
+    }
+
+    // Prime statistics
+    if (!res.primes_tested_per_rank.empty() || !res.primes_found_per_rank.empty())
+    {
+        fprintf(f, "  \"prime_stats\": {\n");
+        if (!res.primes_tested_per_rank.empty())
+        {
+            fprintf(f, "    \"tested_per_rank\": [");
+            for (size_t i = 0; i < res.primes_tested_per_rank.size(); i++)
+                fprintf(f, "%" PRId64 "%s", res.primes_tested_per_rank[i],
+                        i == res.primes_tested_per_rank.size() - 1 ? "" : ", ");
+            fprintf(f, "],\n");
+        }
+        if (!res.primes_found_per_rank.empty())
+        {
+            fprintf(f, "    \"found_per_rank\": [");
+            for (size_t i = 0; i < res.primes_found_per_rank.size(); i++)
+                fprintf(f, "%d%s", res.primes_found_per_rank[i],
+                        i == res.primes_found_per_rank.size() - 1 ? "" : ", ");
+            fprintf(f, "]\n");
+        }
+        fprintf(f, "  },\n");
+    }
+
+    // Per-thread load balance
+    if (!res.thread_primes_tested.empty())
+    {
+        fprintf(f, "  \"thread_balance\": {\n");
+        fprintf(f, "    \"note\": \"rank 0 OMP threads, first warm run\",\n");
+        fprintf(f, "    \"tested_per_thread\": [");
+        for (size_t i = 0; i < res.thread_primes_tested.size(); i++)
+            fprintf(f, "%" PRId64 "%s", res.thread_primes_tested[i],
+                    i == res.thread_primes_tested.size() - 1 ? "" : ", ");
+        fprintf(f, "],\n");
+        fprintf(f, "    \"found_per_thread\": [");
+        for (size_t i = 0; i < res.thread_primes_found.size(); i++)
+            fprintf(f, "%d%s", res.thread_primes_found[i],
+                    i == res.thread_primes_found.size() - 1 ? "" : ", ");
+        fprintf(f, "]\n  }\n");
+    }
+    else
+        fprintf(f, "  \"thread_balance\": {}\n");
 
     fprintf(f, "}\n");
     fclose(f);
