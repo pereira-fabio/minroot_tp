@@ -59,7 +59,8 @@ int main(int argc, char *argv[])
 {
     enum solver_method_t
     {
-        METHOD_FACTOR,
+        METHOD_TABLE,
+        METHOD_SIEVE,
         METHOD_POWM,
     };
 
@@ -67,7 +68,7 @@ int main(int argc, char *argv[])
         "data/challenges/k16/challenge_2_16_2048.txt",
         "data/challenges/k16/modulo_16_2048.txt",
         1, nullptr, false};
-    solver_method_t method = METHOD_FACTOR;
+    solver_method_t method = METHOD_TABLE;
 
     int argi = 1;
     while (argi < argc)
@@ -75,13 +76,15 @@ int main(int argc, char *argv[])
         if (strcmp(argv[argi], "--method") == 0 && argi + 1 < argc)
         {
             const char *m = argv[++argi];
-            if (strcmp(m, "factor") == 0)
-                method = METHOD_FACTOR;
+            if (strcmp(m, "table") == 0)
+                method = METHOD_TABLE;
+            else if (strcmp(m, "sieve") == 0)
+                method = METHOD_SIEVE;
             else if (strcmp(m, "powm") == 0)
                 method = METHOD_POWM;
             else
             {
-                fprintf(stderr, "[ERROR] Invalid method\n");
+                fprintf(stderr, "[ERROR] Invalid method (use table, sieve, or powm)\n");
                 return 1;
             }
             argi++;
@@ -120,7 +123,7 @@ int main(int argc, char *argv[])
     benchmark_results_t results;
     results.k_size = 16;
     results.challenge_bits = cbits;
-    results.method_name = "factor";
+    results.method_name = (method == METHOD_SIEVE) ? "sieve" : "table";
     results.num_threads = n_threads;
     results.mpi_ranks = 1;
     results.bench_count = cfg.bench_count;
@@ -163,13 +166,13 @@ int main(int argc, char *argv[])
     // =========================================================================
     // METHOD_FACTOR
     // =========================================================================
-    if (method == METHOD_FACTOR)
+    if (method == METHOD_TABLE || method == METHOD_SIEVE)
     {
 
         bench_accum_t fac_acc = {0, 0};
         bench_accum_t rec_acc = {0, 0};
 
-        bool use_fast_path = (cbits <= 1500 && !cfg.force_factor);
+        bool use_fast_path = (cbits <= 1500 && method == METHOD_TABLE && !cfg.force_factor);
 
         if (use_fast_path)
         {
@@ -195,15 +198,27 @@ int main(int argc, char *argv[])
             if (dot)
                 *dot = '\0';
 
-            const char *prime_file = "k16_primes.bin";
             char table_file[512];
             snprintf(table_file, sizeof(table_file), "%s.cbrt", base);
 
-            primes = load_prime_list(&prime_count, prime_file);
-            if (!primes)
+            if (method == METHOD_SIEVE)
             {
+                // Generate all 6542 primes <= 65536 in one shot (~0.01 ms).
+                // The full set fits in L1 cache — no segmenting needed at this scale.
+                // No file I/O; cbrt cache is still used for reconstruction.
                 primes = generate_primes_up_to(UINT16_MAX, &prime_count);
-                save_prime_list(primes, prime_count, prime_file);
+                printf("Sieve: generated %d primes <= 65536\n", prime_count);
+            }
+            else
+            {
+                // Load pre-saved prime list from disk.
+                const char *prime_file = "k16_primes.bin";
+                primes = load_prime_list(&prime_count, prime_file);
+                if (!primes)
+                {
+                    primes = generate_primes_up_to(UINT16_MAX, &prime_count);
+                    save_prime_list(primes, prime_count, prime_file);
+                }
             }
 
             cbrt_table = (mpz_t *)malloc((size_t)prime_count * sizeof(mpz_t));
