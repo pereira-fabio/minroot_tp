@@ -1,12 +1,12 @@
 #!/bin/bash -l
-#SBATCH --job-name=minroot_k16_test
-#SBATCH --output=minroot_k16_test_%j.out
-#SBATCH --error=minroot_k16_test_%j.err
+#SBATCH --job-name=minroot_k16
+#SBATCH --output=minroot_k16_%j.out
+#SBATCH --error=minroot_k16_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
 #SBATCH --exclusive
-#SBATCH --time=00:30:00
+#SBATCH --time=02:00:00
 
 module load compiler/GCC/13.2.0
 module load math/GMP/6.3.0-GCCcore-13.2.0
@@ -16,14 +16,16 @@ export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 
 # ---------------------------------------------------------------------------
-# Configuration — edit these variables before submitting
+# Configuration
 # ---------------------------------------------------------------------------
 DATA_DIR=data/challenges/k16
-BENCH=50
+BENCH=10
 
-# JSON output directory
-JSON_DIR=$SLURM_SUBMIT_DIR/results
+JSON_DIR=$SLURM_SUBMIT_DIR/data/results/k16
 mkdir -p $JSON_DIR
+
+# All target sizes to benchmark — lower and upper bounds of parallelisation benefit
+SIZES="16 32 64 128 256 512 1024 2048 4096 8192"
 
 # ---------------------------------------------------------------------------
 # Job info
@@ -32,7 +34,9 @@ echo "=== Job info ==="
 echo "Job ID:        $SLURM_JOB_ID"
 echo "Node:          $SLURM_NODELIST"
 echo "CPUs:          $SLURM_CPUS_PER_TASK"
-echo "Bench runs:    $BENCH  (run 0 = cold, runs 1-9 = warm, reported separately)"
+echo "Bench runs:    $BENCH"
+echo "Sizes:         $SIZES"
+echo "Results:       $JSON_DIR"
 echo ""
 
 cd $SLURM_SUBMIT_DIR
@@ -49,25 +53,27 @@ echo "Compilation successful"
 echo ""
 
 # ---------------------------------------------------------------------------
-# Helper: run one challenge size, both methods, with JSON output
+# Helper: benchmark one challenge size across all three methods
 #
-# Usage: run_size <bits>  e.g. run_size 2048
+# Usage: run_size <bits>
 #
-# Note on cold-start:
-#   Run 0 hits a cold CPU cache (prime table not yet in L1/L2, branch
-#   predictor unpopulated). It is 3-4x slower than runs 1-9 for small
-#   moduli. The JSON separates it into "cold_run" vs "warm_runs" so the
-#   warm average is uncontaminated. The printed stdout average includes
-#   run 0 and is therefore slightly pessimistic — use the JSON warm_avg
-#   numbers for all analysis and thesis tables.
+# Runs: powm  — sequential mpz_powm baseline (single core, no parallelism)
+#       table — precomputed prime array + cbrt table (the attack)
+#       sieve — inline Eratosthenes + cbrt table (same attack, no file I/O)
+#
+# JSON layout (cold_run / warm_runs split):
+#   cold_run   — run 0, cold CPU cache, labelled — do NOT use for comparison
+#   warm_runs  — runs 1..N, steady state — use warm_avg for all analysis
+#   warmup_runs — 2 silent warmup iterations before the bench loop
 # ---------------------------------------------------------------------------
 run_size() {
     local BITS=$1
-    local CHALLENGE=$DATA_DIR/challenge_2_16_${BITS}.txt
+    local CHALLENGE=$DATA_DIR/challenge_0_16_${BITS}.txt
     local MODULO=$DATA_DIR/modulo_16_${BITS}.txt
 
     if [ ! -f "$CHALLENGE" ] || [ ! -f "$MODULO" ]; then
-        echo "  [SKIP] $BITS-bit challenge not found ($CHALLENGE)"
+        echo "  [SKIP] ${BITS}-bit files not found — run gen_challenges.slurm first"
+        echo "         (expected: $CHALLENGE)"
         return
     fi
 
@@ -75,42 +81,50 @@ run_size() {
     echo "  Size: ${BITS} bits"
     echo "------------------------------------------------------------"
 
-    echo "  [factor]"
-    ./k16 $CHALLENGE $MODULO \
-        --method factor \
-        --bench $BENCH \
-        --json $JSON_DIR/k16_factor_${BITS}_${SLURM_JOB_ID}.json
-    echo ""
-
-    echo "  [powm baseline]"
+    echo "  [powm]"
     ./k16 $CHALLENGE $MODULO \
         --method powm \
         --bench $BENCH \
         --json $JSON_DIR/k16_powm_${BITS}_${SLURM_JOB_ID}.json
     echo ""
 
+    echo "  [table]"
+    ./k16 $CHALLENGE $MODULO \
+        --method table \
+        --bench $BENCH \
+        --json $JSON_DIR/k16_table_${BITS}_${SLURM_JOB_ID}.json
+    echo ""
+
+    echo "  [sieve]"
+    ./k16 $CHALLENGE $MODULO \
+        --method sieve \
+        --bench $BENCH \
+        --json $JSON_DIR/k16_sieve_${BITS}_${SLURM_JOB_ID}.json
+    echo ""
 }
 
 # ---------------------------------------------------------------------------
-# Run all standard modulus sizes
+# Run all sizes
 # ---------------------------------------------------------------------------
 echo "============================================================"
-echo "k16 Benchmark — all sizes, $BENCH runs each"
-echo "  JSON → $JSON_DIR/k16_*_${SLURM_JOB_ID}.json"
+echo "k16 Benchmark — ${BENCH} runs per method per size"
+echo "  methods: powm | table | sieve"
+echo "  JSON  → $JSON_DIR/"
 echo "============================================================"
 echo ""
 
-run_size 1024
-run_size 2048
-run_size 5000
-run_size 7000
+for SIZE in $SIZES; do
+    run_size $SIZE
+done
 
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
 echo "============================================================"
-echo "JSON results written to: $JSON_DIR/"
-echo "  k16_factor_{size}_${SLURM_JOB_ID}.json"
-echo "  k16_powm_{size}_${SLURM_JOB_ID}.json"
+echo "All sizes complete.  JSON files:"
+ls $JSON_DIR/*_${SLURM_JOB_ID}.json 2>/dev/null | sed 's|.*/||' | sed 's/^/  /'
 echo ""
-echo "Use warm_avg.* fields for all analysis — cold_run is labelled"
-echo "separately and should not be used for performance comparison."
-echo "Job finished"
+echo "Use warm_avg fields for all analysis."
+echo "cold_run and warmup_runs are labelled separately."
+echo "Job finished  (Job ID: $SLURM_JOB_ID)"
 echo "============================================================"
