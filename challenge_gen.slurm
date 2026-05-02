@@ -23,7 +23,9 @@ NUM_CHALLENGES=2
 
 # Target modulo sizes to test — lower and upper bounds of the parallelisation
 # benefit range.
-SIZES="16 32 64 128 256 512 1024 2048 4096 8192"
+# Target sizes per bitbound — minimum is 2x bitbound (need at least 2 primes)
+SIZES_K16="32 64 128 256 512 1024 2048 4096 8192"   # bitbound=16
+SIZES_K32="64 128 256 512 1024 2048 4096 8192"       # bitbound=32
 
 # ---------------------------------------------------------------------------
 # Compilation
@@ -53,6 +55,7 @@ echo ""
 # ---------------------------------------------------------------------------
 generate_all() {
     local BITBOUND=$1
+    local SIZES=$2
 
     echo "============================================================"
     echo "  Generating k${BITBOUND} challenges  (bitbound=${BITBOUND})"
@@ -74,12 +77,12 @@ generate_all() {
 # ---------------------------------------------------------------------------
 # Generate k16 challenges  (16-bit prime factors)
 # ---------------------------------------------------------------------------
-generate_all 16
+generate_all 16 "$SIZES_K16"
 
 # ---------------------------------------------------------------------------
 # Generate k32 challenges  (32-bit prime factors)
 # ---------------------------------------------------------------------------
-generate_all 32
+generate_all 32 "$SIZES_K32"
 
 # ---------------------------------------------------------------------------
 # Summary

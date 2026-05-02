@@ -28,7 +28,8 @@ JSON_DIR=$SLURM_SUBMIT_DIR/data/results/k32
 mkdir -p $JSON_DIR
 
 # All target sizes to benchmark
-SIZES="16 32 64 128 256 512 1024 2048 4096 8192"
+# k32: minimum useful size is 64 bits (need at least 2 × 32-bit primes to factor)
+SIZES="64 128 256 512 1024 2048 4096 8192"
 
 # ---------------------------------------------------------------------------
 # Job info

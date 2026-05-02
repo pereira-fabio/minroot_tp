@@ -50,22 +50,22 @@ int main(int argc, char **argv)
 	bittarget = strtoul(argv[2], (char **)NULL, 10);
 	bitbound = strtoul(argv[3], (char **)NULL, 10);
 
-	// it's easy to mess up the order of the inputs
-	// do some basic check
-	if (bitbound < bittarget)
-	{
-		printf("Seems like your inputs are weird...\n");
-		print_usage();
-	}
-
-	/* Build output directory path: data/challenges/k<bitbound>/ */
+	/* Build output path: data/challenges/k<bitbound>/ */
 	snprintf(savefolder, sizeof(savefolder), "data/challenges/k%lu/", bitbound);
-	/* Create directory (including parents) if it does not exist */
 	{
 		char mkdircmd[128];
 		snprintf(mkdircmd, sizeof(mkdircmd), "mkdir -p %s", savefolder);
 		if (system(mkdircmd) != 0)
 			printf("Warning: could not create directory %s\n", savefolder);
+	}
+
+	/* Sanity check: warn if bitbound is larger than bittarget.
+	   This is valid (one large prime exceeds target), just unusual. */
+	if (bitbound > bittarget)
+	{
+		printf("Note: bitbound (%lu) > bittarget (%lu). "
+			   "One prime will likely suffice.\n",
+			   bitbound, bittarget);
 	}
 
 	printf("Output directory: %s\n", savefolder);
@@ -121,10 +121,16 @@ int main(int argc, char **argv)
 		snprintf(buf, sizeof(buf), "%sfactors_%u_%lu_%lu.txt", savefolder, i, bitbound, bittarget);
 		printf("Saving factors for %i challenge to %s\n", i, buf);
 
-		// while result is too small; add another factor
+		/* Compute how many bits we need before stopping.
+		   bittarget - bitbound would underflow (unsigned) when bitbound >= bittarget,
+		   causing an infinite loop. Use a signed comparison to guard against this. */
 		count = 0;
 		mpz_set_ui(result, 1);
-		while (mpz_sizeinbase(result, 2) < bittarget - bitbound)
+		long bit_threshold = (long)bittarget - (long)bitbound;
+		if (bit_threshold < 0)
+			bit_threshold = 0;
+		/* Always include at least one prime so the challenge is non-trivial */
+		do
 		{
 			mpz_urandomb(temp, randstate, bitbound);
 			mpz_nextprime(temp, temp);
@@ -149,9 +155,9 @@ int main(int argc, char **argv)
 
 			mpz_mul(result, result, temp);
 			++count;
-		}
+		} while ((long)mpz_sizeinbase(result, 2) < bit_threshold);
 
-		printf("Obtained a vlue with %lu bits through multiplications of %u primes\n", mpz_sizeinbase(result, 2), count);
+		printf("Obtained a value with %lu bits through multiplications of %u primes\n", mpz_sizeinbase(result, 2), count);
 
 		// now save the result
 		snprintf(buf, sizeof(buf), "%schallenge_%u_%lu_%lu.txt", savefolder, i, bitbound, bittarget);

@@ -25,7 +25,8 @@ JSON_DIR=$SLURM_SUBMIT_DIR/data/results/k16
 mkdir -p $JSON_DIR
 
 # All target sizes to benchmark — lower and upper bounds of parallelisation benefit
-SIZES="16 32 64 128 256 512 1024 2048 4096 8192"
+# k16: minimum useful size is 32 bits (need at least 2 × 16-bit primes to factor)
+SIZES="32 64 128 256 512 1024 2048 4096 8192"
 
 # ---------------------------------------------------------------------------
 # Job info
