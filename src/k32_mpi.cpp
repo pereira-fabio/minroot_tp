@@ -452,8 +452,9 @@ static int solve_one(
     benchmark_results_t json_results;
     json_results.k_size = 32;
     json_results.challenge_bits = (rank == 0) ? mpz_sizeinbase(challenge, 2) : 0;
-    json_results.method_name = (method == METHOD_TABLE) ? "table"
-                                                        : "sieve";
+    json_results.method_name = (method == METHOD_TABLE)  ? "table"
+                               : (method == METHOD_POWM) ? "powm"
+                                                         : "sieve";
     json_results.num_threads = n_threads_json;
     json_results.mpi_ranks = nranks;
     json_results.bench_count = bench_count; // write_benchmark_json splits cold/warm
@@ -1031,10 +1032,12 @@ int main(int argc, char *argv[])
                 method = METHOD_SIEVE;
             else if (strcmp(m, "table") == 0)
                 method = METHOD_TABLE;
+            else if (strcmp(m, "powm") == 0)
+                method = METHOD_POWM;
             else
             {
                 if (rank == 0)
-                    fprintf(stderr, "Unknown --method '%s'\n", m);
+                    fprintf(stderr, "Unknown --method '%s' (use sieve, table, or powm)\n", m);
                 MPI_Finalize();
                 return 1;
             }
@@ -1100,7 +1103,9 @@ int main(int argc, char *argv[])
         printf("Total workers:  %d\n", nranks * omp_get_max_threads());
 #endif
         printf("Method:         %s\n",
-               method == METHOD_SIEVE ? "sieve" : "table");
+               method == METHOD_SIEVE   ? "sieve"
+               : method == METHOD_TABLE ? "table"
+                                        : "powm");
         if (bench_count > 1)
             printf("Benchmark runs: %d\n", bench_count);
         if (run_all)
