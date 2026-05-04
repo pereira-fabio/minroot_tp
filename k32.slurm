@@ -59,8 +59,8 @@ fi
 # ---------------------------------------------------------------------------
 # Compilation
 # ---------------------------------------------------------------------------
-mpicxx -O3 -std=c++17 -fopenmp -Wall \
-    src/k32_mpi.cpp src/k_common.cpp src/k_factorization.cpp \
+mpicxx -O3 -std=c++17 -fopenmp \
+    src/k32_mpi.cpp src/k_solver_common.cpp src/k_common.cpp src/k_factorization.cpp \
     -lgmp -o k32_mpi
 
 if [ $? -ne 0 ]; then echo "Compilation failed"; exit 1; fi
