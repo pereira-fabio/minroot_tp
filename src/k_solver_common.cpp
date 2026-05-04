@@ -1,3 +1,7 @@
+// =============================================================================
+// k_solver_common.cpp — Shared MPI+OpenMP infrastructure for cube root solvers
+// =============================================================================
+
 #include "k_solver_common.h"
 
 #include <stdio.h>
@@ -344,11 +348,11 @@ void ksc_ensure_k16_cbrt(
     mkdir_data();
 
     // Derive path: data/modulo_16_<bits>.cbrt
-    char base[512];
+    char base[600];
     // Extract filename component from modulo_file path
     const char *fname = strrchr(modulo_file, '/');
     fname = fname ? fname + 1 : modulo_file;
-    char stem[512];
+    char stem[600];
     strncpy(stem, fname, sizeof(stem) - 1);
     stem[sizeof(stem) - 1] = '\0';
     char *dot = strrchr(stem, '.');
