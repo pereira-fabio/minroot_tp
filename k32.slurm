@@ -24,7 +24,7 @@ DATA_DIR=data/challenges/k32
 BENCH=10
 
 # k32_mpi: minimum useful size is 64 bits (need at least 2 x 32-bit primes)
-SIZES="64 128 256 512 1024 2048 4096 8192"
+SIZES="1024 2048 4096 5120 6144 7168 8192"
 
 # JSON output directory — automatically includes the node count so scaling
 # runs never overwrite each other:

@@ -25,7 +25,7 @@ NUM_CHALLENGES=2
 # benefit range.
 # Target sizes per bitbound — minimum is 2x bitbound (need at least 2 primes)
 SIZES_K16="32 64 128 256 512 1024 2048 4096 8192"   # bitbound=16
-SIZES_K32="64 128 256 512 1024 2048 4096 8192"       # bitbound=32
+SIZES_K32="1024 2048 4096 5120 6144 7168 8192"       # bitbound=32
 
 # ---------------------------------------------------------------------------
 # Compilation
