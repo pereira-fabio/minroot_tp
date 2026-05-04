@@ -38,6 +38,7 @@
 
 #include "k_common.h"
 #include "k_factorization.h"
+#include "k_solver_common.h"
 
 #include <mpi.h>
 #include <gmp.h>
@@ -265,72 +266,15 @@ static int solve_one(
     // call MPI_Abort together — avoiding the hang caused by exit(1) on rank 0
     // while other ranks block on MPI_Bcast.
 
-    int read_ok = 1;
-    size_t challenge_nbytes = 0, modulo_nbytes = 0;
-    unsigned char *challenge_bytes = NULL, *modulo_bytes = NULL;
-
     mpz_t challenge, modulo, result;
     mpz_inits(challenge, modulo, result, NULL);
 
-    if (rank == 0)
-    {
-        FILE *fc = fopen(challenge_file, "rb");
-        FILE *fm = fopen(modulo_file, "rb");
-        if (!fc || !fm)
-        {
-            fprintf(stderr, "Error: cannot open '%s' or '%s'\n",
-                    challenge_file, modulo_file);
-            if (fc)
-                fclose(fc);
-            if (fm)
-                fclose(fm);
-            read_ok = 0;
-        }
-        else
-        {
-            fclose(fc);
-            fclose(fm);
-            read_mpz_from_file(challenge, challenge_file);
-            read_mpz_from_file(modulo, modulo_file);
-            challenge_bytes = (unsigned char *)mpz_export(
-                NULL, &challenge_nbytes, 1, 1, 0, 0, challenge);
-            modulo_bytes = (unsigned char *)mpz_export(
-                NULL, &modulo_nbytes, 1, 1, 0, 0, modulo);
-        }
-    }
-
-    // Broadcast success flag before any data — all ranks abort cleanly on failure
-    MPI_Bcast(&read_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    if (!read_ok)
+    if (!ksc_broadcast_challenge_modulo(challenge, modulo,
+                                        challenge_file, modulo_file, rank))
     {
         mpz_clears(challenge, modulo, result, NULL);
-        MPI_Abort(MPI_COMM_WORLD, 1);
         return 0;
     }
-
-    // Broadcast sizes, allocate on non-root, then broadcast data
-    uint64_t cn64 = (uint64_t)challenge_nbytes;
-    uint64_t mn64 = (uint64_t)modulo_nbytes;
-    MPI_Bcast(&cn64, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&mn64, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-    challenge_nbytes = (size_t)cn64;
-    modulo_nbytes = (size_t)mn64;
-
-    if (rank != 0)
-    {
-        challenge_bytes = (unsigned char *)malloc(challenge_nbytes);
-        modulo_bytes = (unsigned char *)malloc(modulo_nbytes);
-    }
-    MPI_Bcast(challenge_bytes, (int)challenge_nbytes, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
-    MPI_Bcast(modulo_bytes, (int)modulo_nbytes, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
-
-    if (rank != 0)
-    {
-        mpz_import(challenge, challenge_nbytes, 1, 1, 0, 0, challenge_bytes);
-        mpz_import(modulo, modulo_nbytes, 1, 1, 0, 0, modulo_bytes);
-    }
-    free(challenge_bytes);
-    free(modulo_bytes);
 
     if (rank == 0)
     {
@@ -387,31 +331,33 @@ static int solve_one(
     // On a warm run (cache file present) all powms are skipped → ~0 ms recon.
     char cbrt_cache_path[600];
     {
-        // Strip trailing ".txt" if present, append ".cbrt.<rank>"
-        const char *base = modulo_file ? modulo_file : "modulo";
-        char stripped[512];
-        strncpy(stripped, base, sizeof(stripped) - 1);
-        stripped[sizeof(stripped) - 1] = '\0';
-        size_t blen = strlen(stripped);
-        if (blen >= 4 && strcmp(stripped + blen - 4, ".txt") == 0)
-            stripped[blen - 4] = '\0';
+        // Cache path: data/<modulo_stem>.cbrt.<rank>
+        const char *bname = modulo_file ? modulo_file : "modulo";
+        const char *slash = strrchr(bname, '/');
+        const char *fname = slash ? slash + 1 : bname;
+        char stem[512];
+        strncpy(stem, fname, sizeof(stem) - 1);
+        stem[sizeof(stem) - 1] = '\0';
+        size_t blen = strlen(stem);
+        if (blen >= 4 && strcmp(stem + blen - 4, ".txt") == 0)
+            stem[blen - 4] = '\0';
         snprintf(cbrt_cache_path, sizeof(cbrt_cache_path),
-                 "%s.cbrt.%d", stripped, rank);
+                 "%s/%s.cbrt.%d", KSC_DATA_DIR, stem, rank);
     }
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
     bool cbrt_cache_dirty = false;
 
-    if (kf_cbrt_cache_load(&local_cbrt_cache, cbrt_cache_path))
-    {
-        if (rank == 0)
-            printf("cbrt cache: loaded %d entries from %s\n",
-                   local_cbrt_cache.count, cbrt_cache_path);
-    }
-    else if (rank == 0)
-        printf("cbrt cache: not found at %s — will build on first run\n",
-               cbrt_cache_path);
+    // Guarantee cbrt cache is fully populated before any timed run.
+    // If the file exists it is loaded; otherwise one untimed factoring
+    // pass is run to compute all needed cbrt values and save them.
+    ksc_ensure_k32_cbrt(
+        &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
+        challenge, modulo, e_inv,
+        my_lo, my_hi, sp_count, sp,
+        prime_slice, slice_count,
+        rank, nranks, method == METHOD_TABLE ? 1 : 0);
 
     // Blinding pair table — precomputed on rank 0 only (Algorithm 2 precomputation).
     // Rank 0 uses table[attempt-1].r3 to compute the blinded challenge and
@@ -444,21 +390,17 @@ static int solve_one(
     bench_accum_t recon_acc = {0, 0};
     double cur_max_loc = 0.0;
 
-    // JSON results — populated on rank 0, bench 0 excluded (warmup)
+    // JSON results
     int n_threads_json = 1;
 #ifdef _OPENMP
     n_threads_json = omp_get_max_threads();
 #endif
     benchmark_results_t json_results;
-    json_results.k_size = 32;
-    json_results.challenge_bits = (rank == 0) ? mpz_sizeinbase(challenge, 2) : 0;
-    json_results.method_name = (method == METHOD_TABLE)  ? "table"
-                               : (method == METHOD_POWM) ? "powm"
-                                                         : "sieve";
-    json_results.num_threads = n_threads_json;
-    json_results.mpi_ranks = nranks;
-    json_results.bench_count = bench_count; // write_benchmark_json splits cold/warm
-    json_results.powm_baseline_ms = 0.0;
+    const char *mname32 = (method == METHOD_TABLE)  ? "table"
+                          : (method == METHOD_POWM) ? "powm"
+                                                    : "sieve";
+    ksc_init_json_results(&json_results, 32, bench_count, mname32,
+                          nranks, n_threads_json, challenge, rank);
 
     // ---- 2 warmup runs (silent, primes CPU caches before bench loop) ----
     // Runs the full factoring + reconstruction pipeline twice without
@@ -740,34 +682,12 @@ static int solve_one(
         auto t_loc1 = std::chrono::high_resolution_clock::now();
         double local_dt = std::chrono::duration<double, std::milli>(t_loc1 - t_loc0).count();
 
-        // Gather primes_found count from all ranks → rank 0 (first warm run only)
-        if (bench == 1 && rank == 0)
-        {
-            int local_found = local_factors.count;
-            std::vector<int> all_found(nranks);
-            MPI_Gather(&local_found, 1, MPI_INT,
-                       all_found.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
-            for (int r = 0; r < nranks; r++)
-                json_results.primes_found_per_rank.push_back(all_found[r]);
-            // Record primes tested (static per rank — slice_count or sieve range)
-            for (int r = 0; r < nranks; r++)
-            {
-                // Compute each rank's prime range [lo, hi] as done in main()
-                const uint64_t _RLO = 65537ULL;
-                const uint64_t _RHI = (uint64_t)UINT32_MAX;
-                const uint64_t _RSZ = _RHI - _RLO + 1;
-                uint64_t r_lo = _RLO + (_RSZ * (uint64_t)r) / (uint64_t)nranks;
-                uint64_t r_hi = _RLO + (_RSZ * (uint64_t)(r + 1)) / (uint64_t)nranks - 1;
-                if (r == nranks - 1)
-                    r_hi = _RHI;
-                json_results.primes_tested_per_rank.push_back((int64_t)(r_hi - r_lo + 1));
-            }
-        }
-        else if (bench == 1 && rank != 0)
-        {
-            int local_found = local_factors.count;
-            MPI_Gather(&local_found, 1, MPI_INT, nullptr, 0, MPI_INT, 0, MPI_COMM_WORLD);
-        }
+        // Gather prime stats from all ranks (first warm run only)
+        if (bench == 1)
+            ksc_gather_prime_stats(&json_results,
+                                   local_factors.count,
+                                   (int64_t)(my_hi - my_lo + 1),
+                                   rank, nranks);
 
         // Record cbrt hit/miss stats for warm runs
         if (rank == 0 && bench > 0)
@@ -808,69 +728,23 @@ static int solve_one(
         }
         mpz_clear(local_cbrt);
 
-        // Step 3 — gather all partial cbrt buffers at rank 0.
-        //   Total payload: nranks × cbrt_bytes ≈ nranks × 875 bytes (< 10 KB
-        //   for 8 ranks with 7000-bit modulo).
-        unsigned char *all_bufs = NULL;
-        if (rank == 0)
-            all_bufs = (unsigned char *)malloc((size_t)nranks * cbrt_bytes);
-
-        auto t_gat0 = std::chrono::high_resolution_clock::now();
-        MPI_Gather(local_buf, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-                   all_bufs, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-                   0, MPI_COMM_WORLD);
-        auto t_gat1 = std::chrono::high_resolution_clock::now();
+        // Gather partial cbrt products and combine at rank 0
+        double iter_gat2 = 0.0, iter_com2 = 0.0;
+        ksc_gather_and_combine_cbrt(result, local_cbrt, modulo, cbrt_bytes,
+                                    rank, nranks, attempt,
+                                    blind_table, BLIND_TABLE_SIZE,
+                                    &iter_gat2, &iter_com2);
         free(local_buf);
-
         if (rank == 0)
         {
-            double dt = std::chrono::duration<double, std::milli>(t_gat1 - t_gat0).count();
-            accum_record(&gat_acc, dt);
-            iter_gat = dt;
+            accum_record(&gat_acc, iter_gat2);
+            iter_gat = iter_gat2;
             if (bench > 0)
-                json_results.gather_times.push_back(dt);
-        }
-
-        // Step 4 — rank 0 multiplies the nranks partial cbrt results together,
-        //          then unblinds: result = combined_cbrt * r^{-1} mod M.
-        //   result = ∏_rk partial_cbrt_rk  mod M,  then  *= r^{-1}  mod M
-        if (rank == 0)
-        {
-            auto t_com0 = std::chrono::high_resolution_clock::now();
-
-            mpz_set_ui(result, 1);
-            mpz_t partial;
-            mpz_init(partial);
-            for (int rk = 0; rk < nranks; rk++)
-            {
-                mpz_import(partial, cbrt_bytes, 1, 1, 0, 0,
-                           all_bufs + (size_t)rk * cbrt_bytes);
-                mpz_mul(result, result, partial);
-                mpz_mod(result, result, modulo);
-            }
-            mpz_clear(partial);
-            free(all_bufs);
-
-            // Unblind: result = combined_cbrt * r^{-1} mod M.
-            // attempt == 0 → r = 1, no unblinding needed.
-            // attempt > 0  → use precomputed table[attempt-1].r_inv directly
-            //                 (one mul + mod; no mpz_invert in the hot path).
-            if (attempt > 0)
-            {
-                int idx = attempt - 1;
-                if (idx < BLIND_TABLE_SIZE)
-                {
-                    mpz_mul(result, result, blind_table[idx].r_inv);
-                    mpz_mod(result, result, modulo);
-                }
-            }
-
-            auto t_com1 = std::chrono::high_resolution_clock::now();
-            double dt = std::chrono::duration<double, std::milli>(t_com1 - t_com0).count();
-            accum_record(&com_acc, dt);
-            iter_com = dt;
+                json_results.gather_times.push_back(iter_gat2);
+            accum_record(&com_acc, iter_com2);
+            iter_com = iter_com2;
             if (bench > 0)
-                json_results.combine_times.push_back(dt);
+                json_results.combine_times.push_back(iter_com2);
         }
 
         // Per-iteration reconstruction total — rank 0 only.
@@ -917,40 +791,9 @@ static int solve_one(
                    (fac_acc.sum + recon_acc.sum) / bench_count);
         }
 
-        // ---- Sequential powm baseline (rank 0, ALL methods) ----
-        // Measured after the bench loop so it never pollutes factoring
-        // timings. Stored in JSON for every method, not just compare.
-        if (rank == 0)
-        {
-            printf("\n--- Sequential powm baseline (rank 0, %d threads unused) ---\n",
-#ifdef _OPENMP
-                   omp_get_max_threads());
-#else
-                   0);
-#endif
-            mpz_t powm_result;
-            mpz_init(powm_result);
-            double powm_avg = run_powm_baseline(powm_result, challenge, modulo,
-                                                bench_count, 30);
-            json_results.powm_baseline_ms = powm_avg;
-            mpz_clear(powm_result);
-
-            double recon_avg = accum_mean(&recon_acc, bench_count);
-            double total_avg = (fac_acc.sum + recon_acc.sum) / bench_count;
-
-            printf("\n--- Speedup vs sequential powm ---\n");
-            printf("  powm vs reconstruction only:  %.2fx  "
-                   "(parallel cbrt, no factoring cost)\n",
-                   recon_avg > 0 ? powm_avg / recon_avg : 0.0);
-            printf("  powm vs total (factor+recon): %.2fx  "
-                   "(end-to-end latency)\n",
-                   total_avg > 0 ? powm_avg / total_avg : 0.0);
-            if (method == METHOD_SIEVE || method == METHOD_TABLE)
-                printf("\nNote: 'recon only' is the most direct comparison to the paper's\n"
-                       "      Algorithm 2 speedup claim. Total includes factoring overhead\n"
-                       "      which the paper treats as separate precomputation cost.\n");
-        }
-
+        // Sequential powm baseline + speedup report
+        ksc_run_and_report_powm_baseline(&json_results, challenge, modulo,
+                                         bench_count, &recon_acc, &fac_acc, rank);
         // Verify
         mpz_t challenge_mod;
         mpz_init(challenge_mod);
@@ -1160,31 +1003,8 @@ int main(int argc, char *argv[])
     // then all ranks wait before each loading their own slice inside solve_one.
     if (method == METHOD_TABLE)
     {
-        int table_ok = 1;
-        if (rank == 0)
-        {
-            FILE *test = fopen(primes_file, "rb");
-            if (!test)
-            {
-                printf("[rank 0] Prime table not found — generating...\n");
-                fflush(stdout);
-                table_ok = kf_generate_and_save_prime_table(primes_file, sp_count, sp, "[rank 0] ") ? 1 : 0;
-            }
-            else
-            {
-                fclose(test);
-            }
-        }
-        MPI_Bcast(&table_ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        if (!table_ok)
-        {
-            if (rank == 0)
-                fprintf(stderr, "Failed to create prime table\n");
-            free(sp);
-            MPI_Finalize();
-            return 1;
-        }
-        MPI_Barrier(MPI_COMM_WORLD); // ensure file is fully written before any rank reads
+        // Ensure data/k32_primes.bin exists; generates if absent (rank 0 only)
+        primes_file = ksc_ensure_k32_primes(sp_count, sp, rank);
     }
 
     if (run_all)
