@@ -347,17 +347,18 @@ void ksc_ensure_k16_cbrt(
 {
     mkdir_data();
 
-    // Derive path: data/modulo_16_<bits>.cbrt
-    char base[600];
-    // Extract filename component from modulo_file path
+    // Derive path: data/<modulo_stem>.cbrt
+    // stem is capped at 256 bytes so base (256+16) is always large enough
+    // and the compiler can verify no truncation occurs.
     const char *fname = strrchr(modulo_file, '/');
     fname = fname ? fname + 1 : modulo_file;
-    char stem[600];
+    char stem[256];
     strncpy(stem, fname, sizeof(stem) - 1);
     stem[sizeof(stem) - 1] = '\0';
     char *dot = strrchr(stem, '.');
     if (dot)
         *dot = '\0';
+    char base[272]; // 256 (stem) + 4 (KSC_DATA_DIR) + 1 (/) + 5 (.cbrt) + 6 slack
     snprintf(base, sizeof(base), "%s/%s.cbrt", KSC_DATA_DIR, stem);
 
     bool loaded = false;
