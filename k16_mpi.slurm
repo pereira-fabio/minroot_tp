@@ -105,8 +105,9 @@ run_size() {
         echo "        First table/sieve run will compute all 6542 cbrt entries."
         echo "        Resubmit for fully warm reconstruction timings."
     else
-        ENTRIES=$(head -1 "$CACHE" 2>/dev/null)
-        echo "  cbrt cache: found ($ENTRIES entries)"
+        # File is binary (fwrite + mpz_out_raw) — read size, not text content
+        CACHE_SIZE=$(wc -c < "$CACHE" 2>/dev/null)
+        echo "  cbrt cache: found (${CACHE_SIZE} bytes)"
     fi
 
     echo "------------------------------------------------------------"
@@ -168,3 +169,4 @@ echo ""
 echo "Use warm_avg fields for all analysis."
 echo "cold_run and warmup_runs are labelled separately."
 echo "Job finished  (Job ID: $SLURM_JOB_ID)"
+echo "============================================================"
