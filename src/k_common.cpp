@@ -380,22 +380,42 @@ void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
     int n_total = res.bench_count;
     int n_warm = (n_total > 1) ? n_total - 1 : 0;
 
-    // Compute warm averages for the speedup fields
+    // Compute warm averages — exclude runs where blinding exhausted all precomputed
+    // pairs (blinding_attempts > 1). Those runs retried 256+ times and are not
+    // representative of normal performance. They are kept in warm_runs for
+    // transparency but excluded from warm_avg and speedup calculations.
     double warm_factor_avg = 0.0, warm_recon_avg = 0.0, warm_total_avg = 0.0;
+    int n_valid = 0;
+    int n_failed = 0;
     if (n_warm > 0)
     {
         for (int i = 1; i <= n_warm; i++)
         {
-            if (i < (int)res.factor_times.size())
-                warm_factor_avg += res.factor_times[i];
-            if (i < (int)res.recon_times.size())
-                warm_recon_avg += res.recon_times[i];
-            if (i < (int)res.total_times.size())
-                warm_total_avg += res.total_times[i];
+            // Skip runs that needed more than 1 blinding attempt (exhaustion runs)
+            bool failed = false;
+            if (i <= (int)res.blinding_attempts.size() &&
+                res.blinding_attempts[i - 1] > 1)
+            {
+                failed = true;
+                n_failed++;
+            }
+            if (!failed)
+            {
+                if (i < (int)res.factor_times.size())
+                    warm_factor_avg += res.factor_times[i];
+                if (i < (int)res.recon_times.size())
+                    warm_recon_avg += res.recon_times[i];
+                if (i < (int)res.total_times.size())
+                    warm_total_avg += res.total_times[i];
+                n_valid++;
+            }
         }
-        warm_factor_avg /= n_warm;
-        warm_recon_avg /= n_warm;
-        warm_total_avg /= n_warm;
+        if (n_valid > 0)
+        {
+            warm_factor_avg /= n_valid;
+            warm_recon_avg /= n_valid;
+            warm_total_avg /= n_valid;
+        }
     }
 
     fprintf(f, "{\n");
@@ -409,7 +429,9 @@ void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
     fprintf(f, "    \"mpi_ranks\": %d,\n", res.mpi_ranks);
     fprintf(f, "    \"runs_total\": %d,\n", n_total);
     fprintf(f, "    \"runs_warm\": %d,\n", n_warm);
-    fprintf(f, "    \"note\": \"run 0 is cold-start (excluded from warm_runs)\",\n");
+    fprintf(f, "    \"runs_valid\": %d,\n", n_valid);
+    fprintf(f, "    \"runs_failed\": %d,\n", n_failed);
+    fprintf(f, "    \"note\": \"run 0=cold-start, runs with blinding_attempts>1 excluded from warm_avg\",\n");
     fprintf(f, "    \"powm_baseline_ms\": %.4f\n", res.powm_baseline_ms);
     fprintf(f, "  },\n");
 

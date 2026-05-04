@@ -454,9 +454,9 @@ static int solve_one(
         }
     }
 
-    // ---- Benchmark loop ----
+    // ---- Benchmark loop (skipped for METHOD_POWM) ----
 
-    for (int bench = 0; bench < bench_count; bench++)
+    for (int bench = 0; bench < bench_count && method != METHOD_POWM; bench++)
     {
 
         factor_list_t local_factors;
