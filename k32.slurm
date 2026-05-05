@@ -51,7 +51,9 @@ N_NODES=${NODE_COUNTS[$SLURM_ARRAY_TASK_ID]}
 # ---------------------------------------------------------------------------
 DATA_DIR=data/challenges/k32
 BENCH=10
-SIZES="64 128 256 512 1024 2048 4096 8192"
+
+# k32_mpi: minimum useful size is 64 bits (need at least 2 x 32-bit primes)
+SIZES="1024 2048 4096 5120 6144 7168 8192"
 
 JSON_DIR=$SLURM_SUBMIT_DIR/data/results/k32_mpi_N${N_NODES}
 mkdir -p $JSON_DIR
