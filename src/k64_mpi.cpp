@@ -17,9 +17,9 @@
 // because every rank may need any factor's cbrt for reconstruction.
 //
 // Build:
-//   mpicxx -O3 -std=c++17 -fopenmp -Wall \
-//       src/k64_mpi.cpp src/k_solver_common.cpp \
-//       src/k_common.cpp src/k_factorization.cpp \
+//   mpicxx -O3 -std=c++17 -fopenmp -Wall
+//       src/k64_mpi.cpp src/k_solver_common.cpp
+//       src/k_common.cpp src/k_factorization.cpp
 //       -lgmp -o k64_mpi
 // =============================================================================
 
@@ -282,7 +282,6 @@ static int solve_one(
     // ── Benchmark loop ────────────────────────────────────────────────────────
     for (int bench = 0; bench < bench_count && method != METHOD_POWM; bench++)
     {
-        double iter_gat = 0.0, iter_com = 0.0;
 
         // ---- BLINDING + FACTORING ----
         MPI_Barrier(MPI_COMM_WORLD);
@@ -663,6 +662,7 @@ int main(int argc, char *argv[])
     const char *json_file = nullptr;
     int bench_count = 1;
     run_method_t method = METHOD_SIEVE;
+    bool challenge_set = false; // tracks whether first positional arg was consumed
 
     for (int i = 1; i < argc; i++)
     {
@@ -687,8 +687,11 @@ int main(int argc, char *argv[])
         }
         else if (argv[i][0] != '-')
         {
-            if (strstr(challenge_file, "challenge_0"))
+            if (!challenge_set)
+            {
                 challenge_file = argv[i];
+                challenge_set = true;
+            }
             else
                 modulo_file = argv[i];
         }
