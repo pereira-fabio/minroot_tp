@@ -3,6 +3,7 @@
 #SBATCH --output=minroot_k32_mpi_%A_%a.out
 #SBATCH --error=minroot_k32_mpi_%A_%a.err
 #SBATCH --array=0-3
+#SBATCH --nodes=8          # allocate max; each task uses only N_NODES via srun -N
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=32
 #SBATCH --exclusive

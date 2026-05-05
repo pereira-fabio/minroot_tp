@@ -3,6 +3,7 @@
 #SBATCH --output=minroot_k16_mpi_%A_%a.out
 #SBATCH --error=minroot_k16_mpi_%A_%a.err
 #SBATCH --array=0-3
+#SBATCH --nodes=8          
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=32
 #SBATCH --exclusive
