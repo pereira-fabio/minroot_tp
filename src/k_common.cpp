@@ -387,18 +387,15 @@ void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
     double warm_factor_avg = 0.0, warm_recon_avg = 0.0, warm_total_avg = 0.0;
     int n_valid = 0;
     int n_failed = 0;
+    // factor_times, recon_times, total_times and blinding_attempts are all
+    // pushed for bench > 0 only, so each has exactly n_warm entries, 0-indexed
+    // [0..n_warm-1].  The old loop used i=1..n_warm reading times[i], which
+    // accessed times[n_warm] — one past the end (UB).  Fixed: use i=0..n_warm-1
+    // and index all four vectors with the same i.
     if (n_warm > 0)
     {
-        // factor_times, recon_times, total_times, and blinding_attempts are
-        // all pushed for bench > 0 only, so each has exactly n_warm entries,
-        // 0-indexed as [0..n_warm-1]. They are directly aligned:
-        //   factor_times[k]      = factoring time for warm run k+1
-        //   blinding_attempts[k] = blinding attempts for warm run k+1
-        // The old loop used i=1..n_warm with factor_times[i], reading
-        // factor_times[n_warm] which is one past the end (UB). Fixed below.
         for (int i = 0; i < n_warm; i++)
         {
-            // Skip runs where blinding exhausted all precomputed pairs
             bool failed = false;
             if (i < (int)res.blinding_attempts.size() &&
                 res.blinding_attempts[i] > 1)
