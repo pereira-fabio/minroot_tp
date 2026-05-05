@@ -546,15 +546,70 @@ void ksc_ensure_k64_cbrt(
         goto broadcast;
     }
 
-    // Cache missing — rank 0 factors the challenge completely and computes cbrt
+    // Cache missing — factor using two-phase strategy:
+    //   Phase 1: sieve trial division up to 2^32 (fast, finds all small factors)
+    //   Phase 2: Pollard's rho on the remaining cofactor (fast for ≤64-bit factors)
+    //
+    // DO NOT use kf_factor_challenge() here — it only trial-divides up to 1000
+    // before launching Pollard's rho on the full challenge. For a 4000-bit number
+    // that is a product of 100+ primes around 2^32, that means Pollard's rho must
+    // recurse ~100 times doing thousands-of-bits arithmetic = hours of runtime.
     if (rank == 0)
     {
-        printf("[rank 0] k64 cbrt cache missing — factoring challenge (OMP Pollard's rho)\n");
+        printf("[rank 0] k64 cbrt cache missing — factoring via sieve + Pollard's rho\n");
         fflush(stdout);
+
+        // Generate small primes for sieve (≤ 65536 = sqrt(2^32))
+        int sp_count = 0;
+        unsigned *sp = kf_generate_small_primes(&sp_count);
 
         kfactor_list_t factors;
         kfl_init(&factors);
-        kf_factor_challenge(challenge, &factors);
+
+        // Phase 1a: trial divide small primes 2..65536 directly
+        for (int si = 0; si < sp_count; si++)
+        {
+            unsigned long p = (unsigned long)sp[si];
+            int e = count_exponent(challenge, p);
+            if (e > 0)
+                kfl_append_ul(&factors, p, e);
+        }
+
+        // Phase 1b: sieve trial division over [65537, 2^32]
+        kf_trial_divide_sieve(challenge, 65537ULL, (uint64_t)UINT32_MAX,
+                              sp_count, sp, &factors);
+        free(sp);
+
+        // Compute cofactor = challenge / (product of all small factors found)
+        mpz_t cofactor;
+        mpz_init_set(cofactor, challenge);
+        for (int i = 0; i < factors.count; i++)
+        {
+            unsigned long p = mpz_get_ui(factors.items[i].prime);
+            for (int e = 0; e < factors.items[i].exponent; e++)
+                mpz_divexact_ui(cofactor, cofactor, p);
+        }
+
+        // Phase 2: Pollard's rho for any remaining large factors (> 2^32)
+        // Cofactor is a product of at most a few 64-bit primes — Pollard's rho
+        // on a 64-bit factor in a ≤256-bit number takes microseconds.
+        if (mpz_cmp_ui(cofactor, 1) > 0)
+        {
+            printf("[rank 0] Cofactor: %zu bits — running Pollard's rho\n",
+                   mpz_sizeinbase(cofactor, 2));
+            fflush(stdout);
+            kfactor_list_t large_fac;
+            kfl_init(&large_fac);
+            kf_factor_recursive(cofactor, &large_fac, 1);
+            for (int i = 0; i < large_fac.count; i++)
+                kfl_append_mpz(&factors, large_fac.items[i].prime,
+                               large_fac.items[i].exponent);
+            kfl_free(&large_fac);
+        }
+        mpz_clear(cofactor);
+
+        printf("[rank 0] Factored: %d distinct primes\n", factors.count);
+        fflush(stdout);
 
         // Compute e = 3^{-1} mod (M-1) for cbrt
         mpz_t e_inv, m1;

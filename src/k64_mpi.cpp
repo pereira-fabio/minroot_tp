@@ -392,12 +392,24 @@ static int solve_one(
                 else
                     mpz_set(cofactor, blinded_challenge); // shouldn't happen
 
-                // -- Phase C: OMP Pollard's rho on cofactor (rank 0 only) --
+                // -- Phase C: Pollard's rho on cofactor (rank 0, OMP threads) --
+                // Cofactor has already had all 32-bit factors removed, so its
+                // remaining factors are in [2^32, 2^64] — Pollard's rho is fast.
+                // DO NOT call kf_factor_challenge here (it only trial-divides
+                // up to 1000 — use kf_factor_recursive which uses OMP directly).
                 double t_poll0 = MPI_Wtime();
                 kfactor_list_t large_factors;
                 kfl_init(&large_factors);
                 if (mpz_cmp_ui(cofactor, 1) > 0)
-                    kf_factor_challenge(cofactor, &large_factors);
+                {
+                    if (bench == 0)
+                    {
+                        printf("  Cofactor: %zu bits — Pollard's rho (OMP)\n",
+                               mpz_sizeinbase(cofactor, 2));
+                        fflush(stdout);
+                    }
+                    kf_factor_recursive(cofactor, &large_factors, 1);
+                }
                 double t_poll1 = MPI_Wtime();
                 pollard_elapsed = (t_poll1 - t_poll0) * 1000.0; // ms
 
