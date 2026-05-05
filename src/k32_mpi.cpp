@@ -327,11 +327,10 @@ static int solve_one(
     mpz_clears(phi, three_mpz, NULL);
 
     // Per-rank cbrt cache — persists cbrt(p) values across bench iterations.
-    // Path: <modulo_without_ext>.cbrt.<rank>
+    // Path: data/cbrt/<modulo_stem>.cbrt.<rank>
     // On a warm run (cache file present) all powms are skipped → ~0 ms recon.
     char cbrt_cache_path[600];
     {
-        // Cache path: data/<modulo_stem>.cbrt.<rank>
         const char *bname = modulo_file ? modulo_file : "modulo";
         const char *slash = strrchr(bname, '/');
         const char *fname = slash ? slash + 1 : bname;
@@ -342,7 +341,7 @@ static int solve_one(
         if (blen >= 4 && strcmp(stem + blen - 4, ".txt") == 0)
             stem[blen - 4] = '\0';
         snprintf(cbrt_cache_path, sizeof(cbrt_cache_path),
-                 "%s/%s.cbrt.%d", KSC_DATA_DIR, stem, rank);
+                 "%s/%s.cbrt.%d", KSC_CBRT_DIR, stem, rank);
     }
 
     cbrt_cache_t local_cbrt_cache;

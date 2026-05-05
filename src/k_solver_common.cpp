@@ -282,11 +282,11 @@ static bool file_exists(const char *path)
 
 static void mkdir_data()
 {
-    // Create KSC_DATA_DIR if it doesn't exist (portable via system())
-    if (!file_exists(KSC_DATA_DIR))
+    // Create data/ and data/cbrt/ if they don't exist
+    if (!file_exists(KSC_CBRT_DIR))
     {
         char cmd[64];
-        snprintf(cmd, sizeof(cmd), "mkdir -p %s", KSC_DATA_DIR);
+        snprintf(cmd, sizeof(cmd), "mkdir -p %s", KSC_CBRT_DIR);
         (void)system(cmd);
     }
 }
@@ -358,8 +358,8 @@ void ksc_ensure_k16_cbrt(
     char *dot = strrchr(stem, '.');
     if (dot)
         *dot = '\0';
-    char base[272]; // 256 (stem) + 4 (KSC_DATA_DIR) + 1 (/) + 5 (.cbrt) + 6 slack
-    snprintf(base, sizeof(base), "%s/%s.cbrt", KSC_DATA_DIR, stem);
+    char base[280]; // 256 (stem) + 9 (KSC_CBRT_DIR) + 1 (/) + 5 (.cbrt) + 9 slack
+    snprintf(base, sizeof(base), "%s/%s.cbrt", KSC_CBRT_DIR, stem);
 
     bool loaded = false;
     if (rank == 0)

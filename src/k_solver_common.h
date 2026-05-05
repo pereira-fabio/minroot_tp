@@ -22,6 +22,7 @@
 // Data directory — all precomputed files live here
 // ---------------------------------------------------------------------------
 #define KSC_DATA_DIR "data"
+#define KSC_CBRT_DIR "data/cbrt"  
 
 // ---------------------------------------------------------------------------
 // Challenge / modulo broadcast
