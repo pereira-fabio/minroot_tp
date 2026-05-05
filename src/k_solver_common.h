@@ -22,7 +22,7 @@
 // Data directory — all precomputed files live here
 // ---------------------------------------------------------------------------
 #define KSC_DATA_DIR "data"
-#define KSC_CBRT_DIR "data/cbrt"  
+#define KSC_CBRT_DIR "data/cbrt" // cbrt tables live here, separate from primes/challenges
 
 // ---------------------------------------------------------------------------
 // Challenge / modulo broadcast
@@ -149,3 +149,31 @@ void ksc_ensure_k32_cbrt(
     const uint32_t *prime_slice, int64_t slice_count,
     int rank, int nranks,
     int method_uses_table);
+
+// ---------------------------------------------------------------------------
+// k64 precomputation
+//
+// ksc_ensure_k64_cbrt:
+//   Rank 0 calls kf_factor_challenge (trial division + OMP Pollard's rho) on
+//   the challenge, computes cbrt for every factor, and saves a shared cache
+//   to data/cbrt/modulo_64_<bits>.cbrt (no rank suffix — all ranks use the
+//   same file since the factor set is determined by the challenge, not the rank).
+//
+//   After return, the cache is loaded on ALL ranks via MPI_Bcast of the
+//   serialised entries, so every rank can look up cbrt for any factor without
+//   an mpz_powm call during the bench loop.
+//
+// factor_buf_out / factor_count_out:
+//   Caller-allocated arrays (size K64_MAX_FACTORS) that receive the complete
+//   factor list after the precompute pass so the bench loop can reuse it for
+//   partition-based cbrt assignment without re-factoring.
+// ---------------------------------------------------------------------------
+
+#define K64_MAX_FACTORS 256 // generous upper bound on distinct prime factors
+
+void ksc_ensure_k64_cbrt(
+    cbrt_cache_t *cache,
+    const mpz_t challenge,
+    const mpz_t modulo,
+    const char *modulo_file,
+    int rank);

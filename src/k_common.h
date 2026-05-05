@@ -220,6 +220,11 @@ typedef struct
     std::vector<double> combine_times;
     std::vector<int> blinding_attempts;
 
+    // k64-specific timing breakdown
+    std::vector<double> pollard_ms; // Pollard's rho time per run (rank 0 only)
+    std::vector<int> factors_small; // factors found by trial division (≤ 2^32)
+    std::vector<int> factors_large; // factors found by Pollard's rho (> 2^32)
+
     // cbrt cache breakdown (from compute_local_cbrt, warm runs)
     std::vector<double> cbrt_hit_ms;  // time spent on cache hits (array lookups)
     std::vector<double> cbrt_miss_ms; // time spent on cache misses (mpz_powm calls)

@@ -474,6 +474,13 @@ void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
     write_slice_dbl("gather_ms", res.gather_times, 1, (size_t)n_total);
     write_slice_dbl("combine_ms", res.combine_times, 1, (size_t)n_total);
     write_slice_int("blinding_attempts", res.blinding_attempts, 1, (size_t)n_total);
+    // k64-specific fields (empty for k16/k32 — write_slice guards on empty vectors)
+    if (!res.pollard_ms.empty())
+        write_slice_dbl("pollard_ms", res.pollard_ms, 1, (size_t)n_total);
+    if (!res.factors_small.empty())
+        write_slice_int("factors_small", res.factors_small, 1, (size_t)n_total);
+    if (!res.factors_large.empty())
+        write_slice_int("factors_large", res.factors_large, 1, (size_t)n_total);
     write_slice_dbl("total_ms", res.total_times, 1, (size_t)n_total, true);
     fprintf(f, "  },\n");
 

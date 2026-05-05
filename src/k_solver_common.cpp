@@ -509,3 +509,127 @@ void ksc_ensure_k32_cbrt(
         fflush(stdout);
     }
 }
+
+// ---------------------------------------------------------------------------
+// ksc_ensure_k64_cbrt
+// ---------------------------------------------------------------------------
+
+void ksc_ensure_k64_cbrt(
+    cbrt_cache_t *cache,
+    const mpz_t challenge,
+    const mpz_t modulo,
+    const char *modulo_file,
+    int rank)
+{
+    mkdir_data();
+
+    // Derive shared cache path: data/cbrt/<stem>.cbrt  (no rank suffix)
+    const char *bname = modulo_file ? modulo_file : "modulo";
+    const char *slash = strrchr(bname, '/');
+    const char *fname = slash ? slash + 1 : bname;
+    char stem[256];
+    strncpy(stem, fname, sizeof(stem) - 1);
+    stem[sizeof(stem) - 1] = '\0';
+    size_t blen = strlen(stem);
+    if (blen >= 4 && strcmp(stem + blen - 4, ".txt") == 0)
+        stem[blen - 4] = '\0';
+    char cache_path[280]; // 256 + 9 (KSC_CBRT_DIR) + 1 + 5 (.cbrt) + 9 slack
+    snprintf(cache_path, sizeof(cache_path), "%s/%s.cbrt", KSC_CBRT_DIR, stem);
+
+    // Try loading existing cache first
+    if (kf_cbrt_cache_load(cache, cache_path))
+    {
+        if (rank == 0)
+            printf("[rank 0] k64 cbrt cache loaded: %d entries from %s\n",
+                   cache->count, cache_path);
+        // Broadcast entries to all non-root ranks
+        goto broadcast;
+    }
+
+    // Cache missing — rank 0 factors the challenge completely and computes cbrt
+    if (rank == 0)
+    {
+        printf("[rank 0] k64 cbrt cache missing — factoring challenge (OMP Pollard's rho)\n");
+        fflush(stdout);
+
+        kfactor_list_t factors;
+        kfl_init(&factors);
+        kf_factor_challenge(challenge, &factors);
+
+        // Compute e = 3^{-1} mod (M-1) for cbrt
+        mpz_t e_inv, m1;
+        mpz_inits(e_inv, m1, NULL);
+        mpz_sub_ui(m1, modulo, 1);
+        mpz_set_ui(e_inv, 3);
+        mpz_invert(e_inv, e_inv, m1);
+
+        mpz_t cbrt_p, p_mpz;
+        mpz_inits(cbrt_p, p_mpz, NULL);
+        for (int i = 0; i < factors.count; i++)
+        {
+            unsigned long p = mpz_get_ui(factors.items[i].prime);
+            mpz_set(p_mpz, factors.items[i].prime);
+            mpz_powm(cbrt_p, p_mpz, e_inv, modulo);
+            kf_cbrt_cache_append(cache, p, cbrt_p);
+        }
+        mpz_clears(cbrt_p, p_mpz, e_inv, m1, NULL);
+        kfl_free(&factors);
+
+        kf_cbrt_cache_save(cache, cache_path);
+        printf("[rank 0] k64 cbrt cache saved: %d entries → %s\n",
+               cache->count, cache_path);
+        fflush(stdout);
+    }
+
+broadcast:
+    // Broadcast the complete cache from rank 0 to all other ranks.
+    // Protocol: Bcast count, then for each entry: Bcast prime (uint64_t) +
+    // Bcast cbrt bytes (size + data).
+    int count = (rank == 0) ? cache->count : 0;
+    MPI_Bcast(&count, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    if (rank != 0)
+    {
+        kf_cbrt_cache_clear(cache);
+        kf_cbrt_cache_init(cache);
+    }
+
+    for (int i = 0; i < count; i++)
+    {
+        // Prime (fits in uint64_t on 64-bit Linux)
+        uint64_t prime64 = 0;
+        if (rank == 0)
+            prime64 = (uint64_t)cache->items[i].prime;
+        MPI_Bcast(&prime64, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+
+        // cbrt value (mpz_t → bytes)
+        uint32_t nb = 0;
+        unsigned char *buf = nullptr;
+        if (rank == 0)
+        {
+            size_t sz = 0;
+            buf = (unsigned char *)mpz_export(NULL, &sz, 1, 1, 0, 0,
+                                              cache->items[i].cbrt);
+            nb = (uint32_t)sz;
+        }
+        MPI_Bcast(&nb, 1, MPI_UINT32_T, 0, MPI_COMM_WORLD);
+        if (rank != 0)
+            buf = (unsigned char *)malloc(nb ? nb : 1);
+        MPI_Bcast(buf, (int)nb, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
+
+        if (rank != 0)
+        {
+            mpz_t cbrt_val;
+            mpz_init(cbrt_val);
+            if (nb > 0)
+                mpz_import(cbrt_val, nb, 1, 1, 0, 0, buf);
+            kf_cbrt_cache_append(cache, (unsigned long)prime64, cbrt_val);
+            mpz_clear(cbrt_val);
+        }
+        free(buf);
+    }
+
+    if (rank != 0)
+        printf("[rank %d] k64 cbrt cache: %d entries received via Bcast\n",
+               rank, cache->count);
+}
