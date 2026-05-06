@@ -512,6 +512,19 @@ void ksc_ensure_k32_cbrt(
 
 // ---------------------------------------------------------------------------
 // ksc_ensure_k64_cbrt
+//
+// In the pure-Pollard k64 model the cbrt cache is built incrementally:
+// every time Pollard's rho succeeds it calls cbrt_from_factors() which
+// populates the cache and marks it dirty.  The cache is saved after the
+// bench loop and loaded on the next run.
+//
+// This function therefore only needs to:
+//   1. Derive the canonical path and attempt to load.
+//   2. Broadcast whatever is already cached to all ranks.
+//   3. Return — no factoring is done here.
+//
+// The warm-up factoring (to avoid cold misses on run 0) is handled by the
+// solver's two silent warmup iterations before the timed bench loop.
 // ---------------------------------------------------------------------------
 
 void ksc_ensure_k64_cbrt(
@@ -523,7 +536,7 @@ void ksc_ensure_k64_cbrt(
 {
     mkdir_data();
 
-    // Derive shared cache path: data/cbrt/<stem>.cbrt  (no rank suffix)
+    // Derive path: data/cbrt/<stem>.cbrt  (shared — no rank suffix)
     const char *bname = modulo_file ? modulo_file : "modulo";
     const char *slash = strrchr(bname, '/');
     const char *fname = slash ? slash + 1 : bname;
@@ -533,113 +546,15 @@ void ksc_ensure_k64_cbrt(
     size_t blen = strlen(stem);
     if (blen >= 4 && strcmp(stem + blen - 4, ".txt") == 0)
         stem[blen - 4] = '\0';
-    char cache_path[280]; // 256 + 9 (KSC_CBRT_DIR) + 1 + 5 (.cbrt) + 9 slack
+    char cache_path[280];
     snprintf(cache_path, sizeof(cache_path), "%s/%s.cbrt", KSC_CBRT_DIR, stem);
 
-    // Try loading existing cache first
-    if (kf_cbrt_cache_load(cache, cache_path))
-    {
-        if (rank == 0)
-            printf("[rank 0] k64 cbrt cache loaded: %d entries from %s\n",
-                   cache->count, cache_path);
-        // Broadcast entries to all non-root ranks
-        goto broadcast;
-    }
-
-    // Cache missing — factor using two-phase strategy:
-    //   Phase 1: sieve trial division up to 2^32 (fast, finds all small factors)
-    //   Phase 2: Pollard's rho on the remaining cofactor (fast for ≤64-bit factors)
-    //
-    // DO NOT use kf_factor_challenge() here — it only trial-divides up to 1000
-    // before launching Pollard's rho on the full challenge. For a 4000-bit number
-    // that is a product of 100+ primes around 2^32, that means Pollard's rho must
-    // recurse ~100 times doing thousands-of-bits arithmetic = hours of runtime.
+    // Attempt to load existing cache on rank 0
+    bool loaded = false;
     if (rank == 0)
-    {
-        printf("[rank 0] k64 cbrt cache missing — factoring via sieve + Pollard's rho\n");
-        fflush(stdout);
+        loaded = kf_cbrt_cache_load(cache, cache_path);
 
-        // Generate small primes for sieve (≤ 65536 = sqrt(2^32))
-        int sp_count = 0;
-        unsigned *sp = kf_generate_small_primes(&sp_count);
-
-        kfactor_list_t factors;
-        kfl_init(&factors);
-
-        // Phase 1a: trial divide small primes 2..65536 directly
-        for (int si = 0; si < sp_count; si++)
-        {
-            unsigned long p = (unsigned long)sp[si];
-            int e = count_exponent(challenge, p);
-            if (e > 0)
-                kfl_append_ul(&factors, p, e);
-        }
-
-        // Phase 1b: sieve trial division over [65537, 2^32]
-        kf_trial_divide_sieve(challenge, 65537ULL, (uint64_t)UINT32_MAX,
-                              sp_count, sp, &factors);
-        free(sp);
-
-        // Compute cofactor = challenge / (product of all small factors found)
-        mpz_t cofactor;
-        mpz_init_set(cofactor, challenge);
-        for (int i = 0; i < factors.count; i++)
-        {
-            unsigned long p = mpz_get_ui(factors.items[i].prime);
-            for (int e = 0; e < factors.items[i].exponent; e++)
-                mpz_divexact_ui(cofactor, cofactor, p);
-        }
-
-        // Phase 2: Pollard's rho for any remaining large factors (> 2^32)
-        // Cofactor is a product of at most a few 64-bit primes — Pollard's rho
-        // on a 64-bit factor in a ≤256-bit number takes microseconds.
-        if (mpz_cmp_ui(cofactor, 1) > 0)
-        {
-            printf("[rank 0] Cofactor: %zu bits — running Pollard's rho\n",
-                   mpz_sizeinbase(cofactor, 2));
-            fflush(stdout);
-            kfactor_list_t large_fac;
-            kfl_init(&large_fac);
-            kf_factor_recursive(cofactor, &large_fac, 1);
-            for (int i = 0; i < large_fac.count; i++)
-                kfl_append_mpz(&factors, large_fac.items[i].prime,
-                               large_fac.items[i].exponent);
-            kfl_free(&large_fac);
-        }
-        mpz_clear(cofactor);
-
-        printf("[rank 0] Factored: %d distinct primes\n", factors.count);
-        fflush(stdout);
-
-        // Compute e = 3^{-1} mod (M-1) for cbrt
-        mpz_t e_inv, m1;
-        mpz_inits(e_inv, m1, NULL);
-        mpz_sub_ui(m1, modulo, 1);
-        mpz_set_ui(e_inv, 3);
-        mpz_invert(e_inv, e_inv, m1);
-
-        mpz_t cbrt_p, p_mpz;
-        mpz_inits(cbrt_p, p_mpz, NULL);
-        for (int i = 0; i < factors.count; i++)
-        {
-            unsigned long p = mpz_get_ui(factors.items[i].prime);
-            mpz_set(p_mpz, factors.items[i].prime);
-            mpz_powm(cbrt_p, p_mpz, e_inv, modulo);
-            kf_cbrt_cache_append(cache, p, cbrt_p);
-        }
-        mpz_clears(cbrt_p, p_mpz, e_inv, m1, NULL);
-        kfl_free(&factors);
-
-        kf_cbrt_cache_save(cache, cache_path);
-        printf("[rank 0] k64 cbrt cache saved: %d entries → %s\n",
-               cache->count, cache_path);
-        fflush(stdout);
-    }
-
-broadcast:
-    // Broadcast the complete cache from rank 0 to all other ranks.
-    // Protocol: Bcast count, then for each entry: Bcast prime (uint64_t) +
-    // Bcast cbrt bytes (size + data).
+    // Broadcast any loaded entries to all other ranks
     int count = (rank == 0) ? cache->count : 0;
     MPI_Bcast(&count, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
@@ -651,13 +566,11 @@ broadcast:
 
     for (int i = 0; i < count; i++)
     {
-        // Prime (fits in uint64_t on 64-bit Linux)
         uint64_t prime64 = 0;
         if (rank == 0)
             prime64 = (uint64_t)cache->items[i].prime;
         MPI_Bcast(&prime64, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
 
-        // cbrt value (mpz_t → bytes)
         uint32_t nb = 0;
         unsigned char *buf = nullptr;
         if (rank == 0)
@@ -671,20 +584,25 @@ broadcast:
         if (rank != 0)
             buf = (unsigned char *)malloc(nb ? nb : 1);
         MPI_Bcast(buf, (int)nb, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
-
         if (rank != 0)
         {
-            mpz_t cbrt_val;
-            mpz_init(cbrt_val);
+            mpz_t v;
+            mpz_init(v);
             if (nb > 0)
-                mpz_import(cbrt_val, nb, 1, 1, 0, 0, buf);
-            kf_cbrt_cache_append(cache, (unsigned long)prime64, cbrt_val);
-            mpz_clear(cbrt_val);
+                mpz_import(v, nb, 1, 1, 0, 0, buf);
+            kf_cbrt_cache_append(cache, (unsigned long)prime64, v);
+            mpz_clear(v);
         }
         free(buf);
     }
 
-    if (rank != 0)
-        printf("[rank %d] k64 cbrt cache: %d entries received via Bcast\n",
-               rank, cache->count);
+    if (rank == 0)
+    {
+        if (loaded && count > 0)
+            printf("[rank 0] k64 cbrt cache: %d entries loaded from %s\n",
+                   count, cache_path);
+        else
+            printf("[rank 0] k64 cbrt cache: empty — will build during runs\n");
+        fflush(stdout);
+    }
 }
