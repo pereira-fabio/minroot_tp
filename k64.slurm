@@ -110,10 +110,10 @@ run_size() {
         --json $JSON_DIR/k64_mpi_powm_${BITS}_${SLURM_JOB_ID}.json
     echo ""
 
-    echo "  [sieve]"
+    echo "  [rho]"
     srun --mpi=pmix -N ${N_NODES} --ntasks=$(( N_NODES * 2 )) ./k64_mpi_N${N_NODES} \
         $CHALLENGE $MODULO \
-        --method sieve \
+        --method rho \
         --bench $BENCH \
         --json $JSON_DIR/k64_mpi_sieve_${BITS}_${SLURM_JOB_ID}.json
     echo ""

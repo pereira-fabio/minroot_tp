@@ -450,12 +450,10 @@ static int solve_one(
             print_timing_stat_moments("Total (rho+broadcast):", total_acc.sum,
                                       total_acc.sumsq, n_warm, 30, true);
         }
-        mpz_t tmp;
-        mpz_init(tmp);
-        double powm_avg = run_powm_baseline(tmp, challenge, modulo,
+        // Pass result directly so verify_cube_root works for --method powm
+        double powm_avg = run_powm_baseline(result, challenge, modulo,
                                             bench_count, 30);
         json_res.powm_baseline_ms = powm_avg;
-        mpz_clear(tmp);
         if (n_warm > 0 && rho_acc.sum > 0)
         {
             double rho_avg = rho_acc.sum / n_warm;
