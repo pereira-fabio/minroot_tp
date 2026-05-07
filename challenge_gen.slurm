@@ -4,8 +4,8 @@
 #SBATCH --error=minroot_gen_challenges_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
-#SBATCH --time=00:30:00
+#SBATCH --cpus-per-task=32  # OMP threads per ./challenges invocation
+#SBATCH --time=01:00:00  # parallel: wall time = slowest single modulo generation
 
 module load compiler/GCC/13.2.0
 module load math/GMP/6.3.0-GCCcore-13.2.0
@@ -55,41 +55,56 @@ echo ""
 # Note: when bittarget < bitbound the generator prints a size warning
 # but still produces valid output (expected for small bittarget values).
 # ---------------------------------------------------------------------------
-generate_all() {
+# ---------------------------------------------------------------------------
+# generate_size <bitbound> <bittarget>
+#   Runs ./challenges in the background.  All sizes within a bitbound are
+#   launched simultaneously so their modulo generations overlap.
+#   The first call for a given bittarget generates (and caches) the modulo;
+#   subsequent calls load it instantly.
+# ---------------------------------------------------------------------------
+generate_size() {
     local BITBOUND=$1
-    local SIZES=$2
-
-    echo "============================================================"
-    echo "  Generating k${BITBOUND} challenges  (bitbound=${BITBOUND})"
-    echo "  Output: data/challenges/k${BITBOUND}/"
-    echo "============================================================"
-
-    for SIZE in $SIZES; do
-        echo -n "  bittarget=${SIZE} ... "
-        ./challenges $NUM_CHALLENGES $SIZE $BITBOUND
-        if [ $? -eq 0 ]; then
-            echo "  OK → data/challenges/k${BITBOUND}/"
-        else
-            echo "  FAILED (bittarget=${SIZE}, bitbound=${BITBOUND})"
-        fi
-        echo ""
-    done
+    local SIZE=$2
+    echo "  [k${BITBOUND}] bittarget=${SIZE} starting..."
+    ./challenges $NUM_CHALLENGES $SIZE $BITBOUND
+    if [ $? -eq 0 ]; then
+        echo "  [k${BITBOUND}] bittarget=${SIZE} DONE"
+    else
+        echo "  [k${BITBOUND}] bittarget=${SIZE} FAILED"
+    fi
 }
 
 # ---------------------------------------------------------------------------
-# Generate k16 challenges  (16-bit prime factors)
+# Launch ALL sizes for ALL bitbounds in parallel.
+#
+# Each ./challenges call is independent (different modulo file path), so
+# they never conflict even when running simultaneously.
+#
+# The expensive part is mpz_nextprime for the modulo:
+#   k16/k32 sizes: <1s each  — no problem
+#   k35 large sizes (20480, 24576 bits): several minutes each
+# Running them in parallel means total wall time = slowest single call,
+# not the sum of all calls.
 # ---------------------------------------------------------------------------
-generate_all 16 "$SIZES_K16"
+echo "Launching all challenge generators in parallel..."
+echo "(Each size generates its modulo independently — no conflicts)"
+echo ""
 
-# ---------------------------------------------------------------------------
-# Generate k32 challenges  (32-bit prime factors)
-# ---------------------------------------------------------------------------
-generate_all 32 "$SIZES_K32"
+for SIZE in $SIZES_K16; do
+    generate_size 16 $SIZE &
+done
 
-# ---------------------------------------------------------------------------
-# Generate k64 challenges  (64-bit prime factors)
-# ---------------------------------------------------------------------------
-generate_all 35 "$SIZES_K35"
+for SIZE in $SIZES_K32; do
+    generate_size 32 $SIZE &
+done
+
+for SIZE in $SIZES_K35; do
+    generate_size 35 $SIZE &
+done
+
+echo "Waiting for all generators to finish..."
+wait
+echo "All generators done."
 
 # ---------------------------------------------------------------------------
 # Summary

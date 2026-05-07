@@ -117,33 +117,60 @@ int main(int argc, char **argv)
 	printf("Generating %u challenge(s), ~%lu bits, B=2^%lu\n\n",
 		   num_outputs, (unsigned long)bittarget, (unsigned long)bitbound);
 
-	/* ---- Modulo (single-threaded, deterministic) ---- */
-	gmp_randstate_t main_rand;
-	gmp_randinit_default(main_rand);
-	gmp_randseed_ui(main_rand, RANDSEED);
-
+	/* ---- Modulo: load from file if it exists, generate only if missing ----
+	 *
+	 * mpz_nextprime on a 20480-bit number takes several minutes because it
+	 * must run Miller-Rabin on ~14000 candidates.  Caching the modulo file
+	 * avoids this on every re-run of the generator for the same bittarget.
+	 * -------------------------------------------------------------------- */
 	mpz_t modulo;
 	mpz_init(modulo);
-	mpz_set_ui(modulo, 1);
-	mpz_mul_2exp(modulo, modulo, bittarget);
-	mpz_nextprime(modulo, modulo);
-	while (mpz_tdiv_ui(modulo, 3) != 2)
-		mpz_nextprime(modulo, modulo);
-	gmp_randclear(main_rand);
-
-	printf("Modulo: %lu bits\n", (unsigned long)mpz_sizeinbase(modulo, 2));
 
 	char modulo_path[256];
 	snprintf(modulo_path, sizeof(modulo_path), "%smodulo_%lu_%lu.txt",
 			 savefolder, (unsigned long)bitbound, (unsigned long)bittarget);
+
 	{
-		FILE *f = fopen(modulo_path, "wb");
-		if (f)
+		FILE *mf = fopen(modulo_path, "rb");
+		if (mf)
 		{
-			mpz_out_raw(f, modulo);
-			fclose(f);
+			/* Fast path: modulo already exists — load it */
+			mpz_inp_raw(modulo, mf);
+			fclose(mf);
+			printf("Modulo loaded from %s (%lu bits)\n\n",
+				   modulo_path,
+				   (unsigned long)mpz_sizeinbase(modulo, 2));
 		}
-		printf("Wrote modulo to %s\n\n", modulo_path);
+		else
+		{
+			/* Slow path: generate modulo (expensive for large bittarget) */
+			printf("Generating %lu-bit modulo (mpz_nextprime — may take minutes)...\n",
+				   (unsigned long)bittarget);
+			fflush(stdout);
+
+			gmp_randstate_t main_rand;
+			gmp_randinit_default(main_rand);
+			gmp_randseed_ui(main_rand, RANDSEED);
+
+			mpz_set_ui(modulo, 1);
+			mpz_mul_2exp(modulo, modulo, bittarget);
+			mpz_nextprime(modulo, modulo);
+			while (mpz_tdiv_ui(modulo, 3) != 2)
+				mpz_nextprime(modulo, modulo);
+			gmp_randclear(main_rand);
+
+			/* Save for future runs */
+			mf = fopen(modulo_path, "wb");
+			if (mf)
+			{
+				mpz_out_raw(mf, modulo);
+				fclose(mf);
+			}
+
+			printf("Modulo saved to %s (%lu bits)\n\n",
+				   modulo_path,
+				   (unsigned long)mpz_sizeinbase(modulo, 2));
+		}
 	}
 
 	/* ---- Challenges (parallel — one per thread where possible) ---- */
