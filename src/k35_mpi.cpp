@@ -392,7 +392,7 @@ static int solve_one(
 
     // ---- Load k35 prime slices for --method table ----
     uint32_t *k32_slice = nullptr;
-    int64_t k32_slice_count = 0;
+    uint64_t k32_slice_count = 0;
     uint64_t *k35u_slice = nullptr;
     int64_t k35u_slice_count = 0;
     if (method == METHOD_TABLE && primes_upper_file)

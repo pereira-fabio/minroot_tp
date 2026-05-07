@@ -13,6 +13,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include <cerrno> // for errno in kf_generate_and_save_prime_table_u64
 
 // ---------------------------------------------------------------------------
 // k32 — Small prime generator
@@ -1256,7 +1257,7 @@ bool kf_generate_and_save_prime_table_u64(
 
     uint64_t total = 0;
     // Write primes in batches to reduce fwrite calls
-    uint64_t batch[WRITE_BATCH];
+    uint64_t batch[KF_WRITE_BATCH];
     int bsz = 0;
 
     // Temporary sieve buffer — one byte per candidate offset
@@ -1296,7 +1297,7 @@ bool kf_generate_and_save_prime_table_u64(
             {
                 batch[bsz++] = seg_lo + j;
                 total++;
-                if (bsz == WRITE_BATCH)
+                if (bsz == KF_WRITE_BATCH)
                 {
                     fwrite(batch, sizeof(uint64_t), WRITE_BATCH, f);
                     bsz = 0;
