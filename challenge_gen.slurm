@@ -7,10 +7,11 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --time=00:30:00
 
-# No MPI or OpenMP needed — challenge generation is single-threaded GMP arithmetic.
-
 module load compiler/GCC/13.2.0
 module load math/GMP/6.3.0-GCCcore-13.2.0
+
+# Use all allocated CPUs for OpenMP parallel challenge generation
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 cd $SLURM_SUBMIT_DIR
 
@@ -31,7 +32,7 @@ SIZES_K35="8192 12288 16384 20480 24576"       # bitbound=35
 # ---------------------------------------------------------------------------
 # Compilation
 # ---------------------------------------------------------------------------
-gcc -O2 -o challenges challenges.c -lgmp
+gcc -O2 -fopenmp -o challenges challenges.c -lgmp
 
 if [ $? -ne 0 ]; then
     echo "ERROR: Compilation of challenges.c failed"
@@ -50,9 +51,9 @@ echo ""
 #   challenge_<i>_<bitbound>_<bittarget>.txt
 #   factors_<i>_<bitbound>_<bittarget>.txt
 #
-# Note: when bittarget < bitbound the generator prints a "weird inputs" warning
-# but still produces valid output — this is expected for small target sizes
-# (e.g. bittarget=16 with bitbound=32).
+# Challenges within each call are generated in parallel with OMP_NUM_THREADS.
+# Note: when bittarget < bitbound the generator prints a size warning
+# but still produces valid output (expected for small bittarget values).
 # ---------------------------------------------------------------------------
 generate_all() {
     local BITBOUND=$1

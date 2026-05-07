@@ -42,11 +42,9 @@ static void generate_one_challenge(
 {
 	mpz_t temp;
 	mpz_init(temp);
-	FILE *f;
 
-	f = fopen(factors_path, "w");
-	if (f)
-		fclose(f); /* clear */
+	/* Open factor file ONCE — avoids 1 fopen/fclose syscall per prime */
+	FILE *f = fopen(factors_path, "wb");
 
 	int count = 0;
 	mpz_set_ui(result, 1);
@@ -59,20 +57,20 @@ static void generate_one_challenge(
 		mpz_urandomb(temp, rstate, bitbound);
 		mpz_nextprime(temp, temp);
 
+		/* Skip if product would exceed modulo */
 		if (mpz_sizeinbase(result, 2) + mpz_sizeinbase(temp, 2) >
 			mpz_sizeinbase(modulo, 2))
 			continue;
 
-		f = fopen(factors_path, "ab");
 		if (f)
-		{
-			mpz_out_raw(f, temp);
-			fclose(f);
-		}
+			mpz_out_raw(f, temp); /* write factor — file stays open */
 
 		mpz_mul(result, result, temp);
 		count++;
 	} while ((long)mpz_sizeinbase(result, 2) < threshold);
+
+	if (f)
+		fclose(f); /* close once at the end */
 
 	*count_out = count;
 	mpz_clear(temp);
@@ -149,7 +147,11 @@ int main(int argc, char **argv)
 	}
 
 	/* ---- Challenges (parallel — one per thread where possible) ---- */
+#ifdef _OPENMP
+	double wall_t0 = omp_get_wtime();
+#else
 	clock_t t0 = clock();
+#endif
 
 #pragma omp parallel for schedule(dynamic, 1) num_threads(n_threads) \
 	shared(savefolder, modulo, bitbound, bittarget, num_outputs)
@@ -191,10 +193,15 @@ int main(int argc, char **argv)
 		mpz_set_ui(temp, 3);
 		mpz_invert(exp, temp, m1);
 		mpz_powm_ui(temp, result, 3, modulo);
+#ifdef _OPENMP
+		double ts = omp_get_wtime();
+		mpz_powm(temp, temp, exp, modulo);
+		double ms = (omp_get_wtime() - ts) * 1000.0;
+#else
 		clock_t ts = clock();
 		mpz_powm(temp, temp, exp, modulo);
-		clock_t te = clock();
-		double ms = 1000.0 * (double)(te - ts) / CLOCKS_PER_SEC;
+		double ms = 1000.0 * (double)(clock() - ts) / CLOCKS_PER_SEC;
+#endif
 		int ok = (mpz_cmp(temp, result) == 0);
 
 #pragma omp critical
@@ -209,9 +216,14 @@ int main(int argc, char **argv)
 		gmp_randclear(rstate);
 	}
 
+#ifdef _OPENMP
+	printf("\nAll %u challenge(s) done in %.2f s  (wall clock, %d threads)\n",
+		   num_outputs, omp_get_wtime() - wall_t0, n_threads);
+#else
 	clock_t t1 = clock();
-	printf("\nAll %u challenge(s) done in %.2f s  (wall time with %d threads)\n",
-		   num_outputs, (double)(t1 - t0) / CLOCKS_PER_SEC, n_threads);
+	printf("\nAll %u challenge(s) done in %.2f s\n",
+		   num_outputs, (double)(t1 - t0) / CLOCKS_PER_SEC);
+#endif
 
 	mpz_clear(modulo);
 	return 0;
