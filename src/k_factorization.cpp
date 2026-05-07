@@ -1299,7 +1299,7 @@ bool kf_generate_and_save_prime_table_u64(
                 total++;
                 if (bsz == KF_WRITE_BATCH)
                 {
-                    fwrite(batch, sizeof(uint64_t), WRITE_BATCH, f);
+                    fwrite(batch, sizeof(uint64_t), KF_WRITE_BATCH, f);
                     bsz = 0;
                 }
             }
