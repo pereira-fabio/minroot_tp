@@ -546,9 +546,6 @@ static int solve_one(
                 }
             }
 
-            if (method == METHOD_SIEVE)
-                kf_trial_divide_sieve(blinded_challenge, my_lo, my_hi,
-                                      sp_count, sp, &local_factors);
             {
                 int nT = 1;
 #ifdef _OPENMP
@@ -800,6 +797,9 @@ static int solve_one(
         // Sequential powm baseline + speedup report
         ksc_run_and_report_powm_baseline(&json_results, challenge, modulo,
                                          bench_count, &recon_acc, &fac_acc, rank);
+        // For METHOD_POWM the bench loop is skipped; run powm once to set result.
+        if (method == METHOD_POWM)
+            run_powm_baseline(result, challenge, modulo, 1, 0);
         // Verify
         mpz_t challenge_mod;
         mpz_init(challenge_mod);
