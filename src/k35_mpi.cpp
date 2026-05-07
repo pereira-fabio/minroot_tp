@@ -71,7 +71,16 @@ typedef enum
 {
     METHOD_SIEVE,
     METHOD_POWM, // No table method: >32-bit primes exceed uint32_t
-} run_method_t;
+
+    // Sieve lower bound — primes below this are handled separately by rank 0.
+    // k35 challenges can include primes < 65537 since nextprime(random_35bit)
+    // may land anywhere in [2, 2^35].  Rank 0 trial-divides [2, RANGE_LO).
+    static const uint64_t RANGE_LO = 65537ULL;
+    // Sieve upper bound — slightly above 2^35 to catch nextprime overflows.
+    static const uint64_t RANGE_HI = (1ULL << 35) + 1024ULL;
+
+}
+run_method_t;
 
 // ---------------------------------------------------------------------------
 // Factor list: kfactor_list_t / kfl_* from k_common.h.
@@ -951,7 +960,7 @@ int main(int argc, char *argv[])
     free(sp_ul);
 
     // Partition [65537, 2^32] evenly across MPI ranks
-    const uint64_t RANGE_LO = 65537ULL;
+    // RANGE_LO is a file-scope constant (defined above solve_one).
     // RANGE_HI extends slightly above 2^35 to catch primes that mpz_nextprime
     // places just above 2^35 (prime gap ≈ ln(2^35) ≈ 24; 1024 is a safe margin).
     // The new challenges.c fixes this at source, but existing challenge files
