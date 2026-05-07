@@ -606,3 +606,68 @@ void ksc_ensure_k64_cbrt(
         fflush(stdout);
     }
 }
+
+// ---------------------------------------------------------------------------
+// ksc_ensure_k35_cbrt
+//
+// Identical to ksc_ensure_k32_cbrt but for the k35 sieve range [65537, 2^35].
+// Cache path uses .cbrt35.<rank> suffix to avoid collision with k32 caches
+// for the same modulus file.
+// ---------------------------------------------------------------------------
+
+void ksc_ensure_k35_cbrt(
+    cbrt_cache_t *cache,
+    bool *cache_dirty,
+    const char *cache_path,
+    const mpz_t challenge,
+    const mpz_t modulo,
+    const mpz_t e_inv,
+    uint64_t my_lo, uint64_t my_hi,
+    int sp_count, const unsigned *sp,
+    int rank, int nranks)
+{
+    mkdir_data();
+
+    // Load existing cache if present
+    if (kf_cbrt_cache_load(cache, cache_path))
+    {
+        if (rank == 0)
+            printf("[rank %d] k35 cbrt cache loaded: %d entries from %s\n",
+                   rank, cache->count, cache_path);
+        return;
+    }
+
+    if (rank == 0)
+        printf("[rank 0] k35 cbrt cache missing — running precompute pass (untimed)\n");
+    fflush(stdout);
+
+    // One untimed sieve pass to find all factors in this rank's range
+    kfactor_list_t factors;
+    kfl_init(&factors);
+    kf_trial_divide_sieve(challenge, my_lo, my_hi, sp_count, sp, &factors);
+
+    // Compute cbrt for each found factor
+    mpz_t p_mpz, cbrt_p;
+    mpz_inits(p_mpz, cbrt_p, NULL);
+    for (int i = 0; i < factors.count; i++)
+    {
+        unsigned long p = mpz_get_ui(factors.items[i].prime);
+        if (kf_cbrt_cache_find(cache, p) < 0)
+        {
+            mpz_set_ui(p_mpz, p);
+            mpz_powm(cbrt_p, p_mpz, e_inv, modulo);
+            kf_cbrt_cache_append(cache, p, cbrt_p);
+            *cache_dirty = true;
+        }
+    }
+    mpz_clears(p_mpz, cbrt_p, NULL);
+    kfl_free(&factors);
+
+    if (*cache_dirty)
+    {
+        kf_cbrt_cache_save(cache, cache_path);
+        printf("[rank %d] k35 cbrt cache saved: %d entries -> %s\n",
+               rank, cache->count, cache_path);
+        fflush(stdout);
+    }
+}

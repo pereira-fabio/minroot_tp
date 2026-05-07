@@ -177,3 +177,17 @@ void ksc_ensure_k64_cbrt(
     const mpz_t modulo,
     const char *modulo_file,
     int rank);
+
+// ---------------------------------------------------------------------------
+// k35 precomputation (same structure as k32 but range [65537, 2^35])
+// ---------------------------------------------------------------------------
+void ksc_ensure_k35_cbrt(
+    cbrt_cache_t *cache,
+    bool *cache_dirty,
+    const char *cache_path,
+    const mpz_t challenge,
+    const mpz_t modulo,
+    const mpz_t e_inv,
+    uint64_t my_lo, uint64_t my_hi,
+    int sp_count, const unsigned *sp,
+    int rank, int nranks);
