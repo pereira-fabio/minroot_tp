@@ -70,6 +70,7 @@
 typedef enum
 {
     METHOD_SIEVE,
+    METHOD_TABLE,
     METHOD_POWM
 } run_method_t;
 
@@ -261,6 +262,7 @@ static int solve_one(
     int bench_count, int sp_count, const unsigned *sp,
     uint64_t my_lo, uint64_t my_hi,
     run_method_t method,
+    const char *primes_upper_file = nullptr,
     const char *json_output_file = nullptr)
 {
     if (rank == 0)
@@ -382,9 +384,34 @@ static int solve_one(
     n_threads_json = omp_get_max_threads();
 #endif
     benchmark_results_t json_results;
-    const char *mname35 = (method == METHOD_POWM) ? "powm" : "sieve";
+    const char *mname35 = (method == METHOD_TABLE)  ? "table"
+                          : (method == METHOD_POWM) ? "powm"
+                                                    : "sieve";
     ksc_init_json_results(&json_results, 35, bench_count, mname35,
                           nranks, n_threads_json, challenge, rank);
+
+    // ---- Load k35 prime slices for --method table ----
+    uint32_t *k32_slice = nullptr;
+    int64_t k32_slice_count = 0;
+    uint64_t *k35u_slice = nullptr;
+    int64_t k35u_slice_count = 0;
+    if (method == METHOD_TABLE && primes_upper_file)
+    {
+        const char *k32_path = ksc_ensure_k32_primes(sp_count, sp, rank);
+        k32_slice = kf_load_prime_slice(&k32_slice_count, k32_path,
+                                        (uint32_t)my_lo,
+                                        (uint32_t)std::min(my_hi,
+                                                           (uint64_t)UINT32_MAX));
+        if (my_hi > (uint64_t)UINT32_MAX)
+            k35u_slice = kf_load_prime_slice_u64(&k35u_slice_count,
+                                                 primes_upper_file,
+                                                 std::max(my_lo,
+                                                          (uint64_t)UINT32_MAX + 1),
+                                                 my_hi);
+        if (rank == 0)
+            printf("Table slices: k32=%lld  k35u=%lld primes\n",
+                   (long long)k32_slice_count, (long long)k35u_slice_count);
+    }
 
     // ---- 2 warmup runs (silent, primes CPU caches before bench loop) ----
     // Runs the full factoring + reconstruction pipeline twice without
@@ -546,6 +573,20 @@ static int solve_one(
                 }
             }
 
+            // Table method: two-slice trial division
+            if (method == METHOD_TABLE)
+            {
+                if (k32_slice && k32_slice_count > 0)
+                    kf_trial_divide_table(blinded_challenge,
+                                          k32_slice, k32_slice_count,
+                                          &local_factors);
+                if (k35u_slice && k35u_slice_count > 0)
+                    kf_trial_divide_table_u64(blinded_challenge,
+                                              k35u_slice, k35u_slice_count,
+                                              &local_factors);
+            }
+            // Sieve method: OMP-parallel on-the-fly sieve
+            if (method == METHOD_SIEVE)
             {
                 int nT = 1;
 #ifdef _OPENMP
@@ -816,6 +857,10 @@ static int solve_one(
     // Save per-rank cbrt cache if new entries were computed this run.
     if (cbrt_cache_dirty)
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
+    if (k32_slice)
+        free(k32_slice);
+    if (k35u_slice)
+        free(k35u_slice);
     kf_cbrt_cache_clear(&local_cbrt_cache);
 
     mpz_clear(e_inv);
@@ -876,12 +921,14 @@ int main(int argc, char *argv[])
             const char *m = argv[++argi];
             if (strcmp(m, "sieve") == 0)
                 method = METHOD_SIEVE;
+            else if (strcmp(m, "table") == 0)
+                method = METHOD_TABLE;
             else if (strcmp(m, "powm") == 0)
                 method = METHOD_POWM;
             else
             {
                 if (rank == 0)
-                    fprintf(stderr, "Unknown --method '%s' (use sieve or powm)\n", m);
+                    fprintf(stderr, "Unknown --method '%s' (use sieve|table|powm)\n", m);
                 MPI_Finalize();
                 return 1;
             }
@@ -992,14 +1039,20 @@ int main(int argc, char *argv[])
             char cf[512], mf[512];
             snprintf(cf, sizeof(cf), "%s/challenge_0_35_%s.txt", data_dir, sizes[s]);
             snprintf(mf, sizeof(mf), "%s/modulo_35_%s.txt", data_dir, sizes[s]);
+            const char *k35u_p2 = (method == METHOD_TABLE)
+                                      ? ksc_ensure_k35_primes(sp_count, sp, rank)
+                                      : nullptr;
             solve_one(rank, nranks, cf, mf, bench_count,
-                      sp_count, sp, my_lo, my_hi, method, json_file);
+                      sp_count, sp, my_lo, my_hi, method, k35u_p2, json_file);
         }
     }
     else
     {
+        const char *k35u_path = (method == METHOD_TABLE)
+                                    ? ksc_ensure_k35_primes(sp_count, sp, rank)
+                                    : nullptr;
         solve_one(rank, nranks, challenge_file, modulo_file, bench_count,
-                  sp_count, sp, my_lo, my_hi, method, json_file);
+                  sp_count, sp, my_lo, my_hi, method, k35u_path, json_file);
     }
 
     free(sp);

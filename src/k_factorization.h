@@ -92,6 +92,47 @@ void kf_trial_divide_table(const mpz_t n,
                            int *thread_found = nullptr,
                            int nthreads_out = 0);
 
+// ---------------------------------------------------------------------------
+// k35 upper range — uint64_t prime table for (2^32, 2^35]
+//
+// The k35 smoothness bound B = 2^35 covers primes that do not fit in uint32_t
+// (those above 2^32).  We store the upper range (2^32, 2^35] in a separate
+// binary file k35_upper_primes.bin using uint64_t entries.
+//
+// The lower range [65537, 2^32] is handled by the existing k32_primes.bin
+// infrastructure (uint32_t).  k35 table method loads both slices.
+//
+// File format (k35_upper_primes.bin):
+//   [uint64_t magic]  = K35U_PRIME_TABLE_MAGIC
+//   [uint64_t count]  = total number of primes in file
+//   [uint64_t * count] = primes in (2^32, 2^35], sorted ascending
+// ---------------------------------------------------------------------------
+
+#define K35U_PRIME_TABLE_MAGIC 0x4B333555505249DULL // "K35UPRI"
+#define K35U_DEFAULT_PATH "data/k35_upper_primes.bin"
+
+// Generate and write k35_upper_primes.bin (primes in (2^32, 2^35]).
+// Requires small primes sp[] up to sqrt(2^35) ~ 2^17.5 (use 2^18).
+bool kf_generate_and_save_prime_table_u64(const char *path,
+                                          uint64_t range_lo,
+                                          uint64_t range_hi,
+                                          int sp_count,
+                                          const unsigned *sp,
+                                          const char *log_prefix);
+
+// Load the slice of k35_upper_primes.bin covering [lo, hi].
+// Returns malloc'd uint64_t array; caller must free.  *count set on return.
+uint64_t *kf_load_prime_slice_u64(int64_t *count, const char *path,
+                                  uint64_t lo, uint64_t hi);
+
+// Trial-divide n by a preloaded uint64_t prime slice (OMP parallel).
+void kf_trial_divide_table_u64(const mpz_t n,
+                               const uint64_t *primes, int64_t prime_count,
+                               kfactor_list_t *found,
+                               int64_t *thread_tested = nullptr,
+                               int *thread_found = nullptr,
+                               int nthreads_out = 0);
+
 // k16 — Horner byte-level trial division
 void kf_trial_divide_k16(const unsigned char *challenge_bytes, size_t nbytes,
                          const mpz_t challenge,
@@ -228,6 +269,23 @@ bool kf_pollard_rho_brent(mpz_t factor, const mpz_t n, unsigned long c_val);
 void kf_factor_recursive(const mpz_t n, kfactor_list_t *factors,
                          unsigned long c_start);
 void kf_factor_challenge(const mpz_t challenge, kfactor_list_t *out);
+
+// ---------------------------------------------------------------------------
+// k64 — B-smooth test via Pollard's rho
+//
+// Attempts to fully factor n using Pollard's rho (OMP parallel).
+// Returns true if n is completely factored and every prime factor fits in
+// 64 bits (i.e. n is 2^64-smooth). Returns false if a factor > 2^64 is
+// found or factoring fails within the iteration limit.
+//
+// On success, factors contains the complete (prime, exponent) factorization.
+// On failure, factors contains whatever partial factorization was found.
+//
+// c_start: first c value for Pollard's rho (rank-specific seed for racing).
+// ---------------------------------------------------------------------------
+bool kf_try_factor_b64smooth(const mpz_t n,
+                             kfactor_list_t *factors,
+                             unsigned long c_start);
 
 // ---------------------------------------------------------------------------
 // k16 — Precompute and reconstruct

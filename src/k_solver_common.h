@@ -191,3 +191,12 @@ void ksc_ensure_k35_cbrt(
     uint64_t my_lo, uint64_t my_hi,
     int sp_count, const unsigned *sp,
     int rank, int nranks);
+
+// ---------------------------------------------------------------------------
+// k35 upper-range prime table management
+// ---------------------------------------------------------------------------
+
+// Ensures data/k35_upper_primes.bin exists (rank 0 generates if missing).
+// All ranks synchronise via MPI_Barrier before returning.
+// sp/sp_count must cover primes up to sqrt(2^35) ~ 185363 (use 2^18 limit).
+const char *ksc_ensure_k35_primes(int sp_count, const unsigned *sp, int rank);

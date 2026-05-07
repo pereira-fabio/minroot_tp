@@ -693,3 +693,48 @@ void ksc_ensure_k35_cbrt(
         fflush(stdout);
     }
 }
+
+// ---------------------------------------------------------------------------
+// ksc_ensure_k35_primes
+//
+// Rank 0 generates k35_upper_primes.bin (primes in (2^32, 2^35]) if it does
+// not exist, then all ranks MPI_Barrier before returning the path.
+// Returns the path to the file (static string).
+// ---------------------------------------------------------------------------
+const char *ksc_ensure_k35_primes(int sp_count, const unsigned *sp, int rank)
+{
+    static const char *path = K35U_DEFAULT_PATH;
+
+    // All ranks check existence; only rank 0 generates
+    int exists = 0;
+    if (rank == 0)
+    {
+        FILE *f = fopen(path, "rb");
+        if (f)
+        {
+            fclose(f);
+            exists = 1;
+        }
+    }
+    MPI_Bcast(&exists, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    if (!exists)
+    {
+        if (rank == 0)
+        {
+            printf("[rank 0] Generating %s (primes in (2^32, 2^35]) ...\n", path);
+            printf("  This is done once and takes several minutes.\n");
+            fflush(stdout);
+            mkdir_data();
+            kf_generate_and_save_prime_table_u64(path,
+                                                 (uint64_t)UINT32_MAX + 1ULL, // 2^32
+                                                 (1ULL << 35) + 1024ULL,      // 2^35 + margin
+                                                 sp_count, sp,
+                                                 "[rank 0] k35u");
+            printf("\n[rank 0] k35_upper_primes.bin ready: %s\n", path);
+            fflush(stdout);
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+    }
+    return path;
+}

@@ -1128,3 +1128,383 @@ void kf_compute_cube_root_from_factors_k16(mpz_t result, const int *exponents,
         mpz_mod(result, result, modulo);
     }
 }
+// ---------------------------------------------------------------------------
+// kf_try_factor_b64smooth — factor n via Pollard's rho, check 2^64-smooth
+// ---------------------------------------------------------------------------
+
+bool kf_try_factor_b64smooth(const mpz_t n,
+                             kfactor_list_t *factors,
+                             unsigned long c_start)
+{
+    if (mpz_cmp_ui(n, 1) == 0)
+        return true;
+
+    // If n fits in 64 bits, it is automatically 2^64-smooth.
+    // Use kf_factor_recursive to fully factor it.
+    if (mpz_sizeinbase(n, 2) <= 64)
+    {
+        kf_factor_recursive(n, factors, c_start);
+        return true;
+    }
+
+    // n > 2^64: test if it is prime (would mean not 2^64-smooth)
+    if (kf_is_prime(n))
+        return false; // prime factor > 2^64 — not smooth
+
+    // n is composite and > 2^64 — find a factor via Pollard's rho
+    mpz_t found;
+    mpz_init(found);
+    volatile int success = 0;
+
+#ifdef _OPENMP
+#pragma omp parallel shared(found, success)
+    {
+        int tid = omp_get_thread_num();
+        int nt = omp_get_num_threads();
+#else
+    {
+        int tid = 0, nt = 1;
+#endif
+        mpz_t local_f;
+        mpz_init(local_f);
+        unsigned long c = c_start + (unsigned long)(tid + 1);
+        const unsigned long limit = c_start + 500000UL * (unsigned long)nt;
+
+        while (c <= limit)
+        {
+#pragma omp flush(success)
+            if (success)
+                break;
+
+            if (kf_pollard_rho_brent(local_f, n, c))
+            {
+#pragma omp critical
+                if (!success)
+                {
+                    mpz_set(found, local_f);
+                    success = 1;
+                }
+#pragma omp flush(success)
+            }
+            c += (unsigned long)nt;
+        }
+        mpz_clear(local_f);
+    }
+
+    bool ok = false;
+    if (success)
+    {
+        // Check both halves for 2^64-smoothness recursively
+        mpz_t cofactor;
+        mpz_init(cofactor);
+        mpz_divexact(cofactor, n, found);
+
+        kfactor_list_t left, right;
+        kfl_init(&left);
+        kfl_init(&right);
+
+        bool left_ok = kf_try_factor_b64smooth(found, &left, c_start + 7919);
+        bool right_ok = kf_try_factor_b64smooth(cofactor, &right, c_start + 104729);
+        ok = left_ok && right_ok;
+
+        if (ok)
+        {
+            for (int i = 0; i < left.count; i++)
+                kfl_append_mpz(factors, left.items[i].prime, left.items[i].exponent);
+            for (int i = 0; i < right.count; i++)
+                kfl_append_mpz(factors, right.items[i].prime, right.items[i].exponent);
+        }
+        kfl_free(&left);
+        kfl_free(&right);
+        mpz_clear(cofactor);
+    }
+    mpz_clear(found);
+    return ok;
+}
+
+// =============================================================================
+// k35 upper-range prime table  — uint64_t primes in (2^32, 2^35]
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// kf_generate_and_save_prime_table_u64
+// ---------------------------------------------------------------------------
+bool kf_generate_and_save_prime_table_u64(
+    const char *path,
+    uint64_t range_lo, uint64_t range_hi,
+    int sp_count, const unsigned *sp,
+    const char *log_prefix)
+{
+    // Use the same 512 KiB segment as the sieve
+    const uint64_t SEG = (uint64_t)KF_SEG_SIZE;
+
+    FILE *f = fopen(path, "wb");
+    if (!f)
+    {
+        fprintf(stderr, "%sERROR: cannot create %s: %s\n",
+                log_prefix, path, strerror(errno));
+        return false;
+    }
+
+    // Write placeholder header (magic + count = 0)
+    uint64_t header[2] = {K35U_PRIME_TABLE_MAGIC, 0};
+    if (fwrite(header, sizeof(uint64_t), 2, f) != 2)
+    {
+        fclose(f);
+        return false;
+    }
+
+    uint64_t total = 0;
+    // Write primes in batches to reduce fwrite calls
+    uint64_t batch[WRITE_BATCH];
+    int bsz = 0;
+
+    // Temporary sieve buffer — one byte per candidate offset
+    unsigned char *sieve = (unsigned char *)malloc(SEG);
+    if (!sieve)
+    {
+        fclose(f);
+        return false;
+    }
+
+    for (uint64_t seg_lo = range_lo; seg_lo <= range_hi; seg_lo += SEG)
+    {
+        uint64_t seg_hi = seg_lo + SEG - 1;
+        if (seg_hi > range_hi)
+            seg_hi = range_hi;
+        uint64_t seg_sz = seg_hi - seg_lo + 1;
+
+        // Mark all as prime (0 = prime candidate)
+        memset(sieve, 0, seg_sz);
+
+        // Sieve with each small prime
+        for (int i = 0; i < sp_count; i++)
+        {
+            uint64_t p = (uint64_t)sp[i];
+            // First multiple of p in segment
+            uint64_t start = ((seg_lo + p - 1) / p) * p;
+            if (start < p * 2)
+                start = p * 2; // don't mark p itself
+            for (uint64_t j = start; j <= seg_hi; j += p)
+                sieve[j - seg_lo] = 1;
+        }
+
+        // Collect unmarked candidates
+        for (uint64_t j = 0; j < seg_sz; j++)
+        {
+            if (!sieve[j])
+            {
+                batch[bsz++] = seg_lo + j;
+                total++;
+                if (bsz == WRITE_BATCH)
+                {
+                    fwrite(batch, sizeof(uint64_t), WRITE_BATCH, f);
+                    bsz = 0;
+                }
+            }
+        }
+
+        // Progress: every 256 segments (~128 MB range)
+        if (((seg_lo - range_lo) / SEG) % 256 == 0)
+        {
+            double pct = 100.0 * (double)(seg_lo - range_lo) / (double)(range_hi - range_lo);
+            fprintf(stderr, "%s  %.1f%%  (%" PRIu64 " primes so far)\r",
+                    log_prefix, pct, total);
+            fflush(stderr);
+        }
+    }
+
+    // Flush remaining batch
+    if (bsz > 0)
+        fwrite(batch, sizeof(uint64_t), bsz, f);
+
+    // Update count in header
+    fseeko(f, (off_t)sizeof(uint64_t), SEEK_SET);
+    fwrite(&total, sizeof(uint64_t), 1, f);
+    fclose(f);
+    free(sieve);
+
+    fprintf(stderr, "%s  100.0%%  %" PRIu64 " primes written to %s\n",
+            log_prefix, total, path);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// kf_load_prime_slice_u64
+//
+// Binary-searches the file for the first prime >= lo, then reads until > hi.
+// Returns malloc'd array.  Caller must free().
+// ---------------------------------------------------------------------------
+uint64_t *kf_load_prime_slice_u64(int64_t *count_out, const char *path,
+                                  uint64_t lo, uint64_t hi)
+{
+    *count_out = 0;
+
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        fprintf(stderr, "[k35u] Cannot open %s\n", path);
+        return nullptr;
+    }
+
+    uint64_t magic, total;
+    if (fread(&magic, 8, 1, f) != 1 || fread(&total, 8, 1, f) != 1 || magic != K35U_PRIME_TABLE_MAGIC)
+    {
+        fprintf(stderr, "[k35u] Bad header in %s\n", path);
+        fclose(f);
+        return nullptr;
+    }
+
+    if (total == 0)
+    {
+        fclose(f);
+        return nullptr;
+    }
+
+    // Binary search: find index of first prime >= lo
+    const off_t DATA_OFF = 2 * (off_t)sizeof(uint64_t);
+    int64_t left = 0, right = (int64_t)total - 1, start_idx = (int64_t)total;
+    while (left <= right)
+    {
+        int64_t mid = left + (right - left) / 2;
+        uint64_t val;
+        fseeko(f, DATA_OFF + (off_t)mid * 8, SEEK_SET);
+        if (fread(&val, 8, 1, f) != 1)
+            break;
+        if (val < lo)
+        {
+            left = mid + 1;
+        }
+        else
+        {
+            start_idx = mid;
+            right = mid - 1;
+        }
+    }
+
+    if (start_idx == (int64_t)total)
+    {
+        fclose(f);
+        return nullptr;
+    }
+
+    // Count entries in [lo, hi]
+    fseeko(f, DATA_OFF + (off_t)start_idx * 8, SEEK_SET);
+    int64_t count = 0;
+    {
+        uint64_t buf[4096];
+        int64_t idx = start_idx;
+        while (idx < (int64_t)total)
+        {
+            size_t rd = fread(buf, 8, 4096, f);
+            if (rd == 0)
+                break;
+            for (size_t k = 0; k < rd; k++)
+            {
+                if (buf[k] > hi)
+                {
+                    idx = (int64_t)total;
+                    break;
+                }
+                count++;
+                idx++;
+            }
+        }
+    }
+
+    if (count == 0)
+    {
+        fclose(f);
+        return nullptr;
+    }
+
+    // Load the slice
+    uint64_t *slice = (uint64_t *)malloc((size_t)count * sizeof(uint64_t));
+    if (!slice)
+    {
+        fclose(f);
+        return nullptr;
+    }
+    fseeko(f, DATA_OFF + (off_t)start_idx * 8, SEEK_SET);
+    if ((int64_t)fread(slice, 8, (size_t)count, f) != count)
+    {
+        free(slice);
+        fclose(f);
+        return nullptr;
+    }
+    fclose(f);
+
+    *count_out = count;
+    return slice;
+}
+
+// ---------------------------------------------------------------------------
+// kf_trial_divide_table_u64
+//
+// Same logic as kf_trial_divide_table but for uint64_t primes.
+// On 64-bit Linux, unsigned long == uint64_t so mpz_divisible_ui_p works.
+// ---------------------------------------------------------------------------
+void kf_trial_divide_table_u64(
+    const mpz_t n,
+    const uint64_t *primes, int64_t prime_count,
+    kfactor_list_t *found,
+    int64_t *thread_tested, int *thread_found, int nthreads_out)
+{
+    if (!primes || prime_count <= 0)
+        return;
+
+    // Use all available OMP threads unless caller specifies count
+    int nt = nthreads_out > 0 ? nthreads_out : 1;
+#ifdef _OPENMP
+    if (nthreads_out <= 0)
+        nt = omp_get_max_threads();
+#endif
+
+#pragma omp parallel num_threads(nt)
+    {
+        int tid = 0;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+#endif
+        kfactor_list_t local;
+        kfl_init(&local);
+        int64_t tested = 0;
+        int found_cnt = 0;
+
+#pragma omp for schedule(static) nowait
+        for (int64_t i = 0; i < prime_count; i++)
+        {
+            unsigned long p = (unsigned long)primes[i];
+            tested++;
+            if (mpz_divisible_ui_p(n, p))
+            {
+                // Count exponent
+                mpz_t tmp;
+                mpz_init_set(tmp, n);
+                int e = 0;
+                while (mpz_divisible_ui_p(tmp, p))
+                {
+                    mpz_divexact_ui(tmp, tmp, p);
+                    e++;
+                }
+                mpz_clear(tmp);
+                kfl_append_ul(&local, p, e);
+                found_cnt++;
+            }
+        }
+
+        // Merge local into shared found
+#pragma omp critical
+        {
+            for (int i = 0; i < local.count; i++)
+                kfl_append_ul(found,
+                              (unsigned long)mpz_get_ui(local.items[i].prime),
+                              local.items[i].exponent);
+            if (thread_tested && tid < nthreads_out)
+                thread_tested[tid] += tested;
+            if (thread_found && tid < nthreads_out)
+                thread_found[tid] += found_cnt;
+        }
+        kfl_free(&local);
+    }
+}
