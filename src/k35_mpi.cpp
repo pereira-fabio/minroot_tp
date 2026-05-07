@@ -70,17 +70,14 @@
 typedef enum
 {
     METHOD_SIEVE,
-    METHOD_POWM, // No table method: >32-bit primes exceed uint32_t
+    METHOD_POWM
+} run_method_t;
 
-    // Sieve lower bound — primes below this are handled separately by rank 0.
-    // k35 challenges can include primes < 65537 since nextprime(random_35bit)
-    // may land anywhere in [2, 2^35].  Rank 0 trial-divides [2, RANGE_LO).
-    static const uint64_t RANGE_LO = 65537ULL;
-    // Sieve upper bound — slightly above 2^35 to catch nextprime overflows.
-    static const uint64_t RANGE_HI = (1ULL << 35) + 1024ULL;
-
-}
-run_method_t;
+// Sieve bounds — file-scope so both solve_one() and main() see them.
+// RANGE_LO = 65537: primes below this are handled by rank 0 separately.
+// RANGE_HI = 2^35+1024: slightly above 2^35 to catch nextprime overflows.
+static const uint64_t RANGE_LO = 65537ULL;
+static const uint64_t RANGE_HI = (1ULL << 35) + 1024ULL;
 
 // ---------------------------------------------------------------------------
 // Factor list: kfactor_list_t / kfl_* from k_common.h.
