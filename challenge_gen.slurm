@@ -4,7 +4,7 @@
 #SBATCH --error=minroot_gen_challenges_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=32
 #SBATCH --time=00:30:00
 
 # No MPI or OpenMP needed — challenge generation is single-threaded GMP arithmetic.
