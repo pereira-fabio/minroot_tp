@@ -398,16 +398,23 @@ static int solve_one(
     if (method == METHOD_TABLE && primes_upper_file)
     {
         const char *k32_path = ksc_ensure_k32_primes(sp_count, sp, rank);
-        k32_slice = kf_load_prime_slice(&k32_slice_count, k32_path,
-                                        (uint32_t)my_lo,
-                                        (uint32_t)std::min(my_hi,
-                                                           (uint64_t)UINT32_MAX));
+        // Lower slice [65537, UINT32_MAX]: only for ranks whose range overlaps it.
+        // Ranks with my_lo > UINT32_MAX are entirely in the upper range — do NOT
+        // cast my_lo to uint32_t (wraps) and do NOT load a spurious k32 slice.
+        if (my_lo <= (uint64_t)UINT32_MAX)
+        {
+            uint64_t k32_hi = std::min(my_hi, (uint64_t)UINT32_MAX);
+            k32_slice = kf_load_prime_slice(&k32_slice_count, k32_path,
+                                            (uint32_t)my_lo, (uint32_t)k32_hi);
+        }
+        // Upper slice (UINT32_MAX, RANGE_HI]: only for ranks whose range overlaps it.
         if (my_hi > (uint64_t)UINT32_MAX)
+        {
+            uint64_t k35u_lo = std::max(my_lo, (uint64_t)UINT32_MAX + 1);
             k35u_slice = kf_load_prime_slice_u64(&k35u_slice_count,
                                                  primes_upper_file,
-                                                 std::max(my_lo,
-                                                          (uint64_t)UINT32_MAX + 1),
-                                                 my_hi);
+                                                 k35u_lo, my_hi);
+        }
         if (rank == 0)
             printf("Table slices: k32=%lld  k35u=%lld primes\n",
                    (long long)k32_slice_count, (long long)k35u_slice_count);
@@ -845,6 +852,24 @@ static int solve_one(
         mpz_t challenge_mod;
         mpz_init(challenge_mod);
         mpz_mod(challenge_mod, challenge, modulo);
+        // Diagnostic: check result^3 mod M
+        {
+            mpz_t cube;
+            mpz_init(cube);
+            mpz_powm_ui(cube, result, 3, modulo);
+            if (mpz_cmp(cube, challenge_mod) != 0)
+            {
+                printf("DEBUG: result^3 mod M = ");
+                mpz_out_str(stdout, 16, cube);
+                printf("\nDEBUG: challenge mod M = ");
+                mpz_out_str(stdout, 16, challenge_mod);
+                printf("\nDEBUG: result = ");
+                mpz_out_str(stdout, 16, result);
+                printf("\n");
+                fflush(stdout);
+            }
+            mpz_clear(cube);
+        }
         verify_cube_root(result, challenge_mod, modulo);
         mpz_clear(challenge_mod);
         fflush(stdout);
@@ -986,7 +1011,9 @@ int main(int argc, char *argv[])
         printf("Total workers:  %d\n", nranks * omp_get_max_threads());
 #endif
         printf("Method:         %s\n",
-               method == METHOD_SIEVE ? "sieve" : "powm");
+               method == METHOD_TABLE   ? "table"
+               : method == METHOD_SIEVE ? "sieve"
+                                        : "powm");
         if (bench_count > 1)
             printf("Benchmark runs: %d\n", bench_count);
         if (run_all)
