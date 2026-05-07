@@ -641,9 +641,31 @@ void ksc_ensure_k35_cbrt(
         printf("[rank 0] k35 cbrt cache missing — running precompute pass (untimed)\n");
     fflush(stdout);
 
-    // One untimed sieve pass to find all factors in this rank's range
+    // One untimed pass to find all factors in this rank's range.
+    // Rank 0 also checks [2, RANGE_LO) since k35 challenges can have small factors.
     kfactor_list_t factors;
     kfl_init(&factors);
+    if (rank == 0)
+    {
+        const uint64_t RANGE_LO_K35 = 65537ULL;
+        for (int si = 0; si < sp_count && (uint64_t)sp[si] < RANGE_LO_K35; si++)
+        {
+            unsigned long p = (unsigned long)sp[si];
+            if (mpz_divisible_ui_p(challenge, p))
+            {
+                mpz_t tmp_c;
+                mpz_init_set(tmp_c, challenge);
+                int e = 0;
+                while (mpz_divisible_ui_p(tmp_c, p))
+                {
+                    mpz_divexact_ui(tmp_c, tmp_c, p);
+                    e++;
+                }
+                mpz_clear(tmp_c);
+                kfl_append_ul(&factors, p, e);
+            }
+        }
+    }
     kf_trial_divide_sieve(challenge, my_lo, my_hi, sp_count, sp, &factors);
 
     // Compute cbrt for each found factor

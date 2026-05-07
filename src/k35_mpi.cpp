@@ -514,6 +514,32 @@ static int solve_one(
             fl_free(&local_factors);
             fl_init(&local_factors);
 
+            // Small primes [2, RANGE_LO) — rank 0 only.
+            // The sieve starts at RANGE_LO=65537. Challenges with bitbound=35 can
+            // include factors < 65537 because nextprime of a small random value may
+            // land below the sieve floor. Rank 0 checks this range; other ranks
+            // skip it so small-prime cbrt is contributed exactly once.
+            if (rank == 0)
+            {
+                for (int si = 0; si < sp_count && (uint64_t)sp[si] < RANGE_LO; si++)
+                {
+                    unsigned long p = (unsigned long)sp[si];
+                    if (mpz_divisible_ui_p(blinded_challenge, p))
+                    {
+                        mpz_t tmp_c;
+                        mpz_init_set(tmp_c, blinded_challenge);
+                        int e = 0;
+                        while (mpz_divisible_ui_p(tmp_c, p))
+                        {
+                            mpz_divexact_ui(tmp_c, tmp_c, p);
+                            e++;
+                        }
+                        mpz_clear(tmp_c);
+                        kfl_append_ul(&local_factors, p, e);
+                    }
+                }
+            }
+
             if (method == METHOD_SIEVE)
                 kf_trial_divide_sieve(blinded_challenge, my_lo, my_hi,
                                       sp_count, sp, &local_factors);
@@ -529,7 +555,7 @@ static int solve_one(
                                       sp_count, sp, &local_factors,
                                       do_thr ? thr_tested.data() : nullptr,
                                       do_thr ? thr_found.data() : nullptr,
-                                      do_thr ? nT : 0);
+                                      nT); // always pass nT for OMP parallelism
                 if (do_thr)
                 {
                     json_results.thread_primes_tested.insert(
@@ -926,7 +952,11 @@ int main(int argc, char *argv[])
 
     // Partition [65537, 2^32] evenly across MPI ranks
     const uint64_t RANGE_LO = 65537ULL;
-    const uint64_t RANGE_HI = (1ULL << 35) - 1; // B = 2^35 (paper Algorithm 2)
+    // RANGE_HI extends slightly above 2^35 to catch primes that mpz_nextprime
+    // places just above 2^35 (prime gap ≈ ln(2^35) ≈ 24; 1024 is a safe margin).
+    // The new challenges.c fixes this at source, but existing challenge files
+    // on disk may contain such primes, so the sieve covers them here too.
+    const uint64_t RANGE_HI = (1ULL << 35) + 1024; // B ≈ 2^35 (paper Algorithm 2)
     const uint64_t range_size = RANGE_HI - RANGE_LO + 1;
 
     uint64_t my_lo = RANGE_LO + (range_size * (uint64_t)rank) / (uint64_t)nranks;
