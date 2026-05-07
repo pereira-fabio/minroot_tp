@@ -97,7 +97,7 @@ echo "============================================================"
 echo "Challenge generation complete"
 echo ""
 echo "Files written:"
-for KB in 16 32; do
+for KB in 16 32 35; do
     echo "  data/challenges/k${KB}/"
     ls data/challenges/k${KB}/ 2>/dev/null | sed 's/^/    /'
 done

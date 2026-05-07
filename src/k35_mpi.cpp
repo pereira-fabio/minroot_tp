@@ -254,7 +254,7 @@ static int solve_one(
     const char *challenge_file, const char *modulo_file,
     int bench_count, int sp_count, const unsigned *sp,
     uint64_t my_lo, uint64_t my_hi,
-    run_method_t method, const char *primes_file,
+    run_method_t method,
     const char *json_output_file = nullptr)
 {
     if (rank == 0)
@@ -295,8 +295,6 @@ static int solve_one(
     // ---- Load prime slice for table method (once, outside bench loop) ----
     // Each rank loads only its [my_lo, my_hi] slice via binary search on the
     // sorted prime file — no full 800+ MB read per rank.
-
-    int64_t slice_count = 0;
 
     // Fixed-size byte buffer for partial cbrt export (big-endian, zero-padded).
     // Size is the same on all ranks since modulo is broadcast.
@@ -824,7 +822,6 @@ int main(int argc, char *argv[])
     const char *json_file = NULL;
     int bench_count = 1;
     int run_all = 0;
-    int do_precompute = 0;
     run_method_t method = METHOD_SIEVE;
 
     int positional = 0;
@@ -847,28 +844,19 @@ int main(int argc, char *argv[])
             const char *m = argv[++argi];
             if (strcmp(m, "sieve") == 0)
                 method = METHOD_SIEVE;
-            else if (strcmp(m, "table") == 0)
-                else if (strcmp(m, "powm") == 0)
-                    method = METHOD_POWM;
+            else if (strcmp(m, "powm") == 0)
+                method = METHOD_POWM;
             else
             {
                 if (rank == 0)
-                    fprintf(stderr, "Unknown --method '%s' (use sieve, table, or powm)\n", m);
+                    fprintf(stderr, "Unknown --method '%s' (use sieve or powm)\n", m);
                 MPI_Finalize();
                 return 1;
             }
         }
-        else if (strcmp(argv[argi], "--primes") == 0 && argi + 1 < argc)
-        {
-            primes_file = argv[++argi];
-        }
         else if (strcmp(argv[argi], "--json") == 0 && argi + 1 < argc)
         {
             json_file = argv[++argi];
-        }
-        else if (strcmp(argv[argi], "--precompute") == 0)
-        {
-            do_precompute = 1;
         }
         else if (argv[argi][0] != '-')
         {
@@ -899,7 +887,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (!run_all && !do_precompute && (!challenge_file || !modulo_file))
+    if (!run_all && (!challenge_file || !modulo_file))
     {
         if (rank == 0)
             fprintf(stderr,
@@ -960,42 +948,22 @@ int main(int argc, char *argv[])
         (void)i;
 #endif
 
-    // --precompute: rank 0 generates the prime table file; all ranks then exit
-    if (do_precompute)
-    {
-        if (rank == 0)
-        {
-            int sp2;
-            unsigned *sp2_arr = kf_generate_small_primes(&sp2);
-            kf_generate_and_save_prime_table(primes_file, sp2, sp2_arr, "[rank 0] ");
-            free(sp2_arr);
-        }
-        free(sp);
-        MPI_Finalize();
-        return 0;
-    }
-
-    // --method table: rank 0 generates the prime file if it doesn't yet exist,
-    // then all ranks wait before each loading their own slice inside solve_one.
-
     if (run_all)
     {
-        // Run all four standard challenge sizes in one MPI execution.
-        // Avoids multiple srun calls in the SLURM script (causes reinit hangs).
-        const char *sizes[] = {"1024", "2048", "5000", "7000"};
-        for (int s = 0; s < 4; s++)
+        const char *sizes[] = {"16384", "20480", "24576"};
+        for (int s = 0; s < 3; s++)
         {
             char cf[512], mf[512];
-            snprintf(cf, sizeof(cf), "%s/challenge_32_%s.txt", data_dir, sizes[s]);
-            snprintf(mf, sizeof(mf), "%s/modulo_32_%s.txt", data_dir, sizes[s]);
+            snprintf(cf, sizeof(cf), "%s/challenge_0_35_%s.txt", data_dir, sizes[s]);
+            snprintf(mf, sizeof(mf), "%s/modulo_35_%s.txt", data_dir, sizes[s]);
             solve_one(rank, nranks, cf, mf, bench_count,
-                      sp_count, sp, my_lo, my_hi, method, primes_file, json_file);
+                      sp_count, sp, my_lo, my_hi, method, json_file);
         }
     }
     else
     {
         solve_one(rank, nranks, challenge_file, modulo_file, bench_count,
-                  sp_count, sp, my_lo, my_hi, method, primes_file, json_file);
+                  sp_count, sp, my_lo, my_hi, method, json_file);
     }
 
     free(sp);
