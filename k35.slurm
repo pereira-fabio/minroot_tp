@@ -20,16 +20,22 @@ export OMP_WAIT_POLICY=active
 # ---------------------------------------------------------------------------
 # k35_mpi: paper's Algorithm 2 with B = 2^35
 #
-# Sieve range per rank: [65537, 2^35] / 16 ≈ 2.15 billion candidates
-# Expected factor_ms:   ~640 ms per run (8x k32 sieve cost)
-# Breakeven modulus:    ~17000 bits (powm > factor cost above this)
+# Three methods benchmarked:
+#   powm  — sequential mpz_powm baseline (single rank)
+#   sieve — on-the-fly segmented sieve up to 2^35 (no file needed)
+#   table — preloaded prime table: k32_primes.bin + k35_upper_primes.bin
+#           First run generates data/k35_upper_primes.bin (~10 GB, once only)
 #
-# We therefore benchmark at LARGER challenge sizes than k32/k16:
-#   8192  bits -> powm ~118ms  -> speedup ~0.18x (below breakeven, expected)
-#   12288 bits -> powm ~309ms  -> speedup ~0.48x
-#   16384 bits -> powm ~615ms  -> speedup ~0.96x
-#   20480 bits -> powm ~1047ms -> speedup ~1.6x  (first real speedup)
-#   24576 bits -> powm ~1600ms -> speedup ~2.5x
+# Breakeven vs powm (sieve ~640ms, table ~380ms per run at 16 ranks):
+#   sieve: ~17000 bits   table: ~12000 bits
+#
+# Expected results at 8 nodes / 16 ranks / 32 threads per rank:
+#   Bits   powm(ms)  sieve speedup  table speedup
+#   8192      118       0.18x          0.31x
+#   12288     309       0.48x          0.81x
+#   16384     615       0.96x          1.62x
+#   20480    1047       1.64x          2.76x
+#   24576    1600       2.50x          4.21x
 # ---------------------------------------------------------------------------
 
 DATA_DIR=data/challenges/k35
@@ -95,11 +101,19 @@ run_size() {
         --bench $BENCH \
         --json $JSON_DIR/k35_mpi_sieve_${BITS}_${SLURM_JOB_ID}.json
     echo ""
+
+    echo "  [table]  (generates data/k35_upper_primes.bin ~10 GB on first run)"
+    srun --mpi=pmix ./k35_mpi \
+        $CHALLENGE $MODULO \
+        --method table \
+        --bench $BENCH \
+        --json $JSON_DIR/k35_mpi_table_${BITS}_${SLURM_JOB_ID}.json
+    echo ""
 }
 
 echo "============================================================"
 echo "k35_mpi Benchmark  (N=${SLURM_JOB_NUM_NODES} nodes, $BENCH runs)"
-echo "  methods: powm | sieve"
+echo "  methods: powm | sieve | table"
 echo "  JSON  -> $JSON_DIR/"
 echo "============================================================"
 echo ""
@@ -113,6 +127,7 @@ echo "All sizes complete."
 echo "JSON files in: $JSON_DIR/"
 ls $JSON_DIR/*_${SLURM_JOB_ID}.json 2>/dev/null | sed 's|.*/||' | sed 's/^/  /'
 echo ""
-echo "Note: speedup visible only at >= ~17000 bits (breakeven for B=2^35)."
+echo "Note: sieve breakeven ~17000 bits, table breakeven ~12000 bits (B=2^35)."
+echo "      k35_upper_primes.bin (~10 GB) is generated once on first table run."
 echo "Job finished  (Job ID: $SLURM_JOB_ID)"
 echo "============================================================"
