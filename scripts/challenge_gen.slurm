@@ -25,9 +25,9 @@ NUM_CHALLENGES=2
 # Target modulo sizes to test — lower and upper bounds of the parallelisation
 # benefit range.
 # Target sizes per bitbound — minimum is 2x bitbound (need at least 2 primes)
-SIZES_K16="32 64 128 256 512 1024 2048 4096 8192"   # bitbound=16
-SIZES_K32="1024 2048 4096 5120 6144 7168 8192"       # bitbound=32
-SIZES_K35="8192 12288 16384 20480 24576"       # bitbound=35
+SIZES_K16="32 64 128 256 512 1024 2048 4096 8192 12288 16384 20480 24576"   # bitbound=16
+SIZES_K32="32 64 128 256 512 1024 2048 4096 8192 12288 16384 20480 24576"       # bitbound=32
+SIZES_K35="32 64 128 256 512 1024 2048 4096 8192 12288 16384 20480 24576"       # bitbound=35
  
 # ---------------------------------------------------------------------------
 # Compilation
