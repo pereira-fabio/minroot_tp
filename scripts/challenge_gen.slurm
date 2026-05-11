@@ -20,7 +20,7 @@ cd $SLURM_SUBMIT_DIR
 # ---------------------------------------------------------------------------
 # Number of challenges to generate per (bitbound, bittarget) combination.
 # 2 gives you challenge_0 and challenge_1 — one for benchmarking, one spare.
-NUM_CHALLENGES=2
+NUM_CHALLENGES=1
 
 # Target modulo sizes to test — lower and upper bounds of the parallelisation
 # benefit range.
