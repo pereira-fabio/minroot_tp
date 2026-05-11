@@ -1,41 +1,63 @@
-# Prerequisites
+# ── C/C++ build artifacts ────────────────────────────────
 *.d
-
-# Compiled Object files
 *.slo
 *.lo
 *.o
 *.obj
-
-# Precompiled Headers
 *.gch
 *.pch
-
-# Linker files
 *.ilk
-
-# Debugger Files
 *.pdb
-
-# Compiled Dynamic libraries
 *.so
 *.dylib
 *.dll
-
-# Fortran module files
 *.mod
 *.smod
-
-# Compiled Static libraries
 *.lai
 *.la
 *.a
 *.lib
-
-# Executables
 *.exe
-*.out
 *.app
-
-# debug information files
 *.dwo
+
+# Project executables (built by make)
+k16_mpi
+k32_mpi
+k35_mpi
+challenges
+
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Python virtual environment
+analysis/env/
+
+# ── Project-specific generated files ─────────────────────
+# Generated benchmark figures
+figures/
+
+# Precomputed cube-root cache files (regenerated per modulo)
+*.cbrt
+data/cbrt/
+
+# Large precomputed prime table files (can be 800 MB – 10 GB)
+*.bin
+
+# ── HPC / SLURM ──────────────────────────────────────────
+slurm-*.out
+
+# ── Editor / OS ──────────────────────────────────────────
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
