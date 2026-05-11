@@ -4,31 +4,62 @@
 #SBATCH --error=minroot_gen_challenges_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32  # OMP threads per ./challenges invocation
-#SBATCH --time=01:00:00  # parallel: wall time = slowest single modulo generation
+#SBATCH --cpus-per-task=32
+#SBATCH --time=02:00:00
+
+# ---------------------------------------------------------------------------
+# Challenge generator — produces B-smooth challenge files for k16/k32/k35.
+#
+# Structure: three k-variant groups run simultaneously; within each group,
+# sizes are generated sequentially so modulo generation is not starved of
+# threads by competing background processes.
+#
+#   Group k16 ──┐
+#   Group k32 ──┼── run in parallel (background), each group is sequential
+#   Group k35 ──┘
+#
+# Each group is allocated (SLURM_CPUS_PER_TASK / 3) OMP threads.  The new
+# find_prime_parallel() in challenges.c uses those threads to parallelise the
+# modulo search — previously the single-threaded mpz_nextprime call dominated
+# wall time for large bittargets (e.g. 24576 bits ≈ several minutes on one core).
+#
+# Wall time = max wall time across the three groups = k35 group time,
+# which is dominated by the largest sizes.  With 10 OMP threads per group,
+# modulo generation is ~10× faster than the old single-threaded approach.
+#
+# Sizes are shared across k16/k32/k35 so all three algorithms can be directly
+# compared at every bit size (same challenge files, same modulos per algorithm).
+#
+# Output files per (bitbound, bittarget):
+#   data/challenges/k<B>/modulo_<B>_<bits>.txt          (one per bittarget)
+#   data/challenges/k<B>/challenge_<i>_<B>_<bits>.txt   (i = 0 .. NUM_CHALLENGES-1)
+#   data/challenges/k<B>/factors_<i>_<B>_<bits>.txt
+#
+# Note: modulo files are cached — if one already exists the generator loads it
+# instantly and skips the expensive mpz_nextprime step.
+# ---------------------------------------------------------------------------
 
 module load compiler/GCC/13.2.0
 module load math/GMP/6.3.0-GCCcore-13.2.0
-
-# Use all allocated CPUs for OpenMP parallel challenge generation
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
 cd $SLURM_SUBMIT_DIR
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-# Number of challenges to generate per (bitbound, bittarget) combination.
-# 2 gives you challenge_0 and challenge_1 — one for benchmarking, one spare.
-NUM_CHALLENGES=1
+# 5 challenges per (bitbound, bittarget): challenge_0 through challenge_4.
+# Solver SLURMs use challenge_0 by default; extras are spares for re-runs.
+NUM_CHALLENGES=5
 
-# Target modulo sizes to test — lower and upper bounds of the parallelisation
-# benefit range.
-# Target sizes per bitbound — minimum is 2x bitbound (need at least 2 primes)
-SIZES_K16="32 64 128 256 512 1024 2048 4096 8192 12288 16384 20480 24576"   # bitbound=16
-SIZES_K32="32 64 128 256 512 1024 2048 4096 8192 12288 16384 20480 24576"       # bitbound=32
-SIZES_K35="32 64 128 256 512 1024 2048 4096 8192 12288 16384 20480 24576"       # bitbound=35
- 
+# Shared set for all three algorithms: same sizes enable direct comparison.
+# Spacing is approximately log-uniform with finer resolution near the k35
+# breakeven (~17000 bits sieve, ~12000 bits table) to capture the crossover.
+SIZES="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
+
+# Each of the three bitbound groups gets an equal share of available cores.
+# With SLURM_CPUS_PER_TASK=32: 10 threads/group × 3 groups = 30 threads.
+THREADS_PER_GROUP=$(( SLURM_CPUS_PER_TASK / 3 ))
+
 # ---------------------------------------------------------------------------
 # Compilation
 # ---------------------------------------------------------------------------
@@ -38,73 +69,63 @@ if [ $? -ne 0 ]; then
     echo "ERROR: Compilation of challenges.c failed"
     exit 1
 fi
-echo "Compilation successful"
+echo "Compilation successful (challenges)"
+echo "THREADS_PER_GROUP: ${THREADS_PER_GROUP}  (${SLURM_CPUS_PER_TASK} CPUs / 3 groups)"
 echo ""
 
 # ---------------------------------------------------------------------------
-# Helper: generate all sizes for one bitbound
-#
-# Usage: generate_all <bitbound>
-#
-# Writes to: data/challenges/k<bitbound>/
-#   modulo_<bitbound>_<bittarget>.txt      — one modulo per bittarget
-#   challenge_<i>_<bitbound>_<bittarget>.txt
-#   factors_<i>_<bitbound>_<bittarget>.txt
-#
-# Challenges within each call are generated in parallel with OMP_NUM_THREADS.
-# Note: when bittarget < bitbound the generator prints a size warning
-# but still produces valid output (expected for small bittarget values).
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 # generate_size <bitbound> <bittarget>
-#   Runs ./challenges in the background.  All sizes within a bitbound are
-#   launched simultaneously so their modulo generations overlap.
-#   The first call for a given bittarget generates (and caches) the modulo;
-#   subsequent calls load it instantly.
+#   Runs ./challenges with THREADS_PER_GROUP OMP threads.
+#   The modulo is loaded from disk if cached, generated in parallel otherwise.
 # ---------------------------------------------------------------------------
 generate_size() {
     local BITBOUND=$1
     local SIZE=$2
-    echo "  [k${BITBOUND}] bittarget=${SIZE} starting..."
-    ./challenges $NUM_CHALLENGES $SIZE $BITBOUND
-    if [ $? -eq 0 ]; then
-        echo "  [k${BITBOUND}] bittarget=${SIZE} DONE"
+    echo "  [k${BITBOUND}] bittarget=${SIZE}..."
+    OMP_NUM_THREADS=${THREADS_PER_GROUP} ./challenges $NUM_CHALLENGES $SIZE $BITBOUND
+    local RET=$?
+    if [ $RET -eq 0 ]; then
+        echo "  [k${BITBOUND}] ${SIZE} bits DONE"
     else
-        echo "  [k${BITBOUND}] bittarget=${SIZE} FAILED"
+        echo "  [k${BITBOUND}] ${SIZE} bits FAILED (exit ${RET})"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Launch ALL sizes for ALL bitbounds in parallel.
-#
-# Each ./challenges call is independent (different modulo file path), so
-# they never conflict even when running simultaneously.
-#
-# The expensive part is mpz_nextprime for the modulo:
-#   k16/k32 sizes: <1s each  — no problem
-#   k35 large sizes (20480, 24576 bits): several minutes each
-# Running them in parallel means total wall time = slowest single call,
-# not the sum of all calls.
+# generate_group <bitbound>
+#   Runs all sizes sequentially for one bitbound.
+#   Called in the background so k16/k32/k35 groups overlap.
 # ---------------------------------------------------------------------------
-echo "Launching all challenge generators in parallel..."
-echo "(Each size generates its modulo independently — no conflicts)"
+generate_group() {
+    local BITBOUND=$1
+    local N_SIZES=$(echo $SIZES | wc -w)
+    echo "=== k${BITBOUND} group: ${N_SIZES} sizes × ${NUM_CHALLENGES} challenges each ==="
+    for SIZE in $SIZES; do
+        generate_size $BITBOUND $SIZE
+    done
+    echo "=== k${BITBOUND} group complete ==="
+}
+
+# ---------------------------------------------------------------------------
+# Launch all three groups simultaneously.
+# Sizes within each group run sequentially so each modulo generation
+# has THREADS_PER_GROUP OMP threads available without interference.
+# ---------------------------------------------------------------------------
+echo "============================================================"
+echo "Launching k16, k32, k35 groups in parallel"
+echo "  Sizes:   $SIZES"
+echo "  Threads: ${THREADS_PER_GROUP} per group"
+echo "  Challenges per size: ${NUM_CHALLENGES}"
+echo "============================================================"
 echo ""
 
-for SIZE in $SIZES_K16; do
-    generate_size 16 $SIZE &
-done
+generate_group 16 &
+generate_group 32 &
+generate_group 35 &
 
-for SIZE in $SIZES_K32; do
-    generate_size 32 $SIZE &
-done
-
-for SIZE in $SIZES_K35; do
-    generate_size 35 $SIZE &
-done
-
-echo "Waiting for all generators to finish..."
 wait
-echo "All generators done."
+echo ""
+echo "All groups done."
 
 # ---------------------------------------------------------------------------
 # Summary

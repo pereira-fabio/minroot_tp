@@ -54,7 +54,7 @@ DATA_DIR=data/challenges/k32
 BENCH=10
 
 # k32_mpi: minimum useful size is 64 bits (need at least 2 x 32-bit primes)
-SIZES="1024 2048 4096 5120 6144 7168 8192"
+SIZES="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
 
 JSON_DIR=$SLURM_SUBMIT_DIR/data/results/k32_mpi_N${N_NODES}
 mkdir -p $JSON_DIR
@@ -101,7 +101,7 @@ run_size() {
         return
     fi
 
-    CACHE=$(echo "$MODULO" | sed "s|data/challenges/k32/|data/|" | sed 's/\.txt$/.cbrt.0/')
+    CACHE="data/cbrt/$(basename ${MODULO%.txt}).cbrt.0"
     if [ ! -f "$CACHE" ]; then
         echo "  NOTE: cbrt cache missing -- first run will do an untimed precompute pass"
     else

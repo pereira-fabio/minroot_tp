@@ -50,7 +50,7 @@ N_NODES=${NODE_COUNTS[$SLURM_ARRAY_TASK_ID]}
 # ---------------------------------------------------------------------------
 DATA_DIR=data/challenges/k16
 BENCH=10
-SIZES="32 64 128 256 512 1024 2048 4096 8192"
+SIZES="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
 
 JSON_DIR=$SLURM_SUBMIT_DIR/data/results/k16_mpi_N${N_NODES}
 mkdir -p $JSON_DIR
@@ -98,7 +98,7 @@ run_size() {
         return
     fi
 
-    CACHE=$(echo "$MODULO" | sed "s|data/challenges/k16/|data/|" | sed 's/\.txt$/.cbrt/')
+    CACHE="data/cbrt/$(basename ${MODULO%.txt}).cbrt"
     if [ ! -f "$CACHE" ]; then
         echo "  NOTE: cbrt cache missing -- first run will precompute all 6542 entries"
     else
