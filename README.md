@@ -257,6 +257,27 @@ srun --mpi=pmix ./k35_mpi --all --data data/challenges/k35 --method sieve --benc
 
 ---
 
+## Analysis and Plotting
+
+Benchmark results (JSON files from SLURM runs) are visualised with a Python plotter.
+
+```
+analysis/
+  ploter.py          generates all benchmark figures from JSON results
+  env/               Python venv with numpy + matplotlib (run from project root)
+```
+
+Run from project root:
+
+```bash
+analysis/env/bin/python3 analysis/ploter.py 'results/**/*.json' --out figures/ --format png
+```
+
+Output goes to `figures/` (36 PNG files). See `docs/figures.md` for a description of
+every figure and how to interpret it.
+
+---
+
 ## Performance Results
 
 ### k16 — local machine (AMD EPYC 7452, 16 threads)
