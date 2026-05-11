@@ -65,6 +65,26 @@ void ksc_gather_and_combine_cbrt(
     double *t_com_ms_out);
 
 // ---------------------------------------------------------------------------
+// Local cube root reconstruction — called by EVERY rank
+//
+// Computes  partial = ∏ cbrt(p_i)^e_i  mod M  for this rank's local factors.
+// Phase 1 (sequential): resolve cbrt(p) per factor via cache or mpz_powm.
+// Phase 2 (parallel):   exponentiate each cbrt by its exponent (OMP).
+// ---------------------------------------------------------------------------
+void ksc_compute_local_cbrt(
+    mpz_t result,
+    const kfactor_list_t *factors,
+    const mpz_t e,
+    const mpz_t modulo,
+    cbrt_cache_t *cache,
+    bool *cache_dirty,
+    double *hit_ms_out = nullptr,
+    double *miss_ms_out = nullptr,
+    int *hits_out = nullptr,
+    int *misses_out = nullptr,
+    bool record = true);
+
+// ---------------------------------------------------------------------------
 // Per-rank prime stats (call once, on first warm run bench == 1)
 // ---------------------------------------------------------------------------
 void ksc_gather_prime_stats(

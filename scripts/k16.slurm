@@ -76,8 +76,9 @@ cd $SLURM_SUBMIT_DIR
 # Compilation
 # ---------------------------------------------------------------------------
 mpicxx -O3 -std=c++17 -fopenmp -Wall \
-    src/k16_mpi.cpp src/k_solver_common.cpp \
-    src/k_common.cpp src/k_factorization.cpp \
+    -I src/common \
+    src/solvers/k16_mpi.cpp src/common/k_solver_common.cpp \
+    src/common/k_common.cpp src/common/k_factorization.cpp \
     -lgmp -o k16_mpi_N${N_NODES}
 
 if [ $? -ne 0 ]; then echo "Compilation failed"; exit 1; fi

@@ -181,6 +181,105 @@ void ksc_gather_and_combine_cbrt(
 }
 
 // ---------------------------------------------------------------------------
+// ksc_compute_local_cbrt
+// ---------------------------------------------------------------------------
+
+void ksc_compute_local_cbrt(mpz_t result,
+                             const kfactor_list_t *factors,
+                             const mpz_t e,
+                             const mpz_t modulo,
+                             cbrt_cache_t *cache,
+                             bool *cache_dirty,
+                             double *hit_ms_out,
+                             double *miss_ms_out,
+                             int *hits_out,
+                             int *misses_out,
+                             bool record)
+{
+    int n = factors->count;
+
+    if (n == 0)
+    {
+        mpz_set_ui(result, 1);
+        return;
+    }
+
+    mpz_t *parts = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
+    for (int i = 0; i < n; i++)
+        mpz_init_set_ui(parts[i], 1);
+
+    // Phase 1 (sequential): resolve cbrt(p) for each factor via cache or powm.
+    // Cache lookups and appends are NOT thread-safe (realloc), so this phase
+    // must run sequentially. With a warm cache every call is a cheap array
+    // lookup (~0 ms total), so sequential cost is negligible.
+    mpz_t *cbrt_vals = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
+    for (int i = 0; i < n; i++)
+    {
+        mpz_init(cbrt_vals[i]);
+        unsigned long p_ul = mpz_get_ui(factors->items[i].prime);
+        int cache_idx = (cache && p_ul > 0)
+                            ? kf_cbrt_cache_find(cache, p_ul)
+                            : -1;
+
+        auto _ct0 = std::chrono::high_resolution_clock::now();
+        if (cache_idx >= 0)
+        {
+            mpz_set(cbrt_vals[i], cache->items[cache_idx].cbrt);
+            auto _ct1 = std::chrono::high_resolution_clock::now();
+            if (record && hit_ms_out)
+                *hit_ms_out += std::chrono::duration<double, std::milli>(_ct1 - _ct0).count();
+            if (record && hits_out)
+                (*hits_out)++;
+        }
+        else
+        {
+            mpz_t p_mpz;
+            mpz_init_set_ui(p_mpz, p_ul);
+            mpz_powm(cbrt_vals[i], p_mpz, e, modulo);
+            mpz_clear(p_mpz);
+            auto _ct1 = std::chrono::high_resolution_clock::now();
+            if (record && miss_ms_out)
+                *miss_ms_out += std::chrono::duration<double, std::milli>(_ct1 - _ct0).count();
+            if (record && misses_out)
+                (*misses_out)++;
+
+            if (cache && p_ul > 0)
+            {
+                kf_cbrt_cache_append(cache, p_ul, cbrt_vals[i]);
+                if (cache_dirty)
+                    *cache_dirty = true;
+            }
+        }
+    }
+
+    // Phase 2 (parallel): parts[i] = cbrt_vals[i]^exponent mod M.
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (int i = 0; i < n; i++)
+    {
+        if (factors->items[i].exponent == 1)
+            mpz_set(parts[i], cbrt_vals[i]);
+        else
+            mpz_powm_ui(parts[i], cbrt_vals[i],
+                        (unsigned long)factors->items[i].exponent, modulo);
+    }
+
+    for (int i = 0; i < n; i++)
+        mpz_clear(cbrt_vals[i]);
+    free(cbrt_vals);
+
+    mpz_set_ui(result, 1);
+    for (int i = 0; i < n; i++)
+    {
+        mpz_mul(result, result, parts[i]);
+        mpz_mod(result, result, modulo);
+        mpz_clear(parts[i]);
+    }
+    free(parts);
+}
+
+// ---------------------------------------------------------------------------
 // ksc_gather_prime_stats
 // ---------------------------------------------------------------------------
 

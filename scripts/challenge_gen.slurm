@@ -32,7 +32,7 @@ SIZES_K35="8192 12288 16384 20480 24576"       # bitbound=35
 # ---------------------------------------------------------------------------
 # Compilation
 # ---------------------------------------------------------------------------
-gcc -O2 -fopenmp -o challenges challenges.c -lgmp
+gcc -O2 -fopenmp -o challenges tools/challenges.c -lgmp
 
 if [ $? -ne 0 ]; then
     echo "ERROR: Compilation of challenges.c failed"

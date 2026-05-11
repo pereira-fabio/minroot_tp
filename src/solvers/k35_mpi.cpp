@@ -1,5 +1,8 @@
 // =============================================================================
-// k32_mpi.cpp — MPI+OpenMP hybrid cube root solver for 32-bit prime factors
+// k35_mpi.cpp — MPI+OpenMP hybrid cube root solver for 35-bit prime factors
+// Extends k32 sieve range from [65537, 2^32] to [65537, 2^35].
+// Matches the paper's concrete Algorithm 2 parameters: B = 2^35.
+// No --method table: primes in (2^32, 2^35] exceed uint32_t storage.
 //
 // Architecture:
 //   MPI layer:    splits prime range [65537, 2^32] across nodes
@@ -27,13 +30,8 @@
 //             search so only ~range/nranks × 4 bytes are read per rank
 //
 // Usage:
-//   k32_mpi [challenge] [modulo] [--method sieve|table] [--primes FILE]
-//           [--precompute] [--bench N]
-//   k32_mpi --all [--data DIR] [--method sieve|table] [--primes FILE]
-//           [--bench N]
-//
-// Prime table generation (rank 0 only, one-time, ~10 s):
-//   srun ... k32_mpi --precompute [--primes k32_primes.bin]
+//   k35_mpi [challenge] [modulo] [--method sieve|table] [--bench N]
+//   k35_mpi --all [--data DIR] [--method sieve|table] [--bench N]
 // =============================================================================
 
 #include "k_common.h"
@@ -60,25 +58,19 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-#define SEG_SIZE (1 << 19)                      // 512 KiB sieve segment
-#define PRIME_TABLE_MAGIC 0x4B33325052494D53ULL // "K32PRIMS"
-#define WRITE_BATCH 65536
-
 typedef enum
 {
     METHOD_SIEVE,
     METHOD_TABLE,
-    METHOD_POWM,
+    METHOD_POWM
 } run_method_t;
 
-// ---------------------------------------------------------------------------
-// Factor list: kfactor_list_t / kfl_* from k_common.h.
-// Trial division: kf_trial_divide_* from k_factorization.h.
-// ---------------------------------------------------------------------------
-#define factor_list_t kfactor_list_t
-#define fl_init kfl_init
-#define fl_free kfl_free
-#define fl_append(f, p, e) kfl_append_ul(f, (unsigned long)(p), (int)(e))
+// Sieve bounds — file-scope so both solve_one() and main() see them.
+// RANGE_LO = 65537: primes below this are handled by rank 0 separately.
+// RANGE_HI = 2^35+1024: slightly above 2^35 to catch nextprime overflows.
+static const uint64_t RANGE_LO = 65537ULL;
+static const uint64_t RANGE_HI = (1ULL << 35) + 1024ULL;
+
 
 // ---------------------------------------------------------------------------
 // Small prime generator (same as k32.cpp)
@@ -112,128 +104,6 @@ typedef enum
 
 // kf_kf_trial_divide_table() — in k_factorization.cpp
 
-// ---------------------------------------------------------------------------
-// Local cube root reconstruction — called by EVERY rank
-//
-// Computes  partial = ∏ cbrt(p_i)^e_i  mod M  for this rank's local factors.
-// e = 3^-1 mod (M-1) is precomputed once per solve_one call (same M → same e
-// on every rank) and passed in.
-//
-// Parallelism model (two levels):
-//   MPI level:   all ranks run this function simultaneously, each with its
-//                own subset of factors (~total_factors / nranks powm calls).
-//   OpenMP level: the powm calls within one rank are independent — safe to
-//                 parallelize across the rank's threads.
-//
-// Why OpenMP matters here:
-//   For large challenges each powm operates on a ~N-bit modulus.
-//   Without threading: 104 sequential powm calls on a 7019-bit modulus
-//   takes ~9.6 s (observed). With 32 OMP threads: ~104/32 ≈ 4 calls per
-//   thread → expected ~300-400 ms.
-//
-// The results from all ranks are gathered and multiplied at rank 0, giving
-//   cbrt(challenge) = ∏_r partial_r  mod M   (cbrt homomorphism).
-// ---------------------------------------------------------------------------
-
-static void compute_local_cbrt(mpz_t result,
-                               const factor_list_t *factors,
-                               const mpz_t e,
-                               const mpz_t modulo,
-                               cbrt_cache_t *cache,
-                               bool *cache_dirty,
-                               double *hit_ms_out = nullptr,
-                               double *miss_ms_out = nullptr,
-                               int *hits_out = nullptr,
-                               int *misses_out = nullptr,
-                               bool record = true)
-{
-    int n = factors->count;
-
-    // Empty factor list → this rank contributes the identity element 1.
-    if (n == 0)
-    {
-        mpz_set_ui(result, 1);
-        return;
-    }
-
-    // Allocate one mpz_t per factor — each thread writes its own slot.
-    mpz_t *parts = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
-    for (int i = 0; i < n; i++)
-        mpz_init_set_ui(parts[i], 1);
-
-    // Phase 1 (sequential): resolve cbrt(p) for each factor via cache or powm.
-    // Cache lookups and appends are NOT thread-safe (realloc), so this phase
-    // must run sequentially. With a warm cache every call is a cheap array
-    // lookup (~0 ms total), so sequential cost is negligible.
-    mpz_t *cbrt_vals = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
-    for (int i = 0; i < n; i++)
-    {
-        mpz_init(cbrt_vals[i]);
-        unsigned long p_ul = mpz_get_ui(factors->items[i].prime);
-        int cache_idx = (cache && p_ul > 0)
-                            ? kf_cbrt_cache_find(cache, p_ul)
-                            : -1;
-
-        auto _ct0 = std::chrono::high_resolution_clock::now();
-        if (cache_idx >= 0)
-        {
-            mpz_set(cbrt_vals[i], cache->items[cache_idx].cbrt);
-            auto _ct1 = std::chrono::high_resolution_clock::now();
-            if (record && hit_ms_out)
-                *hit_ms_out += std::chrono::duration<double, std::milli>(_ct1 - _ct0).count();
-            if (record && hits_out)
-                (*hits_out)++;
-        }
-        else
-        {
-            mpz_t p_mpz;
-            mpz_init_set_ui(p_mpz, p_ul);
-            mpz_powm(cbrt_vals[i], p_mpz, e, modulo);
-            mpz_clear(p_mpz);
-            auto _ct1 = std::chrono::high_resolution_clock::now();
-            if (record && miss_ms_out)
-                *miss_ms_out += std::chrono::duration<double, std::milli>(_ct1 - _ct0).count();
-            if (record && misses_out)
-                (*misses_out)++;
-
-            if (cache && p_ul > 0)
-            {
-                kf_cbrt_cache_append(cache, p_ul, cbrt_vals[i]);
-                if (cache_dirty)
-                    *cache_dirty = true;
-            }
-        }
-    }
-
-    // Phase 2 (parallel): parts[i] = cbrt_vals[i]^exponent mod M.
-    // Each iteration reads only its own independent cbrt_vals[i] slot.
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-    for (int i = 0; i < n; i++)
-    {
-        if (factors->items[i].exponent == 1)
-            mpz_set(parts[i], cbrt_vals[i]);
-        else
-            mpz_powm_ui(parts[i], cbrt_vals[i],
-                        (unsigned long)factors->items[i].exponent, modulo);
-    }
-
-    for (int i = 0; i < n; i++)
-        mpz_clear(cbrt_vals[i]);
-    free(cbrt_vals);
-
-    // Combine partial products sequentially.
-    mpz_set_ui(result, 1);
-    for (int i = 0; i < n; i++)
-    {
-        mpz_mul(result, result, parts[i]);
-        mpz_mod(result, result, modulo);
-        mpz_clear(parts[i]);
-    }
-    free(parts);
-}
-
 // Timing report: print_timing_stat_moments() from k_common.h at width 30.
 // print_stat() is a thin wrapper kept for call-site readability.
 #define print_stat(lbl, sum, sumsq, n) print_timing_stat_moments(lbl, sum, sumsq, n, 30, true)
@@ -252,7 +122,8 @@ static int solve_one(
     const char *challenge_file, const char *modulo_file,
     int bench_count, int sp_count, const unsigned *sp,
     uint64_t my_lo, uint64_t my_hi,
-    run_method_t method, const char *primes_file,
+    run_method_t method,
+    const char *primes_upper_file = nullptr,
     const char *json_output_file = nullptr)
 {
     if (rank == 0)
@@ -294,26 +165,6 @@ static int solve_one(
     // Each rank loads only its [my_lo, my_hi] slice via binary search on the
     // sorted prime file — no full 800+ MB read per rank.
 
-    uint32_t *prime_slice = NULL;
-    int64_t slice_count = 0;
-
-    if (method == METHOD_TABLE)
-    {
-        uint64_t sc = 0;
-        prime_slice = kf_load_prime_slice(&sc, primes_file,
-                                          (uint32_t)my_lo, (uint32_t)my_hi);
-        slice_count = (int64_t)sc;
-        if (!prime_slice)
-        {
-            fprintf(stderr, "[rank %d] Failed to load prime slice from %s\n",
-                    rank, primes_file);
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-        if (rank == 0)
-            printf("Rank 0 slice: %" PRId64 " primes\n", slice_count);
-        fflush(stdout);
-    }
-
     // Fixed-size byte buffer for partial cbrt export (big-endian, zero-padded).
     // Size is the same on all ranks since modulo is broadcast.
     size_t cbrt_bytes = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1; // +1 safety
@@ -341,7 +192,7 @@ static int solve_one(
         if (blen >= 4 && strcmp(stem + blen - 4, ".txt") == 0)
             stem[blen - 4] = '\0';
         snprintf(cbrt_cache_path, sizeof(cbrt_cache_path),
-                 "%s/%s.cbrt.%d", KSC_CBRT_DIR, stem, rank);
+                 "%s/%s.cbrt35.%d", KSC_CBRT_DIR, stem, rank);
     }
 
     cbrt_cache_t local_cbrt_cache;
@@ -351,12 +202,11 @@ static int solve_one(
     // Guarantee cbrt cache is fully populated before any timed run.
     // If the file exists it is loaded; otherwise one untimed factoring
     // pass is run to compute all needed cbrt values and save them.
-    ksc_ensure_k32_cbrt(
+    ksc_ensure_k35_cbrt(
         &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
         challenge, modulo, e_inv,
         my_lo, my_hi, sp_count, sp,
-        prime_slice, slice_count,
-        rank, nranks, method == METHOD_TABLE ? 1 : 0);
+        rank, nranks);
 
     // Blinding pair table — precomputed on rank 0 only (Algorithm 2 precomputation).
     // Rank 0 uses table[attempt-1].r3 to compute the blinded challenge and
@@ -395,11 +245,41 @@ static int solve_one(
     n_threads_json = omp_get_max_threads();
 #endif
     benchmark_results_t json_results;
-    const char *mname32 = (method == METHOD_TABLE)  ? "table"
+    const char *mname35 = (method == METHOD_TABLE)  ? "table"
                           : (method == METHOD_POWM) ? "powm"
                                                     : "sieve";
-    ksc_init_json_results(&json_results, 32, bench_count, mname32,
+    ksc_init_json_results(&json_results, 35, bench_count, mname35,
                           nranks, n_threads_json, challenge, rank);
+
+    // ---- Load k35 prime slices for --method table ----
+    uint32_t *k32_slice = nullptr;
+    uint64_t k32_slice_count = 0;
+    uint64_t *k35u_slice = nullptr;
+    int64_t k35u_slice_count = 0;
+    if (method == METHOD_TABLE && primes_upper_file)
+    {
+        const char *k32_path = ksc_ensure_k32_primes(sp_count, sp, rank);
+        // Lower slice [65537, UINT32_MAX]: only for ranks whose range overlaps it.
+        // Ranks with my_lo > UINT32_MAX are entirely in the upper range — do NOT
+        // cast my_lo to uint32_t (wraps) and do NOT load a spurious k32 slice.
+        if (my_lo <= (uint64_t)UINT32_MAX)
+        {
+            uint64_t k32_hi = std::min(my_hi, (uint64_t)UINT32_MAX);
+            k32_slice = kf_load_prime_slice(&k32_slice_count, k32_path,
+                                            (uint32_t)my_lo, (uint32_t)k32_hi);
+        }
+        // Upper slice (UINT32_MAX, RANGE_HI]: only for ranks whose range overlaps it.
+        if (my_hi > (uint64_t)UINT32_MAX)
+        {
+            uint64_t k35u_lo = std::max(my_lo, (uint64_t)UINT32_MAX + 1);
+            k35u_slice = kf_load_prime_slice_u64(&k35u_slice_count,
+                                                 primes_upper_file,
+                                                 k35u_lo, my_hi);
+        }
+        if (rank == 0)
+            printf("Table slices: k32=%lld  k35u=%lld primes\n",
+                   (long long)k32_slice_count, (long long)k35u_slice_count);
+    }
 
     // ---- 2 warmup runs (silent, primes CPU caches before bench loop) ----
     // Runs the full factoring + reconstruction pipeline twice without
@@ -409,8 +289,8 @@ static int solve_one(
     {
         for (int wu = 0; wu < 2; wu++)
         {
-            factor_list_t wu_factors;
-            fl_init(&wu_factors);
+            kfactor_list_t wu_factors;
+            kfl_init(&wu_factors);
             // Blind and broadcast challenge (same as bench loop, r=1)
             size_t wu_nb = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
             unsigned char *wu_buf = (unsigned char *)calloc(wu_nb, 1);
@@ -430,16 +310,13 @@ static int solve_one(
             mpz_init(wu_ch);
             mpz_import(wu_ch, wu_nb, 1, 1, 0, 0, wu_buf);
             free(wu_buf);
-            if (method == METHOD_SIEVE)
-                kf_trial_divide_sieve(wu_ch, my_lo, my_hi, sp_count, sp, &wu_factors);
-            else
-                kf_trial_divide_table(wu_ch, prime_slice, slice_count, &wu_factors);
+            kf_trial_divide_sieve(wu_ch, my_lo, my_hi, sp_count, sp, &wu_factors);
             mpz_t wu_cbrt;
             mpz_init(wu_cbrt);
             // dummy cbrt (populates cache on first warmup)
             bool wu_dirty = false;
             auto wu_t0 = std::chrono::high_resolution_clock::now();
-            compute_local_cbrt(wu_cbrt, &wu_factors, e_inv, modulo,
+            ksc_compute_local_cbrt(wu_cbrt, &wu_factors, e_inv, modulo,
                                &local_cbrt_cache, &wu_dirty);
             auto wu_t1 = std::chrono::high_resolution_clock::now();
             if (wu_dirty)
@@ -448,7 +325,7 @@ static int solve_one(
                 json_results.warmup_total_ms.push_back(
                     std::chrono::duration<double, std::milli>(wu_t1 - wu_t0).count());
             mpz_clears(wu_ch, wu_cbrt, NULL);
-            fl_free(&wu_factors);
+            kfl_free(&wu_factors);
             MPI_Barrier(MPI_COMM_WORLD);
         }
     }
@@ -458,8 +335,8 @@ static int solve_one(
     for (int bench = 0; bench < bench_count && method != METHOD_POWM; bench++)
     {
 
-        factor_list_t local_factors;
-        fl_init(&local_factors);
+        kfactor_list_t local_factors;
+        kfl_init(&local_factors);
         // Per-iteration components at rank 0 — used for correct recon stddev
         double iter_gat = 0.0, iter_com = 0.0;
 
@@ -535,13 +412,49 @@ static int solve_one(
                            blinded_buf);
 
             // -- All ranks factor their slice of blinded_challenge --
-            fl_free(&local_factors);
-            fl_init(&local_factors);
+            kfl_free(&local_factors);
+            kfl_init(&local_factors);
 
+            // Small primes [2, RANGE_LO) — rank 0 only.
+            // The sieve starts at RANGE_LO=65537. Challenges with bitbound=35 can
+            // include factors < 65537 because nextprime of a small random value may
+            // land below the sieve floor. Rank 0 checks this range; other ranks
+            // skip it so small-prime cbrt is contributed exactly once.
+            if (rank == 0)
+            {
+                for (int si = 0; si < sp_count && (uint64_t)sp[si] < RANGE_LO; si++)
+                {
+                    unsigned long p = (unsigned long)sp[si];
+                    if (mpz_divisible_ui_p(blinded_challenge, p))
+                    {
+                        mpz_t tmp_c;
+                        mpz_init_set(tmp_c, blinded_challenge);
+                        int e = 0;
+                        while (mpz_divisible_ui_p(tmp_c, p))
+                        {
+                            mpz_divexact_ui(tmp_c, tmp_c, p);
+                            e++;
+                        }
+                        mpz_clear(tmp_c);
+                        kfl_append_ul(&local_factors, p, e);
+                    }
+                }
+            }
+
+            // Table method: two-slice trial division
+            if (method == METHOD_TABLE)
+            {
+                if (k32_slice && k32_slice_count > 0)
+                    kf_trial_divide_table(blinded_challenge,
+                                          k32_slice, k32_slice_count,
+                                          &local_factors);
+                if (k35u_slice && k35u_slice_count > 0)
+                    kf_trial_divide_table_u64(blinded_challenge,
+                                              k35u_slice, k35u_slice_count,
+                                              &local_factors);
+            }
+            // Sieve method: OMP-parallel on-the-fly sieve
             if (method == METHOD_SIEVE)
-                kf_trial_divide_sieve(blinded_challenge, my_lo, my_hi,
-                                      sp_count, sp, &local_factors);
-            else
             {
                 int nT = 1;
 #ifdef _OPENMP
@@ -550,11 +463,11 @@ static int solve_one(
                 bool do_thr = (bench == 1 && rank == 0);
                 std::vector<int64_t> thr_tested(do_thr ? nT : 0, 0);
                 std::vector<int> thr_found(do_thr ? nT : 0, 0);
-                kf_trial_divide_table(blinded_challenge, prime_slice,
-                                      slice_count, &local_factors,
+                kf_trial_divide_sieve(blinded_challenge, my_lo, my_hi,
+                                      sp_count, sp, &local_factors,
                                       do_thr ? thr_tested.data() : nullptr,
                                       do_thr ? thr_found.data() : nullptr,
-                                      do_thr ? nT : 0);
+                                      nT); // always pass nT for OMP parallelism
                 if (do_thr)
                 {
                     json_results.thread_primes_tested.insert(
@@ -673,7 +586,7 @@ static int solve_one(
         double cbrt_hit_ms = 0.0, cbrt_miss_ms = 0.0;
         int cbrt_hits = 0, cbrt_misses = 0;
         bool record_cbrt = (bench > 0); // only warm runs
-        compute_local_cbrt(local_cbrt, &local_factors, e_inv, modulo,
+        ksc_compute_local_cbrt(local_cbrt, &local_factors, e_inv, modulo,
                            &local_cbrt_cache, &cbrt_cache_dirty,
                            &cbrt_hit_ms, &cbrt_miss_ms,
                            &cbrt_hits, &cbrt_misses, record_cbrt);
@@ -712,28 +625,13 @@ static int solve_one(
         // for slower ranks to finish their local cbrt.
         MPI_Barrier(MPI_COMM_WORLD);
 
-        // Step 2 — export local_cbrt to a fixed-size big-endian byte buffer.
-        //   Zero-pad at the front (MSB side) so all buffers are cbrt_bytes long.
-        unsigned char *local_buf = (unsigned char *)calloc(cbrt_bytes, 1);
-        {
-            size_t written = 0;
-            unsigned char *tmp = (unsigned char *)mpz_export(
-                NULL, &written, 1, 1, 0, 0, local_cbrt);
-            if (tmp && written > 0 && written <= cbrt_bytes)
-            {
-                memcpy(local_buf + cbrt_bytes - written, tmp, written);
-                free(tmp);
-            }
-        }
-        mpz_clear(local_cbrt);
-
         // Gather partial cbrt products and combine at rank 0
         double iter_gat2 = 0.0, iter_com2 = 0.0;
         ksc_gather_and_combine_cbrt(result, local_cbrt, modulo, cbrt_bytes,
                                     rank, nranks, attempt,
                                     blind_table, BLIND_TABLE_SIZE,
                                     &iter_gat2, &iter_com2);
-        free(local_buf);
+        mpz_clear(local_cbrt);
         if (rank == 0)
         {
             accum_record(&gat_acc, iter_gat2);
@@ -761,7 +659,7 @@ static int solve_one(
             }
         }
 
-        fl_free(&local_factors);
+        kfl_free(&local_factors);
     }
 
     // ---- Timing report (rank 0 only) ----
@@ -793,16 +691,36 @@ static int solve_one(
         // Sequential powm baseline + speedup report
         ksc_run_and_report_powm_baseline(&json_results, challenge, modulo,
                                          bench_count, &recon_acc, &fac_acc, rank);
+        // For METHOD_POWM the bench loop is skipped; run powm once to set result.
+        if (method == METHOD_POWM)
+            run_powm_baseline(result, challenge, modulo, 1, 0);
         // Verify
         mpz_t challenge_mod;
         mpz_init(challenge_mod);
         mpz_mod(challenge_mod, challenge, modulo);
+        // Diagnostic: check result^3 mod M
+        {
+            mpz_t cube;
+            mpz_init(cube);
+            mpz_powm_ui(cube, result, 3, modulo);
+            if (mpz_cmp(cube, challenge_mod) != 0)
+            {
+                printf("DEBUG: result^3 mod M = ");
+                mpz_out_str(stdout, 16, cube);
+                printf("\nDEBUG: challenge mod M = ");
+                mpz_out_str(stdout, 16, challenge_mod);
+                printf("\nDEBUG: result = ");
+                mpz_out_str(stdout, 16, result);
+                printf("\n");
+                fflush(stdout);
+            }
+            mpz_clear(cube);
+        }
         verify_cube_root(result, challenge_mod, modulo);
         mpz_clear(challenge_mod);
         fflush(stdout);
     }
 
-    free(prime_slice);
     mpz_clear(blinded_challenge);
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
@@ -810,6 +728,10 @@ static int solve_one(
     // Save per-rank cbrt cache if new entries were computed this run.
     if (cbrt_cache_dirty)
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
+    if (k32_slice)
+        free(k32_slice);
+    if (k35u_slice)
+        free(k35u_slice);
     kf_cbrt_cache_clear(&local_cbrt_cache);
 
     mpz_clear(e_inv);
@@ -844,12 +766,10 @@ int main(int argc, char *argv[])
 
     const char *challenge_file = NULL;
     const char *modulo_file = NULL;
-    const char *data_dir = "data/challenges/k32";
-    const char *primes_file = "k32_primes.bin";
+    const char *data_dir = "data/challenges/k35";
     const char *json_file = NULL;
     int bench_count = 1;
     int run_all = 0;
-    int do_precompute = 0;
     run_method_t method = METHOD_SIEVE;
 
     int positional = 0;
@@ -879,22 +799,14 @@ int main(int argc, char *argv[])
             else
             {
                 if (rank == 0)
-                    fprintf(stderr, "Unknown --method '%s' (use sieve, table, or powm)\n", m);
+                    fprintf(stderr, "Unknown --method '%s' (use sieve|table|powm)\n", m);
                 MPI_Finalize();
                 return 1;
             }
         }
-        else if (strcmp(argv[argi], "--primes") == 0 && argi + 1 < argc)
-        {
-            primes_file = argv[++argi];
-        }
         else if (strcmp(argv[argi], "--json") == 0 && argi + 1 < argc)
         {
             json_file = argv[++argi];
-        }
-        else if (strcmp(argv[argi], "--precompute") == 0)
-        {
-            do_precompute = 1;
         }
         else if (argv[argi][0] != '-')
         {
@@ -925,28 +837,27 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (!run_all && !do_precompute && (!challenge_file || !modulo_file))
+    if (!run_all && (!challenge_file || !modulo_file))
     {
         if (rank == 0)
             fprintf(stderr,
-                    "Usage: k32_mpi <challenge> <modulo> [--method sieve|table] [--bench N]\n"
-                    "       k32_mpi --all [--data DIR] [--method sieve|table] [--bench N]\n"
-                    "       k32_mpi --precompute [--primes FILE]\n");
+                    "Usage: k35_mpi <challenge> <modulo> [--method sieve|table] [--bench N]\n"
+                    "       k35_mpi --all [--data DIR] [--method sieve|table] [--bench N]\n");
         MPI_Finalize();
         return 1;
     }
 
     if (rank == 0)
     {
-        printf("=== k32_mpi ===\n");
+        printf("=== k35_mpi (B=2^35, paper Algorithm 2) ===\n");
         printf("MPI ranks:      %d\n", nranks);
 #ifdef _OPENMP
         printf("OMP threads:    %d per rank\n", omp_get_max_threads());
         printf("Total workers:  %d\n", nranks * omp_get_max_threads());
 #endif
         printf("Method:         %s\n",
-               method == METHOD_SIEVE   ? "sieve"
-               : method == METHOD_TABLE ? "table"
+               method == METHOD_TABLE   ? "table"
+               : method == METHOD_SIEVE ? "sieve"
                                         : "powm");
         if (bench_count > 1)
             printf("Benchmark runs: %d\n", bench_count);
@@ -956,12 +867,21 @@ int main(int argc, char *argv[])
     }
 
     // Small primes — every rank generates these independently (~0.1 ms, no Bcast)
-    int sp_count;
-    unsigned *sp = kf_generate_small_primes(&sp_count);
+    // k35: need small primes up to sqrt(2^35) ~ 2^17.5 -> generate up to 2^18
+    int sp_count = 0;
+    unsigned long *sp_ul = generate_primes_up_to(1UL << 18, &sp_count);
+    unsigned *sp = (unsigned *)malloc((size_t)sp_count * sizeof(unsigned));
+    for (int i = 0; i < sp_count; i++)
+        sp[i] = (unsigned)sp_ul[i];
+    free(sp_ul);
 
     // Partition [65537, 2^32] evenly across MPI ranks
-    const uint64_t RANGE_LO = 65537ULL;
-    const uint64_t RANGE_HI = (uint64_t)UINT32_MAX;
+    // RANGE_LO is a file-scope constant (defined above solve_one).
+    // RANGE_HI extends slightly above 2^35 to catch primes that mpz_nextprime
+    // places just above 2^35 (prime gap ≈ ln(2^35) ≈ 24; 1024 is a safe margin).
+    // The new challenges.c fixes this at source, but existing challenge files
+    // on disk may contain such primes, so the sieve covers them here too.
+    const uint64_t RANGE_HI = (1ULL << 35) + 1024; // B ≈ 2^35 (paper Algorithm 2)
     const uint64_t range_size = RANGE_HI - RANGE_LO + 1;
 
     uint64_t my_lo = RANGE_LO + (range_size * (uint64_t)rank) / (uint64_t)nranks;
@@ -983,47 +903,28 @@ int main(int argc, char *argv[])
         (void)i;
 #endif
 
-    // --precompute: rank 0 generates the prime table file; all ranks then exit
-    if (do_precompute)
-    {
-        if (rank == 0)
-        {
-            int sp2;
-            unsigned *sp2_arr = kf_generate_small_primes(&sp2);
-            kf_generate_and_save_prime_table(primes_file, sp2, sp2_arr, "[rank 0] ");
-            free(sp2_arr);
-        }
-        free(sp);
-        MPI_Finalize();
-        return 0;
-    }
-
-    // --method table: rank 0 generates the prime file if it doesn't yet exist,
-    // then all ranks wait before each loading their own slice inside solve_one.
-    if (method == METHOD_TABLE)
-    {
-        // Ensure data/k32_primes.bin exists; generates if absent (rank 0 only)
-        primes_file = ksc_ensure_k32_primes(sp_count, sp, rank);
-    }
-
     if (run_all)
     {
-        // Run all four standard challenge sizes in one MPI execution.
-        // Avoids multiple srun calls in the SLURM script (causes reinit hangs).
-        const char *sizes[] = {"1024", "2048", "5000", "7000"};
-        for (int s = 0; s < 4; s++)
+        const char *sizes[] = {"16384", "20480", "24576"};
+        for (int s = 0; s < 3; s++)
         {
             char cf[512], mf[512];
-            snprintf(cf, sizeof(cf), "%s/challenge_32_%s.txt", data_dir, sizes[s]);
-            snprintf(mf, sizeof(mf), "%s/modulo_32_%s.txt", data_dir, sizes[s]);
+            snprintf(cf, sizeof(cf), "%s/challenge_0_35_%s.txt", data_dir, sizes[s]);
+            snprintf(mf, sizeof(mf), "%s/modulo_35_%s.txt", data_dir, sizes[s]);
+            const char *k35u_p2 = (method == METHOD_TABLE)
+                                      ? ksc_ensure_k35_primes(sp_count, sp, rank)
+                                      : nullptr;
             solve_one(rank, nranks, cf, mf, bench_count,
-                      sp_count, sp, my_lo, my_hi, method, primes_file, json_file);
+                      sp_count, sp, my_lo, my_hi, method, k35u_p2, json_file);
         }
     }
     else
     {
+        const char *k35u_path = (method == METHOD_TABLE)
+                                    ? ksc_ensure_k35_primes(sp_count, sp, rank)
+                                    : nullptr;
         solve_one(rank, nranks, challenge_file, modulo_file, bench_count,
-                  sp_count, sp, my_lo, my_hi, method, primes_file, json_file);
+                  sp_count, sp, my_lo, my_hi, method, k35u_path, json_file);
     }
 
     free(sp);
