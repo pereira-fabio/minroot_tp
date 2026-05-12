@@ -86,11 +86,12 @@ def snap_to_nominal(bits):
     return min(NOMINAL_SIZES, key=lambda n: abs(n - bits))
 
 def dedup_datasets(datasets):
-    """After snapping, drop duplicate (config_key, challenge_bits) pairs."""
+    """After snapping, drop duplicate (config_key, challenge_bits) pairs.
+    When duplicates exist, prefer the dataset with hit_stats (richer run)."""
     seen = {}
     for d in datasets:
         key = (config_key(d), d["metadata"]["challenge_bits"])
-        if key not in seen:
+        if key not in seen or ("hit_stats" in d and "hit_stats" not in seen[key]):
             seen[key] = d
     return list(seen.values())
 
@@ -103,7 +104,7 @@ K_COLORS = {
 ALG3_COLOR = ("#d62728", "D")   # red diamond — distinct from k32
 
 def is_alg3(d):
-    return "hit_stats" in d
+    return d.get("_source_algo") == "alg3" or "hit_stats" in d
 
 def algo_name(d):
     return "alg3" if is_alg3(d) else f"k{d['metadata']['k_size']}"
@@ -122,11 +123,17 @@ OUTPUT_FMT = "png"   # overwritten in main() from --format
 
 def load_file(path):
     with open(path) as f:
-        return json.load(f)
+        d = json.load(f)
+    # Inject stable algorithm identity from filename so alg3 files without
+    # hit_stats (old runs) are not misclassified as k32.
+    basename = os.path.basename(path)
+    if basename.startswith("alg3_"):
+        d["_source_algo"] = "alg3"
+    return d
 
 def config_key(d):
     """Unique key: (algo, method, mpi_ranks).  alg3 and k32 share k_size=32 but
-    are distinguished by the presence of hit_stats in the JSON."""
+    are distinguished by hit_stats or the _source_algo tag injected at load time."""
     m = d["metadata"]
     return (algo_name(d), m["method"], m["mpi_ranks"])
 
@@ -713,7 +720,7 @@ def plot_hit_stats(datasets, out_dir):
     for alg3 results at the maximum rank count."""
     max_ranks = max(d["metadata"]["mpi_ranks"] for d in datasets)
     alg3_data = sorted(
-        [d for d in datasets if is_alg3(d)
+        [d for d in datasets if is_alg3(d) and "hit_stats" in d
          and d["metadata"]["method"] == "sieve"
          and d["metadata"]["mpi_ranks"] == max_ranks],
         key=lambda d: d["metadata"]["challenge_bits"],
