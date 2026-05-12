@@ -338,8 +338,12 @@ static int solve_one(
                        local_factors.count, attempt + 1);
                 fflush(stdout);
             }
-            if (bench > 0)
+            if (bench > 0) {
                 json_results.blinding_attempts.push_back(attempt + 1);
+                // ALG3: record cofactor classification for hit-rate analysis
+                json_results.hit_type.push_back(mpz_cmp_ui(cofactor, 1) == 0 ? 1 : 2);
+                json_results.cofactor_bits.push_back((int)mpz_sizeinbase(cofactor, 2));
+            }
         }
 
         // ---- DISTRIBUTED RECONSTRUCTION ----

@@ -519,6 +519,28 @@ void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
         fprintf(f, "  },\n");
     }
 
+    // alg3 hit classification (absent for k16/k32/k35)
+    if (!res.hit_type.empty())
+    {
+        int n_smooth = 0, n_almost = 0;
+        for (int v : res.hit_type) { if (v == 1) n_smooth++; else n_almost++; }
+
+        fprintf(f, "  \"hit_stats\": {\n");
+        fprintf(f, "    \"smooth_count\": %d,\n", n_smooth);
+        fprintf(f, "    \"almost_smooth_count\": %d,\n", n_almost);
+        fprintf(f, "    \"hit_type\": [");
+        for (size_t i = 0; i < res.hit_type.size(); i++)
+            fprintf(f, "%d%s", res.hit_type[i],
+                    i == res.hit_type.size() - 1 ? "" : ", ");
+        fprintf(f, "],\n");
+        fprintf(f, "    \"cofactor_bits\": [");
+        for (size_t i = 0; i < res.cofactor_bits.size(); i++)
+            fprintf(f, "%d%s", res.cofactor_bits[i],
+                    i == res.cofactor_bits.size() - 1 ? "" : ", ");
+        fprintf(f, "]\n");
+        fprintf(f, "  },\n");
+    }
+
     // Per-thread load balance
     if (!res.thread_primes_tested.empty())
     {
