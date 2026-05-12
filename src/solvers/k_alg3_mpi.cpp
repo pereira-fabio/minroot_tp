@@ -173,7 +173,8 @@ static int solve_one(
     n_threads_json = omp_get_max_threads();
 #endif
     benchmark_results_t json_results;
-    ksc_init_json_results(&json_results, 32, bench_count, "sieve",
+    const char *mname = (method == METHOD_POWM) ? "powm" : "sieve";
+    ksc_init_json_results(&json_results, 32, bench_count, mname,
                           nranks, n_threads_json, challenge, rank);
 
     // ---- 2 warmup runs ----
