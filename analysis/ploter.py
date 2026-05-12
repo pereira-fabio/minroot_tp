@@ -22,7 +22,9 @@ Figures:
     07_rank_load_balance_<N>b.png   primes found per MPI rank
     09_strong_scaling_k<K>_<M>.png  time & speedup vs MPI ranks (per algo/method)
     10_parallel_efficiency.png      scaling efficiency vs ranks
-    11_algorithm_comparison_<M>.png k16 vs k32 vs k35 speedup at max ranks
+    11_algorithm_comparison_<M>.png k16 vs k32 vs k35 vs alg3 speedup at max ranks
+    12_alg3_hit_stats.png           smooth vs almost-smooth classification + q₀ bit distribution
+    13_effective_speedup.png        inversions-per-unit-time × success-probability vs k32 baseline
 """
 
 import json
@@ -78,7 +80,7 @@ BAR_COLORS = {
 # bitbound bits smaller than the requested target (e.g. 237 instead of 256 for k16).
 # All actual values are snapped to the nearest nominal before plotting so that
 # k16/k32/k35 share the same x-axis positions for the same "challenge size".
-NOMINAL_SIZES = [256, 512, 1024, 2048, 4096, 6144, 8192, 12288, 16384, 20480, 24576]
+NOMINAL_SIZES = [256, 512, 1024, 2048, 4096, 6144, 7000, 8192, 12288, 16384, 20480, 24576]
 
 def snap_to_nominal(bits):
     return min(NOMINAL_SIZES, key=lambda n: abs(n - bits))
@@ -92,11 +94,26 @@ def dedup_datasets(datasets):
             seen[key] = d
     return list(seen.values())
 
-# Fixed colors per k-size for algorithm comparison plots
+# Fixed colors per algorithm for comparison plots
 K_COLORS = {
     16: ("#1f77b4", "o"),
     32: ("#ff7f0e", "s"),
     35: ("#2ca02c", "^"),
+}
+ALG3_COLOR = ("#d62728", "D")   # red diamond — distinct from k32
+
+def is_alg3(d):
+    return "hit_stats" in d
+
+def algo_name(d):
+    return "alg3" if is_alg3(d) else f"k{d['metadata']['k_size']}"
+
+# Theoretical success probabilities from Biryukov et al. (CRYPTO 2024)
+P_THEORY = {
+    "k16":  2**(-16.0),
+    "k32":  2**(-24.9),
+    "k35":  2**(-21.0),
+    "alg3": 2**(-18.0),
 }
 
 OUTPUT_FMT = "png"   # overwritten in main() from --format
@@ -108,15 +125,15 @@ def load_file(path):
         return json.load(f)
 
 def config_key(d):
-    """Unique key: (k_size, method, mpi_ranks).  Includes rank count so that
-    N1/N2/N4/N8/N16 runs of the same algorithm are treated as separate configs."""
+    """Unique key: (algo, method, mpi_ranks).  alg3 and k32 share k_size=32 but
+    are distinguished by the presence of hit_stats in the JSON."""
     m = d["metadata"]
-    return (m["k_size"], m["method"], m["mpi_ranks"])
+    return (algo_name(d), m["method"], m["mpi_ranks"])
 
 def config_label(d):
     m = d["metadata"]
     r, t = m["mpi_ranks"], m["threads_per_rank"]
-    return f"k{m['k_size']} {m['method']} ({r}R×{t}T)"
+    return f"{algo_name(d)} {m['method']} ({r}R×{t}T)"
 
 def group_by_config(datasets):
     """dict[(k_size, method, mpi_ranks)] -> list[datasets], sorted by challenge_bits."""
@@ -132,14 +149,14 @@ def filter_by_ranks(groups, target_ranks):
     return {k: v for k, v in groups.items() if k[2] == target_ranks}
 
 def group_for_scaling(datasets):
-    """dict[(k_size, method)] -> dict[mpi_ranks] -> list[datasets sorted by bits].
+    """dict[(algo, method)] -> dict[mpi_ranks] -> list[datasets sorted by bits].
     Powm method excluded — it doesn't benefit from more ranks."""
     result = defaultdict(lambda: defaultdict(list))
     for d in datasets:
         m = d["metadata"]
         if m["method"] == "powm":
             continue
-        result[(m["k_size"], m["method"])][m["mpi_ranks"]].append(d)
+        result[(algo_name(d), m["method"])][m["mpi_ranks"]].append(d)
     for km, rank_dict in result.items():
         for r in rank_dict:
             rank_dict[r].sort(key=lambda d: d["metadata"]["challenge_bits"])
@@ -478,7 +495,7 @@ def plot_strong_scaling(datasets, out_dir):
     Four representative challenge sizes shown as separate lines."""
     scaling = group_for_scaling(datasets)
 
-    for (k_size, method), rank_dict in sorted(scaling.items()):
+    for (algo, method), rank_dict in sorted(scaling.items()):
         all_ranks = sorted(rank_dict.keys())
         if len(all_ranks) < 2:
             continue
@@ -534,17 +551,17 @@ def plot_strong_scaling(datasets, out_dir):
         ax1.set_yscale("log")
         apply_log_y_style(ax1, fmt=ms_fmt, subs=(1., 2., 5.))
         ax1.set_ylabel("Total time (ms)  [log scale]")
-        hint_title(ax1, f"k{k_size} {method}: Time vs Ranks", LOWER)
+        hint_title(ax1, f"{algo} {method}: Time vs Ranks", LOWER)
         ax1.legend(title="Challenge", fontsize=8)
 
         ax2.grid(axis="y", which="major", alpha=0.25, linewidth=0.6, color="grey")
         ax2.set_axisbelow(True)
         ax2.set_ylabel(f"Speedup over {r_ref} ranks")
-        hint_title(ax2, f"k{k_size} {method}: Strong Scaling", HIGHER)
+        hint_title(ax2, f"{algo} {method}: Strong Scaling", HIGHER)
         ax2.legend(title="Challenge", fontsize=8)
 
         save(fig,
-             os.path.join(out_dir, f"09_strong_scaling_k{k_size}_{method}.{OUTPUT_FMT}"),
+             os.path.join(out_dir, f"09_strong_scaling_{algo}_{method}.{OUTPUT_FMT}"),
              "")
 
 # ── Figure 10: Parallel efficiency vs ranks ────────────────────────────────────
@@ -558,7 +575,7 @@ def plot_parallel_efficiency(datasets, out_dir):
     fig, ax = plt.subplots(figsize=(9, 5))
     plotted = False
 
-    for idx, ((k_size, method), rank_dict) in enumerate(sorted(scaling.items())):
+    for idx, ((algo, method), rank_dict) in enumerate(sorted(scaling.items())):
         all_ranks = sorted(rank_dict.keys())
         if len(all_ranks) < 2:
             continue
@@ -584,7 +601,7 @@ def plot_parallel_efficiency(datasets, out_dir):
 
         col, mk = PALETTE[idx % len(PALETTE)]
         ax.plot(ranks, efficiency, marker=mk, color=col, linewidth=1.8,
-                markersize=6, label=f"k{k_size} {method} ({bits} bits)")
+                markersize=6, label=f"{algo} {method} ({bits} bits)")
         plotted = True
 
     if not plotted:
@@ -634,6 +651,7 @@ def plot_algorithm_comparison(datasets, out_dir):
             subset = sorted(
                 [d for d in datasets
                  if d["metadata"]["k_size"]    == k_size
+                 and not is_alg3(d)
                  and d["metadata"]["method"]   == method
                  and d["metadata"]["mpi_ranks"] == max_ranks],
                 key=lambda d: d["metadata"]["challenge_bits"],
@@ -650,6 +668,24 @@ def plot_algorithm_comparison(datasets, out_dir):
             ax2.plot(bits, speedup, marker=mk, color=col, linewidth=1.8,
                      markersize=6, label=f"k{k_size}")
 
+        # alg3 curve (same method, max ranks)
+        alg3_sub = sorted(
+            [d for d in datasets if is_alg3(d)
+             and d["metadata"]["method"]   == method
+             and d["metadata"]["mpi_ranks"] == max_ranks],
+            key=lambda d: d["metadata"]["challenge_bits"],
+        )
+        if alg3_sub:
+            col, mk = ALG3_COLOR
+            bits    = [d["metadata"]["challenge_bits"] for d in alg3_sub]
+            total   = [robust_mean(d, "total_ms") for d in alg3_sub]
+            speedup = [robust_speedup_total(d) for d in alg3_sub]
+            all_bits.extend(bits)
+            ax1.plot(bits, total,   marker=mk, color=col, linewidth=1.8,
+                     markersize=6, label="alg3")
+            ax2.plot(bits, speedup, marker=mk, color=col, linewidth=1.8,
+                     markersize=6, label="alg3")
+
         ax2.axhline(1, color="grey", linewidth=0.8, linestyle=":", label="breakeven")
 
         all_bits = sorted(set(all_bits))
@@ -663,12 +699,154 @@ def plot_algorithm_comparison(datasets, out_dir):
         apply_log_y_style(ax2)
         ax1.set_ylabel("Total time (ms)")
         ax2.set_ylabel("Speedup over sequential powm")
-        hint_title(ax1, f"k16 vs k32 vs k35 — {method}  ({max_ranks} ranks)", LOWER)
+        hint_title(ax1, f"k16 vs k32 vs k35 vs alg3 — {method}  ({max_ranks} ranks)", LOWER)
         hint_title(ax2, f"Speedup vs Sequential powm — {method}  ({max_ranks} ranks)", HIGHER)
 
         save(fig,
              os.path.join(out_dir, f"11_algorithm_comparison_{method}.{OUTPUT_FMT}"),
              "")
+
+# ── Figure 12: alg3 hit statistics ────────────────────────────────────────────
+
+def plot_hit_stats(datasets, out_dir):
+    """Stacked bar (smooth vs almost-smooth) and cofactor bit-size distribution
+    for alg3 results at the maximum rank count."""
+    max_ranks = max(d["metadata"]["mpi_ranks"] for d in datasets)
+    alg3_data = sorted(
+        [d for d in datasets if is_alg3(d)
+         and d["metadata"]["method"] == "sieve"
+         and d["metadata"]["mpi_ranks"] == max_ranks],
+        key=lambda d: d["metadata"]["challenge_bits"],
+    )
+    if not alg3_data:
+        return
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    sizes  = [d["metadata"]["challenge_bits"] for d in alg3_data]
+    x      = np.arange(len(sizes))
+    labels = [str(b) for b in sizes]
+
+    n_smooth  = [d["hit_stats"]["smooth_count"]        for d in alg3_data]
+    n_almost  = [d["hit_stats"]["almost_smooth_count"] for d in alg3_data]
+
+    ax1.bar(x, n_almost, label="almost-smooth (q₀ hit)",
+            color=BAR_COLORS["recon"])
+    ax1.bar(x, n_smooth, bottom=n_almost, label="B-smooth (all-small primes)",
+            color=BAR_COLORS["factor"])
+    for xi, ns, na in zip(x, n_smooth, n_almost):
+        total = ns + na
+        ax1.text(xi, total + 0.1, str(total), ha="center", va="bottom", fontsize=9)
+    ax1.set_xticks(x); ax1.set_xticklabels(labels, rotation=45, ha="right")
+    ax1.set_xlabel("Challenge size (bits)")
+    ax1.set_ylabel("Run count")
+    ax1.legend(framealpha=0.9)
+    hint_title(ax1, f"alg3 Hit Classification  ({max_ranks} ranks)", HIGHER)
+
+    # cofactor bit-size distribution (right subplot)
+    for xi, d in zip(x, alg3_data):
+        cbits = d["hit_stats"].get("cofactor_bits", [])
+        if not cbits:
+            continue
+        cbits_np = np.array(cbits, dtype=float)
+        # filter out cofactor_bits == 1 (B-smooth runs contribute no q₀)
+        cbits_np = cbits_np[cbits_np > 1]
+        if len(cbits_np) == 0:
+            continue
+        ax2.errorbar(xi, cbits_np.mean(),
+                     yerr=[[cbits_np.mean() - cbits_np.min()],
+                            [cbits_np.max() - cbits_np.mean()]],
+                     fmt="o", color=ALG3_COLOR[0], capsize=4)
+
+    ax2.axhline(33, color="grey", linewidth=0.8, linestyle="--", label="min q₀ (33 bits)")
+    ax2.axhline(64, color="grey", linewidth=0.8, linestyle=":",  label="max q₀ (64 bits)")
+    ax2.set_xticks(x); ax2.set_xticklabels(labels, rotation=45, ha="right")
+    ax2.set_xlabel("Challenge size (bits)")
+    ax2.set_ylabel("q₀ bit size  (mean ± range)")
+    ax2.set_ylim(0, 80)
+    ax2.legend(framealpha=0.9)
+    hint_title(ax2, "Medium Prime q₀ Bit-Size Distribution", HIGHER)
+
+    fig.tight_layout()
+    save(fig, os.path.join(out_dir, f"12_alg3_hit_stats.{OUTPUT_FMT}"), "")
+
+# ── Figure 13: effective throughput comparison ─────────────────────────────────
+
+def plot_effective_speedup(datasets, out_dir):
+    """Inversions-per-powm-unit × p_success, normalised to k32 = 1.0.
+    Shows the comparative advantage of each algorithm accounting for success
+    probability from Biryukov et al. (CRYPTO 2024)."""
+    max_ranks = max(d["metadata"]["mpi_ranks"] for d in datasets)
+    method    = "sieve"
+
+    # Build per-algo curves: eff_rate = speedup_total * P_THEORY[algo]
+    curves = {}
+    for k_size in [16, 32, 35]:
+        subset = sorted(
+            [d for d in datasets
+             if d["metadata"]["k_size"]    == k_size
+             and not is_alg3(d)
+             and d["metadata"]["method"]   == method
+             and d["metadata"]["mpi_ranks"] == max_ranks],
+            key=lambda d: d["metadata"]["challenge_bits"],
+        )
+        if not subset:
+            continue
+        p = P_THEORY.get(f"k{k_size}", 0)
+        curves[f"k{k_size}"] = {
+            "bits":     [d["metadata"]["challenge_bits"] for d in subset],
+            "eff_rate": [robust_speedup_total(d) * p for d in subset],
+            "color":    K_COLORS[k_size][0],
+            "marker":   K_COLORS[k_size][1],
+        }
+
+    alg3_sub = sorted(
+        [d for d in datasets if is_alg3(d)
+         and d["metadata"]["method"]   == method
+         and d["metadata"]["mpi_ranks"] == max_ranks],
+        key=lambda d: d["metadata"]["challenge_bits"],
+    )
+    if alg3_sub:
+        p = P_THEORY["alg3"]
+        curves["alg3"] = {
+            "bits":     [d["metadata"]["challenge_bits"] for d in alg3_sub],
+            "eff_rate": [robust_speedup_total(d) * p for d in alg3_sub],
+            "color":    ALG3_COLOR[0],
+            "marker":   ALG3_COLOR[1],
+        }
+
+    if "k32" not in curves:
+        return
+
+    # Normalise each curve against k32 effective rate at shared sizes
+    k32_lookup = dict(zip(curves["k32"]["bits"], curves["k32"]["eff_rate"]))
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    all_bits = []
+    for label, c in curves.items():
+        norm = []
+        for b, r in zip(c["bits"], c["eff_rate"]):
+            if b in k32_lookup and k32_lookup[b] > 0:
+                norm.append((b, r / k32_lookup[b]))
+        if not norm:
+            continue
+        bx, ny = zip(*norm)
+        all_bits.extend(bx)
+        ax.plot(bx, ny, marker=c["marker"], color=c["color"],
+                linewidth=1.8, markersize=6, label=label)
+
+    ax.axhline(1.0, color="grey", linewidth=0.8, linestyle="--", label="k32 baseline")
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    set_size_ticks(ax, sorted(set(all_bits)))
+    apply_log_y_style(ax)
+    ax.set_xlabel("Challenge size (bits)")
+    ax.set_ylabel("Effective inversions / k32 (= speedup_total × p_success, normalised)")
+    ax.legend(framealpha=0.9)
+    hint_title(ax,
+        f"Effective Throughput vs k32 Baseline  ({max_ranks} ranks, sieve)",
+        HIGHER)
+    fig.tight_layout()
+    save(fig, os.path.join(out_dir, f"13_effective_speedup.{OUTPUT_FMT}"), "")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -750,6 +928,8 @@ def main():
 
     # ── Cross-algorithm comparison ──
     plot_algorithm_comparison(datasets, args.out)
+    plot_hit_stats(datasets, args.out)
+    plot_effective_speedup(datasets, args.out)
 
     n_out = len([f for f in os.listdir(args.out)
                  if f.endswith(f".{OUTPUT_FMT}")])
