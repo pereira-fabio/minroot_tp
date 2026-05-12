@@ -125,7 +125,38 @@ generate_group 35 &
 
 wait
 echo ""
-echo "All groups done."
+echo "k16/k32/k35 groups done."
+
+# ---------------------------------------------------------------------------
+# ALG3 group — runs after the three existing groups to avoid CPU contention.
+# Uses all available threads since nothing else is running.
+#
+# Sizes chosen to match the alg3_mpi --all set plus a few extras.
+# Modulo files are written to data/challenges/alg3/ (isolated namespace).
+# ---------------------------------------------------------------------------
+SIZES_ALG3="256 512 1024 2048 4096 7000"
+N_SIZES_ALG3=$(echo $SIZES_ALG3 | wc -w)
+
+echo "============================================================"
+echo "Launching alg3 group: ${N_SIZES_ALG3} sizes × ${NUM_CHALLENGES} challenges"
+echo "  Sizes:   $SIZES_ALG3"
+echo "  Threads: ${SLURM_CPUS_PER_TASK} (all available)"
+echo "============================================================"
+echo ""
+
+for SIZE in $SIZES_ALG3; do
+    echo "  [alg3] bittarget=${SIZE}..."
+    OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK} ./challenges $NUM_CHALLENGES $SIZE 32 alg3
+    RET=$?
+    if [ $RET -eq 0 ]; then
+        echo "  [alg3] ${SIZE} bits DONE"
+    else
+        echo "  [alg3] ${SIZE} bits FAILED (exit ${RET})"
+    fi
+done
+
+echo ""
+echo "alg3 group done."
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -138,6 +169,8 @@ for KB in 16 32 35; do
     echo "  data/challenges/k${KB}/"
     ls data/challenges/k${KB}/ 2>/dev/null | sed 's/^/    /'
 done
+echo "  data/challenges/alg3/"
+ls data/challenges/alg3/ 2>/dev/null | sed 's/^/    /'
 echo ""
 echo "Job ID: $SLURM_JOB_ID"
 echo "============================================================"

@@ -30,8 +30,10 @@
 
 void print_usage(void)
 {
-	printf("Usage:\n  challenges <num_challenges> <modulo_bits> <smoothness_bound>\n");
-	printf("Example:\n  ./challenges 2 20480 35 \n");
+	printf("Usage:\n  challenges <num_challenges> <modulo_bits> <smoothness_bound> [alg3]\n");
+	printf("Example (B-smooth):    ./challenges 2 20480 35\n");
+	printf("Example (alg3):        ./challenges 5 2048 32 alg3\n");
+	printf("  alg3 mode: B-smooth base (B=2^32) plus one medium prime in (2^32,2^65].\n");
 }
 
 static void generate_one_challenge(
@@ -129,6 +131,78 @@ static void find_prime_parallel(mpz_t result, mp_bitcnt_t bits)
 	mpz_clear(base);
 }
 
+/*
+ * Generate one almost-smooth (Algorithm 3) challenge.
+ *
+ * challenge = smooth_base * q0  where:
+ *   smooth_base = product of primes ≤ 2^32, filling ~(bittarget - 50) bits
+ *   q0          = one prime in (2^32, 2^65], random bit-length 33..64
+ *
+ * Both smooth_base and q0 are written to factors_path (mpz_out_raw format,
+ * same as generate_one_challenge).
+ */
+static void generate_one_alg3_challenge(
+	mpz_t result, const mpz_t modulo,
+	mp_bitcnt_t bittarget,
+	gmp_randstate_t rstate,
+	const char *factors_path, int *count_out)
+{
+	mpz_t smooth, q0, tmp;
+	mpz_inits(smooth, q0, tmp, NULL);
+
+	FILE *f = fopen(factors_path, "wb");
+
+	/* --- Step 1: B-smooth base (primes ≤ 2^32) --- */
+	const mp_bitcnt_t B_BITS = 32;
+	/* Leave ≥50 bits headroom for q0; clamp to avoid negative threshold. */
+	long threshold = (long)bittarget > 65 ? (long)bittarget - 50 : (long)bittarget / 2;
+
+	mpz_set_ui(smooth, 1);
+	int smooth_count = 0;
+	do {
+		mpz_urandomb(tmp, rstate, B_BITS);
+		mpz_nextprime(tmp, tmp);
+		/* Skip if the product would overflow modulo. */
+		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(tmp, 2) >
+		    mpz_sizeinbase(modulo, 2))
+			continue;
+		if (f) mpz_out_raw(f, tmp);
+		mpz_mul(smooth, smooth, tmp);
+		smooth_count++;
+	} while ((long)mpz_sizeinbase(smooth, 2) < threshold);
+
+	/* --- Step 2: one medium prime q0 in (2^32, 2^65] --- */
+	/* Random bit-length 33..64 via a 5-bit random value (0..31) plus 33. */
+	mpz_urandomb(tmp, rstate, 5);                      /* 0..31 */
+	mp_bitcnt_t q0_bits = 33 + (mp_bitcnt_t)mpz_get_ui(tmp); /* 33..64 */
+
+	int q0_ok = 0;
+	int q0_tries = 0;
+	while (!q0_ok && q0_tries < 100) {
+		mpz_urandomb(q0, rstate, q0_bits);
+		mpz_setbit(q0, q0_bits - 1); /* ensure exactly q0_bits bits */
+		mpz_nextprime(q0, q0);
+		/* Reject if smooth * q0 would exceed modulo. */
+		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(q0, 2) <=
+		    mpz_sizeinbase(modulo, 2))
+			q0_ok = 1;
+		q0_tries++;
+	}
+	if (!q0_ok) {
+		/* Fallback: use a 33-bit prime (smallest medium prime). */
+		mpz_set_ui(q0, 1UL << 31);
+		mpz_setbit(q0, 32);
+		mpz_nextprime(q0, q0);
+	}
+
+	if (f) { mpz_out_raw(f, q0); fclose(f); }
+
+	mpz_mul(result, smooth, q0);
+	*count_out = smooth_count + 1;
+
+	mpz_clears(smooth, q0, tmp, NULL);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 4)
@@ -148,9 +222,15 @@ int main(int argc, char **argv)
 	mp_bitcnt_t bittarget = (mp_bitcnt_t)strtoul(argv[2], NULL, 10);
 	mp_bitcnt_t bitbound = (mp_bitcnt_t)strtoul(argv[3], NULL, 10);
 
+	/* Optional 4th argument: "alg3" selects almost-smooth generation mode. */
+	int is_alg3 = (argc == 5 && strcmp(argv[4], "alg3") == 0);
+
 	char savefolder[128];
-	snprintf(savefolder, sizeof(savefolder),
-			 "data/challenges/k%lu/", (unsigned long)bitbound);
+	if (is_alg3)
+		snprintf(savefolder, sizeof(savefolder), "data/challenges/alg3/");
+	else
+		snprintf(savefolder, sizeof(savefolder),
+				 "data/challenges/k%lu/", (unsigned long)bitbound);
 	{
 		char cmd[256];
 		snprintf(cmd, sizeof(cmd), "mkdir -p %s", savefolder);
@@ -158,7 +238,7 @@ int main(int argc, char **argv)
 			printf("Warning: could not create %s\n", savefolder);
 	}
 
-	if (bitbound > bittarget)
+	if (!is_alg3 && bitbound > bittarget)
 		printf("Note: bitbound (%lu) > bittarget (%lu).\n",
 			   (unsigned long)bitbound, (unsigned long)bittarget);
 
@@ -167,8 +247,12 @@ int main(int argc, char **argv)
 	n_threads = omp_get_max_threads();
 	printf("OpenMP: %d threads\n", n_threads);
 #endif
-	printf("Generating %u challenge(s), ~%lu bits, B=2^%lu\n\n",
-		   num_outputs, (unsigned long)bittarget, (unsigned long)bitbound);
+	if (is_alg3)
+		printf("Generating %u alg3 challenge(s), ~%lu bits, smooth(B=2^32) * prime(<=2^65)\n\n",
+			   num_outputs, (unsigned long)bittarget);
+	else
+		printf("Generating %u challenge(s), ~%lu bits, B=2^%lu\n\n",
+			   num_outputs, (unsigned long)bittarget, (unsigned long)bitbound);
 
 	/* ---- Modulo: load from file if it exists, generate only if missing ----
 	 *
@@ -180,8 +264,12 @@ int main(int argc, char **argv)
 	mpz_init(modulo);
 
 	char modulo_path[256];
-	snprintf(modulo_path, sizeof(modulo_path), "%smodulo_%lu_%lu.txt",
-			 savefolder, (unsigned long)bitbound, (unsigned long)bittarget);
+	if (is_alg3)
+		snprintf(modulo_path, sizeof(modulo_path), "%smodulo_alg3_%lu.txt",
+				 savefolder, (unsigned long)bittarget);
+	else
+		snprintf(modulo_path, sizeof(modulo_path), "%smodulo_%lu_%lu.txt",
+				 savefolder, (unsigned long)bitbound, (unsigned long)bittarget);
 
 	{
 		FILE *mf = fopen(modulo_path, "rb");
@@ -237,18 +325,29 @@ int main(int argc, char **argv)
 						RANDSEED ^ ((unsigned long long)(i + 1) * 6364136223846793005ULL));
 
 		char fpath[256], cpath[256];
-		snprintf(fpath, sizeof(fpath), "%sfactors_%d_%lu_%lu.txt",
-				 savefolder, i,
-				 (unsigned long)bitbound, (unsigned long)bittarget);
-		snprintf(cpath, sizeof(cpath), "%schallenge_%d_%lu_%lu.txt",
-				 savefolder, i,
-				 (unsigned long)bitbound, (unsigned long)bittarget);
+		if (is_alg3) {
+			snprintf(fpath, sizeof(fpath), "%sfactors_%d_alg3_%lu.txt",
+					 savefolder, i, (unsigned long)bittarget);
+			snprintf(cpath, sizeof(cpath), "%schallenge_%d_alg3_%lu.txt",
+					 savefolder, i, (unsigned long)bittarget);
+		} else {
+			snprintf(fpath, sizeof(fpath), "%sfactors_%d_%lu_%lu.txt",
+					 savefolder, i,
+					 (unsigned long)bitbound, (unsigned long)bittarget);
+			snprintf(cpath, sizeof(cpath), "%schallenge_%d_%lu_%lu.txt",
+					 savefolder, i,
+					 (unsigned long)bitbound, (unsigned long)bittarget);
+		}
 
 		mpz_t result;
 		mpz_init(result);
 		int count = 0;
-		generate_one_challenge(result, modulo, bitbound, bittarget,
-							   rstate, fpath, &count);
+		if (is_alg3)
+			generate_one_alg3_challenge(result, modulo, bittarget,
+										rstate, fpath, &count);
+		else
+			generate_one_challenge(result, modulo, bitbound, bittarget,
+								   rstate, fpath, &count);
 
 		{
 			FILE *f = fopen(cpath, "wb");

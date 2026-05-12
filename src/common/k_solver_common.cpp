@@ -837,3 +837,104 @@ const char *ksc_ensure_k35_primes(int sp_count, const unsigned *sp, int rank)
     }
     return path;
 }
+
+// ---------------------------------------------------------------------------
+// ksc_alg3_broadcast_cofactor
+// ---------------------------------------------------------------------------
+
+// Upper bound on the medium prime exponent (2^65 fits in 66 bits including sign;
+// mpz_sizeinbase can return size+1 so we accept up to 66).
+#define ALG3_B_PRIME_BITS 65
+
+int ksc_alg3_broadcast_cofactor(
+    mpz_t cofactor_out,
+    const mpz_t blinded,
+    const mpz_t local_prod,
+    size_t cbrt_bytes,
+    int rank, int nranks)
+{
+    // --- 1. Export local factor product to fixed-size big-endian buffer ---
+    unsigned char *prod_buf = (unsigned char *)calloc(cbrt_bytes, 1);
+    {
+        size_t written = 0;
+        unsigned char *tmp = (unsigned char *)mpz_export(
+            NULL, &written, 1, 1, 0, 0, local_prod);
+        if (tmp && written > 0 && written <= cbrt_bytes)
+        {
+            memcpy(prod_buf + cbrt_bytes - written, tmp, written);
+            free(tmp);
+        }
+    }
+
+    // --- 2. Gather all local products to rank 0 ---
+    unsigned char *all_prods = NULL;
+    if (rank == 0)
+        all_prods = (unsigned char *)malloc((size_t)nranks * cbrt_bytes);
+
+    MPI_Gather(prod_buf, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
+               all_prods, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
+               0, MPI_COMM_WORLD);
+    free(prod_buf);
+
+    // --- 3. Rank 0: combine, compute cofactor, classify ---
+    int complete = 0;
+    unsigned char *cof_buf = (unsigned char *)calloc(cbrt_bytes, 1);
+
+    if (rank == 0)
+    {
+        mpz_t combined, part, q, r;
+        mpz_init_set_ui(combined, 1);
+        mpz_inits(part, q, r, NULL);
+
+        for (int rk = 0; rk < nranks; rk++)
+        {
+            mpz_import(part, cbrt_bytes, 1, 1, 0, 0,
+                       all_prods + (size_t)rk * cbrt_bytes);
+            mpz_mul(combined, combined, part);
+        }
+        free(all_prods);
+
+        // cofactor = blinded / combined_small_product
+        // Use tdiv_qr: non-zero remainder means combined doesn't divide blinded → retry.
+        mpz_tdiv_qr(q, r, blinded, combined);
+        mpz_clears(combined, part, NULL);
+
+        if (mpz_sgn(r) == 0)
+        {
+            if (mpz_cmp_ui(q, 1) == 0)
+            {
+                // B-smooth: all factors accounted for
+                complete = 1;
+                mpz_set_ui(cofactor_out, 1);
+            }
+            else if (mpz_sizeinbase(q, 2) > 32 &&
+                     mpz_sizeinbase(q, 2) <= ALG3_B_PRIME_BITS + 1 &&
+                     mpz_probab_prime_p(q, 15))
+            {
+                // Almost-smooth: one medium prime q0 in (2^32, 2^65]
+                complete = 1;
+                mpz_set(cofactor_out, q);
+                size_t written = 0;
+                unsigned char *tmp = (unsigned char *)mpz_export(
+                    NULL, &written, 1, 1, 0, 0, q);
+                if (tmp && written > 0 && written <= cbrt_bytes)
+                {
+                    memcpy(cof_buf + cbrt_bytes - written, tmp, written);
+                    free(tmp);
+                }
+            }
+            // else: cofactor is composite or too large → retry
+        }
+        mpz_clears(q, r, NULL);
+    }
+
+    // --- 4. Broadcast result to all ranks ---
+    MPI_Bcast(&complete, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(cof_buf, (int)cbrt_bytes, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
+
+    if (complete && rank != 0)
+        mpz_import(cofactor_out, cbrt_bytes, 1, 1, 0, 0, cof_buf);
+
+    free(cof_buf);
+    return complete;
+}

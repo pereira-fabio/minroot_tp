@@ -220,3 +220,26 @@ void ksc_ensure_k35_cbrt(
 // All ranks synchronise via MPI_Barrier before returning.
 // sp/sp_count must cover primes up to sqrt(2^35) ~ 185363 (use 2^18 limit).
 const char *ksc_ensure_k35_primes(int sp_count, const unsigned *sp, int rank);
+
+// ---------------------------------------------------------------------------
+// Algorithm 3 — almost-smooth completeness check + cofactor broadcast
+//
+// All ranks call this function after trial division.  Each passes its local
+// factor product (local_prod = ∏ p_i^{e_i} for this rank's found primes).
+//
+// Internally performs MPI_Gather of all local products, then rank 0:
+//   1. Multiplies them into combined_prod
+//   2. Computes cofactor = blinded / combined_prod
+//   3. Classifies: cofactor==1 → B-smooth; cofactor is prime ≤ 65 bits →
+//      almost-smooth (one medium factor q0 ∈ (2^32, 2^65]); else → retry
+//
+// Broadcasts `complete` (1/0) and the cofactor bytes to all ranks.
+// cofactor_out is set on ALL ranks on return (1 if B-smooth, q0 if almost-smooth).
+// Returns 1 if the challenge is fully accounted for (proceed), 0 if retry.
+// ---------------------------------------------------------------------------
+int ksc_alg3_broadcast_cofactor(
+    mpz_t cofactor_out,
+    const mpz_t blinded,
+    const mpz_t local_prod,
+    size_t cbrt_bytes,
+    int rank, int nranks);
