@@ -134,7 +134,7 @@ echo "k16/k32/k35 groups done."
 # Sizes chosen to match the alg3_mpi --all set plus a few extras.
 # Modulo files are written to data/challenges/alg3/ (isolated namespace).
 # ---------------------------------------------------------------------------
-SIZES_ALG3="256 512 1024 2048 4096 7000"
+SIZES_ALG3="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
 N_SIZES_ALG3=$(echo $SIZES_ALG3 | wc -w)
 
 echo "============================================================"
