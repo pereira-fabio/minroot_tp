@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=32
 #SBATCH --exclusive
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 
 # ---------------------------------------------------------------------------
 # Job array — k16_mpi scaling study across node counts
