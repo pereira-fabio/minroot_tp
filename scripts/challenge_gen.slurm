@@ -159,6 +159,37 @@ echo ""
 echo "alg3 group done."
 
 # ---------------------------------------------------------------------------
+# ALG4 group — runs after alg3 to avoid CPU contention.
+# Uses all available threads.
+#
+# Sizes mirror the alg3 set so both algorithms are directly comparable.
+# Modulo files are written to data/challenges/alg4/ (isolated namespace).
+# ---------------------------------------------------------------------------
+SIZES_ALG4="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
+N_SIZES_ALG4=$(echo $SIZES_ALG4 | wc -w)
+
+echo "============================================================"
+echo "Launching alg4 group: ${N_SIZES_ALG4} sizes × ${NUM_CHALLENGES} challenges"
+echo "  Sizes:   $SIZES_ALG4"
+echo "  Threads: ${SLURM_CPUS_PER_TASK} (all available)"
+echo "============================================================"
+echo ""
+
+for SIZE in $SIZES_ALG4; do
+    echo "  [alg4] bittarget=${SIZE}..."
+    OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK} ./challenges $NUM_CHALLENGES $SIZE 32 alg4
+    RET=$?
+    if [ $RET -eq 0 ]; then
+        echo "  [alg4] ${SIZE} bits DONE"
+    else
+        echo "  [alg4] ${SIZE} bits FAILED (exit ${RET})"
+    fi
+done
+
+echo ""
+echo "alg4 group done."
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "============================================================"
@@ -171,6 +202,8 @@ for KB in 16 32 35; do
 done
 echo "  data/challenges/alg3/"
 ls data/challenges/alg3/ 2>/dev/null | sed 's/^/    /'
+echo "  data/challenges/alg4/"
+ls data/challenges/alg4/ 2>/dev/null | sed 's/^/    /'
 echo ""
 echo "Job ID: $SLURM_JOB_ID"
 echo "============================================================"
