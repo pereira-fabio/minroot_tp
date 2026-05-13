@@ -2,8 +2,8 @@
 #SBATCH --job-name=minroot_k16_mpi
 #SBATCH --output=minroot_k16_mpi_%A_%a.out
 #SBATCH --error=minroot_k16_mpi_%A_%a.err
-#SBATCH --array=0-4
-#SBATCH --nodes=16          
+#SBATCH --array=0-6
+#SBATCH --nodes=64
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=32
 #SBATCH --exclusive
@@ -42,14 +42,14 @@ export OMP_WAIT_POLICY=active
 # ---------------------------------------------------------------------------
 # Map array index -> node count
 # ---------------------------------------------------------------------------
-NODE_COUNTS=(1 2 4 8 16)
+NODE_COUNTS=(1 2 4 8 16 32 64)
 N_NODES=${NODE_COUNTS[$SLURM_ARRAY_TASK_ID]}
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 DATA_DIR=data/challenges/k16
-BENCH=10
+BENCH=50
 SIZES="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
 
 JSON_DIR=$SLURM_SUBMIT_DIR/data/results/k16_mpi_N${N_NODES}

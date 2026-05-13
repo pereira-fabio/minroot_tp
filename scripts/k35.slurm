@@ -2,8 +2,8 @@
 #SBATCH --job-name=minroot_k35_mpi
 #SBATCH --output=minroot_k35_mpi_%A_%a.out
 #SBATCH --error=minroot_k35_mpi_%A_%a.err
-#SBATCH --array=0-4
-#SBATCH --nodes=16          
+#SBATCH --array=0-6
+#SBATCH --nodes=64          
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=32
 #SBATCH --exclusive
@@ -17,6 +17,9 @@
 #   task 1  ->  2 nodes  (4  ranks, 128 workers)
 #   task 2  ->  4 nodes  (8  ranks, 256 workers)
 #   task 3  ->  8 nodes  (16 ranks, 512 workers)
+#   task 4  -> 16 nodes  (32 ranks, 1024 workers)
+#   task 5  -> 32 nodes  (64 ranks, 2048 workers)
+#   task 6  -> 64 nodes  (128 ranks, 4096 workers)
 #
 # k35 covers primes up to 2^35 — paper's Algorithm 2 parameters.
 # Breakeven vs sequential powm: ~17000 bits (sieve), ~12000 bits (table).
@@ -48,14 +51,14 @@ export OMP_WAIT_POLICY=active
 # ---------------------------------------------------------------------------
 # Map array index -> node count
 # ---------------------------------------------------------------------------
-NODE_COUNTS=(1 2 4 8 16)
+NODE_COUNTS=(1 2 4 8 16 32 64)
 N_NODES=${NODE_COUNTS[$SLURM_ARRAY_TASK_ID]}
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 DATA_DIR=data/challenges/k35
-BENCH=10
+BENCH=50
 
 # k35 breakeven vs powm is ~17000 bits; smaller sizes still useful for comparison
 SIZES="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
