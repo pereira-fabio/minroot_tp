@@ -29,7 +29,7 @@
 #   cbrt caches: data/cbrt/<stem>.cbrt_alg3.<rank>
 #   Results:     data/results/alg3_mpi_N<nodes>/
 #
-# Results landing: data/results/alg3_mpi_N1/ .. data/results/alg3_mpi_N16/
+# Results landing: data/results/alg3_mpi_N1/ .. data/results/alg3_mpi_N64/
 # ---------------------------------------------------------------------------
 
 module load compiler/GCC/13.2.0
