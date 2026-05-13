@@ -30,10 +30,12 @@
 
 void print_usage(void)
 {
-	printf("Usage:\n  challenges <num_challenges> <modulo_bits> <smoothness_bound> [alg3]\n");
+	printf("Usage:\n  challenges <num_challenges> <modulo_bits> <smoothness_bound> [alg3|alg4]\n");
 	printf("Example (B-smooth):    ./challenges 2 20480 35\n");
 	printf("Example (alg3):        ./challenges 5 2048 32 alg3\n");
 	printf("  alg3 mode: B-smooth base (B=2^32) plus one medium prime in (2^32,2^65].\n");
+	printf("Example (alg4):        ./challenges 5 2048 32 alg4\n");
+	printf("  alg4 mode: B-smooth base (B=2^32) plus one medium prime in (2^32,2^64].\n");
 }
 
 static void generate_one_challenge(
@@ -203,6 +205,75 @@ static void generate_one_alg3_challenge(
 	mpz_clears(smooth, q0, tmp, NULL);
 }
 
+/*
+ * Generate one 2^64-smooth (Algorithm 4) challenge.
+ *
+ * challenge = smooth_base * q0  where:
+ *   smooth_base = product of primes ≤ 2^32, filling ~(bittarget - 80) bits
+ *   q0          = one prime in (2^32, 2^64], random bit-length 33..63
+ *
+ * Differs from alg3 only in the q0 upper bound: 64 bits (not 65).
+ */
+static void generate_one_alg4_challenge(
+	mpz_t result, const mpz_t modulo,
+	mp_bitcnt_t bittarget,
+	gmp_randstate_t rstate,
+	const char *factors_path, int *count_out)
+{
+	mpz_t smooth, q0, tmp;
+	mpz_inits(smooth, q0, tmp, NULL);
+
+	FILE *f = fopen(factors_path, "wb");
+
+	/* --- Step 1: B-smooth base (primes ≤ 2^32) --- */
+	const mp_bitcnt_t B_BITS = 32;
+	/* Leave ≥80 bits headroom for q0 (q0 ≤ 2^64). */
+	long threshold = (long)bittarget > 80 ? (long)bittarget - 80 : (long)bittarget / 2;
+
+	mpz_set_ui(smooth, 1);
+	int smooth_count = 0;
+	do {
+		mpz_urandomb(tmp, rstate, B_BITS);
+		mpz_nextprime(tmp, tmp);
+		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(tmp, 2) >
+		    mpz_sizeinbase(modulo, 2))
+			continue;
+		if (f) mpz_out_raw(f, tmp);
+		mpz_mul(smooth, smooth, tmp);
+		smooth_count++;
+	} while ((long)mpz_sizeinbase(smooth, 2) < threshold);
+
+	/* --- Step 2: one medium prime q0 in (2^32, 2^64] --- */
+	/* Random bit-length 33..63 via a 5-bit random value (0..30) plus 33. */
+	mpz_urandomb(tmp, rstate, 5);
+	mp_bitcnt_t q0_bits = 33 + (mp_bitcnt_t)(mpz_get_ui(tmp) % 31); /* 33..63 */
+
+	int q0_ok = 0;
+	int q0_tries = 0;
+	while (!q0_ok && q0_tries < 100) {
+		mpz_urandomb(q0, rstate, q0_bits);
+		mpz_setbit(q0, q0_bits - 1);
+		mpz_nextprime(q0, q0);
+		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(q0, 2) <=
+		    mpz_sizeinbase(modulo, 2))
+			q0_ok = 1;
+		q0_tries++;
+	}
+	if (!q0_ok) {
+		/* Fallback: use a 33-bit prime. */
+		mpz_set_ui(q0, 1UL << 31);
+		mpz_setbit(q0, 32);
+		mpz_nextprime(q0, q0);
+	}
+
+	if (f) { mpz_out_raw(f, q0); fclose(f); }
+
+	mpz_mul(result, smooth, q0);
+	*count_out = smooth_count + 1;
+
+	mpz_clears(smooth, q0, tmp, NULL);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 4)
@@ -222,12 +293,15 @@ int main(int argc, char **argv)
 	mp_bitcnt_t bittarget = (mp_bitcnt_t)strtoul(argv[2], NULL, 10);
 	mp_bitcnt_t bitbound = (mp_bitcnt_t)strtoul(argv[3], NULL, 10);
 
-	/* Optional 4th argument: "alg3" selects almost-smooth generation mode. */
+	/* Optional 4th argument: "alg3" or "alg4" selects generation mode. */
 	int is_alg3 = (argc == 5 && strcmp(argv[4], "alg3") == 0);
+	int is_alg4 = (argc == 5 && strcmp(argv[4], "alg4") == 0);
 
 	char savefolder[128];
 	if (is_alg3)
 		snprintf(savefolder, sizeof(savefolder), "data/challenges/alg3/");
+	else if (is_alg4)
+		snprintf(savefolder, sizeof(savefolder), "data/challenges/alg4/");
 	else
 		snprintf(savefolder, sizeof(savefolder),
 				 "data/challenges/k%lu/", (unsigned long)bitbound);
@@ -238,7 +312,7 @@ int main(int argc, char **argv)
 			printf("Warning: could not create %s\n", savefolder);
 	}
 
-	if (!is_alg3 && bitbound > bittarget)
+	if (!is_alg3 && !is_alg4 && bitbound > bittarget)
 		printf("Note: bitbound (%lu) > bittarget (%lu).\n",
 			   (unsigned long)bitbound, (unsigned long)bittarget);
 
@@ -249,6 +323,9 @@ int main(int argc, char **argv)
 #endif
 	if (is_alg3)
 		printf("Generating %u alg3 challenge(s), ~%lu bits, smooth(B=2^32) * prime(<=2^65)\n\n",
+			   num_outputs, (unsigned long)bittarget);
+	else if (is_alg4)
+		printf("Generating %u alg4 challenge(s), ~%lu bits, smooth(B=2^32) * prime(<=2^64)\n\n",
 			   num_outputs, (unsigned long)bittarget);
 	else
 		printf("Generating %u challenge(s), ~%lu bits, B=2^%lu\n\n",
@@ -266,6 +343,9 @@ int main(int argc, char **argv)
 	char modulo_path[256];
 	if (is_alg3)
 		snprintf(modulo_path, sizeof(modulo_path), "%smodulo_alg3_%lu.txt",
+				 savefolder, (unsigned long)bittarget);
+	else if (is_alg4)
+		snprintf(modulo_path, sizeof(modulo_path), "%smodulo_alg4_%lu.txt",
 				 savefolder, (unsigned long)bittarget);
 	else
 		snprintf(modulo_path, sizeof(modulo_path), "%smodulo_%lu_%lu.txt",
@@ -315,7 +395,7 @@ int main(int argc, char **argv)
 #endif
 
 #pragma omp parallel for schedule(dynamic, 1) num_threads(n_threads) \
-	shared(savefolder, modulo, bitbound, bittarget, num_outputs)
+	shared(savefolder, modulo, bitbound, bittarget, num_outputs, is_alg3, is_alg4)
 	for (int i = 0; i < (int)num_outputs; i++)
 	{
 		/* Each challenge gets its own deterministic random state */
@@ -329,6 +409,11 @@ int main(int argc, char **argv)
 			snprintf(fpath, sizeof(fpath), "%sfactors_%d_alg3_%lu.txt",
 					 savefolder, i, (unsigned long)bittarget);
 			snprintf(cpath, sizeof(cpath), "%schallenge_%d_alg3_%lu.txt",
+					 savefolder, i, (unsigned long)bittarget);
+		} else if (is_alg4) {
+			snprintf(fpath, sizeof(fpath), "%sfactors_%d_alg4_%lu.txt",
+					 savefolder, i, (unsigned long)bittarget);
+			snprintf(cpath, sizeof(cpath), "%schallenge_%d_alg4_%lu.txt",
 					 savefolder, i, (unsigned long)bittarget);
 		} else {
 			snprintf(fpath, sizeof(fpath), "%sfactors_%d_%lu_%lu.txt",
@@ -344,6 +429,9 @@ int main(int argc, char **argv)
 		int count = 0;
 		if (is_alg3)
 			generate_one_alg3_challenge(result, modulo, bittarget,
+										rstate, fpath, &count);
+		else if (is_alg4)
+			generate_one_alg4_challenge(result, modulo, bittarget,
 										rstate, fpath, &count);
 		else
 			generate_one_challenge(result, modulo, bitbound, bittarget,

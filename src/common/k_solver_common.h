@@ -243,3 +243,19 @@ int ksc_alg3_broadcast_cofactor(
     const mpz_t local_prod,
     size_t cbrt_bytes,
     int rank, int nranks);
+
+// ---------------------------------------------------------------------------
+// Algorithm 4 — 2^64-smooth completeness check + medium factor broadcast
+//
+// Extension of ksc_alg3_broadcast_cofactor: accepts composite cofactors ≤ 2^64
+// by factoring them with Pollard's rho (rank 0 only).
+//
+// medium_factors_out receives all medium prime factors on ALL ranks on success.
+// Returns 1 if the challenge is fully accounted for, 0 if retry.
+// ---------------------------------------------------------------------------
+int ksc_alg4_broadcast_cofactor(
+    kfactor_list_t *medium_factors_out,
+    const mpz_t blinded,
+    const mpz_t local_prod,
+    size_t cbrt_bytes,
+    int rank, int nranks);

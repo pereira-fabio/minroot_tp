@@ -938,3 +938,157 @@ int ksc_alg3_broadcast_cofactor(
     free(cof_buf);
     return complete;
 }
+
+// ---------------------------------------------------------------------------
+// ksc_alg4_broadcast_cofactor
+// ---------------------------------------------------------------------------
+
+#define ALG4_B_COFACTOR_BITS 64
+#define ALG4_MAX_MEDIUM 4 // generous upper bound; two primes >2^32 exceed 2^64
+
+int ksc_alg4_broadcast_cofactor(
+    kfactor_list_t *medium_factors_out,
+    const mpz_t blinded,
+    const mpz_t local_prod,
+    size_t cbrt_bytes,
+    int rank, int nranks)
+{
+    // --- 1. Export local factor product to fixed-size big-endian buffer ---
+    unsigned char *prod_buf = (unsigned char *)calloc(cbrt_bytes, 1);
+    {
+        size_t written = 0;
+        unsigned char *tmp = (unsigned char *)mpz_export(
+            NULL, &written, 1, 1, 0, 0, local_prod);
+        if (tmp && written > 0 && written <= cbrt_bytes)
+        {
+            memcpy(prod_buf + cbrt_bytes - written, tmp, written);
+            free(tmp);
+        }
+    }
+
+    // --- 2. Gather all local products to rank 0 ---
+    unsigned char *all_prods = NULL;
+    if (rank == 0)
+        all_prods = (unsigned char *)malloc((size_t)nranks * cbrt_bytes);
+
+    MPI_Gather(prod_buf, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
+               all_prods, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
+               0, MPI_COMM_WORLD);
+    free(prod_buf);
+
+    // --- 3. Rank 0: combine, compute cofactor, classify ---
+    int complete = 0;
+    int n_medium = 0;
+    unsigned char *medium_buf =
+        (unsigned char *)calloc((size_t)ALG4_MAX_MEDIUM * cbrt_bytes, 1);
+
+    if (rank == 0)
+    {
+        mpz_t combined, part, q, r;
+        mpz_init_set_ui(combined, 1);
+        mpz_inits(part, q, r, NULL);
+
+        for (int rk = 0; rk < nranks; rk++)
+        {
+            mpz_import(part, cbrt_bytes, 1, 1, 0, 0,
+                       all_prods + (size_t)rk * cbrt_bytes);
+            mpz_mul(combined, combined, part);
+        }
+        free(all_prods);
+
+        mpz_tdiv_qr(q, r, blinded, combined);
+        mpz_clears(combined, part, NULL);
+
+        if (mpz_sgn(r) == 0)
+        {
+            if (mpz_cmp_ui(q, 1) == 0)
+            {
+                // B-smooth: all factors accounted for
+                complete = 1;
+                n_medium = 0;
+            }
+            else if (mpz_sizeinbase(q, 2) <= ALG4_B_COFACTOR_BITS + 1 &&
+                     mpz_probab_prime_p(q, 15))
+            {
+                // Single medium prime ≤ 2^64
+                complete = 1;
+                n_medium = 1;
+                kfl_append_mpz(medium_factors_out, q, 1);
+                size_t written = 0;
+                unsigned char *tmp = (unsigned char *)mpz_export(
+                    NULL, &written, 1, 1, 0, 0, q);
+                if (tmp && written > 0 && written <= cbrt_bytes)
+                {
+                    memcpy(medium_buf + cbrt_bytes - written, tmp, written);
+                    free(tmp);
+                }
+            }
+            else if (mpz_sizeinbase(q, 2) <= ALG4_B_COFACTOR_BITS + 1)
+            {
+                // Composite ≤ 2^64: try Pollard's rho
+                kfactor_list_t poly;
+                kfl_init(&poly);
+                bool ok = kf_try_factor_b64smooth(q, &poly, 1);
+                if (ok)
+                {
+                    complete = 1;
+                    for (int i = 0; i < poly.count; i++)
+                    {
+                        for (int ex = 0; ex < poly.items[i].exponent; ex++)
+                        {
+                            int slot = n_medium++;
+                            kfl_append_mpz(medium_factors_out,
+                                           poly.items[i].prime, 1);
+                            if (slot < ALG4_MAX_MEDIUM)
+                            {
+                                size_t written = 0;
+                                unsigned char *tmp = (unsigned char *)mpz_export(
+                                    NULL, &written, 1, 1, 0, 0,
+                                    poly.items[i].prime);
+                                if (tmp && written > 0 && written <= cbrt_bytes)
+                                {
+                                    memcpy(medium_buf
+                                           + (size_t)slot * cbrt_bytes
+                                           + cbrt_bytes - written,
+                                           tmp, written);
+                                    free(tmp);
+                                }
+                            }
+                        }
+                    }
+                }
+                kfl_free(&poly);
+            }
+            // else: cofactor > 2^64 → retry (complete stays 0)
+        }
+        mpz_clears(q, r, NULL);
+    }
+
+    // --- 4. Broadcast result to all ranks ---
+    MPI_Bcast(&complete, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&n_medium, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    if (complete && n_medium > 0)
+    {
+        int bcast_count = (n_medium < ALG4_MAX_MEDIUM ? n_medium : ALG4_MAX_MEDIUM);
+        MPI_Bcast(medium_buf, (int)((size_t)bcast_count * cbrt_bytes),
+                  MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
+
+        // --- 5. Non-rank-0: reconstruct kfactor_list_t from broadcast bytes ---
+        if (rank != 0)
+        {
+            for (int i = 0; i < bcast_count; i++)
+            {
+                mpz_t p;
+                mpz_init(p);
+                mpz_import(p, cbrt_bytes, 1, 1, 0, 0,
+                           medium_buf + (size_t)i * cbrt_bytes);
+                kfl_append_mpz(medium_factors_out, p, 1);
+                mpz_clear(p);
+            }
+        }
+    }
+
+    free(medium_buf);
+    return complete;
+}

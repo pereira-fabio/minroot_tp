@@ -22,9 +22,10 @@ Figures:
     07_rank_load_balance_<N>b.png   primes found per MPI rank
     09_strong_scaling_k<K>_<M>.png  time & speedup vs MPI ranks (per algo/method)
     10_parallel_efficiency.png      scaling efficiency vs ranks
-    11_algorithm_comparison_<M>.png k16 vs k32 vs k35 vs alg3 speedup at max ranks
+    11_algorithm_comparison_<M>.png k16 vs k32 vs k35 vs alg3 vs alg4 speedup at max ranks
     12_alg3_hit_stats.png           smooth vs almost-smooth classification + q₀ bit distribution
     13_effective_speedup.png        inversions-per-unit-time × success-probability vs k32 baseline
+    14_alg4_hit_stats.png           alg4 smooth/almost-smooth/multi-medium + medium prime count
 """
 
 import json
@@ -102,11 +103,19 @@ K_COLORS = {
     35: ("#2ca02c", "^"),
 }
 ALG3_COLOR = ("#d62728", "D")   # red diamond — distinct from k32
+ALG4_COLOR = ("#9467bd", "v")   # purple triangle-down — distinct from all others
+
+def is_alg4(d):
+    return d.get("_source_algo") == "alg4"
 
 def is_alg3(d):
+    if is_alg4(d):
+        return False
     return d.get("_source_algo") == "alg3" or "hit_stats" in d
 
 def algo_name(d):
+    if is_alg4(d):
+        return "alg4"
     return "alg3" if is_alg3(d) else f"k{d['metadata']['k_size']}"
 
 # Theoretical success probabilities from Biryukov et al. (CRYPTO 2024)
@@ -115,6 +124,7 @@ P_THEORY = {
     "k32":  2**(-24.9),
     "k35":  2**(-21.0),
     "alg3": 2**(-18.0),
+    "alg4": 2**(-12.0),  # TODO: update from paper when available
 }
 
 OUTPUT_FMT = "png"   # overwritten in main() from --format
@@ -127,7 +137,9 @@ def load_file(path):
     # Inject stable algorithm identity from filename so alg3 files without
     # hit_stats (old runs) are not misclassified as k32.
     basename = os.path.basename(path)
-    if basename.startswith("alg3_"):
+    if basename.startswith("alg4_"):
+        d["_source_algo"] = "alg4"
+    elif basename.startswith("alg3_"):
         d["_source_algo"] = "alg3"
     return d
 
@@ -693,6 +705,24 @@ def plot_algorithm_comparison(datasets, out_dir):
             ax2.plot(bits, speedup, marker=mk, color=col, linewidth=1.8,
                      markersize=6, label="alg3")
 
+        # alg4 curve (same method, max ranks)
+        alg4_sub = sorted(
+            [d for d in datasets if is_alg4(d)
+             and d["metadata"]["method"]   == method
+             and d["metadata"]["mpi_ranks"] == max_ranks],
+            key=lambda d: d["metadata"]["challenge_bits"],
+        )
+        if alg4_sub:
+            col, mk = ALG4_COLOR
+            bits    = [d["metadata"]["challenge_bits"] for d in alg4_sub]
+            total   = [robust_mean(d, "total_ms") for d in alg4_sub]
+            speedup = [robust_speedup_total(d) for d in alg4_sub]
+            all_bits.extend(bits)
+            ax1.plot(bits, total,   marker=mk, color=col, linewidth=1.8,
+                     markersize=6, label="alg4")
+            ax2.plot(bits, speedup, marker=mk, color=col, linewidth=1.8,
+                     markersize=6, label="alg4")
+
         ax2.axhline(1, color="grey", linewidth=0.8, linestyle=":", label="breakeven")
 
         all_bits = sorted(set(all_bits))
@@ -706,8 +736,8 @@ def plot_algorithm_comparison(datasets, out_dir):
         apply_log_y_style(ax2)
         ax1.set_ylabel("Total time (ms)")
         ax2.set_ylabel("Speedup over sequential powm")
-        hint_title(ax1, f"k16 vs k32 vs k35 vs alg3 — {method}  ({max_ranks} ranks)", LOWER)
-        hint_title(ax2, f"Speedup vs Sequential powm — {method}  ({max_ranks} ranks)", HIGHER)
+        hint_title(ax1, f"k16 vs k32 vs k35 vs alg3 vs alg4 — {method}  ({max_ranks} ranks)", LOWER)
+        hint_title(ax2, f"Speedup vs Sequential powm — {method}  ({max_ranks} ranks) [alg4]", HIGHER)
 
         save(fig,
              os.path.join(out_dir, f"11_algorithm_comparison_{method}.{OUTPUT_FMT}"),
@@ -776,6 +806,69 @@ def plot_hit_stats(datasets, out_dir):
     fig.tight_layout()
     save(fig, os.path.join(out_dir, f"12_alg3_hit_stats.{OUTPUT_FMT}"), "")
 
+# ── Figure 14: alg4 hit statistics ───────────────────────────────────────────
+
+def plot_alg4_hit_stats(datasets, out_dir):
+    """Stacked bar (smooth / one medium / multi-medium) and medium factor count
+    distribution for alg4 results at the maximum rank count."""
+    max_ranks = max(d["metadata"]["mpi_ranks"] for d in datasets)
+    alg4_data = sorted(
+        [d for d in datasets if is_alg4(d) and "hit_stats" in d
+         and d["metadata"]["method"] == "sieve"
+         and d["metadata"]["mpi_ranks"] == max_ranks],
+        key=lambda d: d["metadata"]["challenge_bits"],
+    )
+    if not alg4_data:
+        return
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    sizes  = [d["metadata"]["challenge_bits"] for d in alg4_data]
+    x      = np.arange(len(sizes))
+    labels = [str(b) for b in sizes]
+
+    n_smooth = [d["hit_stats"]["smooth_count"]        for d in alg4_data]
+    n_almost = [d["hit_stats"]["almost_smooth_count"] for d in alg4_data]
+    n_multi  = [d["hit_stats"].get("multi_medium_count", 0) for d in alg4_data]
+
+    ax1.bar(x, n_multi,  label="multi-medium (composite cofactor)",
+            color=BAR_COLORS["combine"])
+    ax1.bar(x, n_almost, bottom=n_multi, label="almost-smooth (one q₀)",
+            color=BAR_COLORS["recon"])
+    bot2 = [a + b for a, b in zip(n_multi, n_almost)]
+    ax1.bar(x, n_smooth, bottom=bot2, label="B-smooth (all-small primes)",
+            color=BAR_COLORS["factor"])
+    for xi, ns, na, nm in zip(x, n_smooth, n_almost, n_multi):
+        total = ns + na + nm
+        ax1.text(xi, total + 0.1, str(total), ha="center", va="bottom", fontsize=9)
+    ax1.set_xticks(x); ax1.set_xticklabels(labels, rotation=45, ha="right")
+    ax1.set_xlabel("Challenge size (bits)")
+    ax1.set_ylabel("Run count")
+    ax1.legend(framealpha=0.9)
+    hint_title(ax1, f"alg4 Hit Classification  ({max_ranks} ranks)", HIGHER)
+
+    # medium_factor_count distribution (right subplot)
+    for xi, d in zip(x, alg4_data):
+        mfc = d["hit_stats"].get("medium_factor_count", [])
+        if not mfc:
+            continue
+        mfc_np = np.array(mfc, dtype=float)
+        mfc_np = mfc_np[mfc_np > 0]
+        if len(mfc_np) == 0:
+            continue
+        ax2.errorbar(xi, mfc_np.mean(),
+                     yerr=[[mfc_np.mean() - mfc_np.min()],
+                            [mfc_np.max() - mfc_np.mean()]],
+                     fmt="v", color=ALG4_COLOR[0], capsize=4)
+
+    ax2.set_xticks(x); ax2.set_xticklabels(labels, rotation=45, ha="right")
+    ax2.set_xlabel("Challenge size (bits)")
+    ax2.set_ylabel("Medium prime count per hit  (mean ± range)")
+    ax2.set_ylim(0, 5)
+    hint_title(ax2, "alg4 Medium Prime Count Distribution", HIGHER)
+
+    fig.tight_layout()
+    save(fig, os.path.join(out_dir, f"14_alg4_hit_stats.{OUTPUT_FMT}"), "")
+
 # ── Figure 13: effective throughput comparison ─────────────────────────────────
 
 def plot_effective_speedup(datasets, out_dir):
@@ -819,6 +912,21 @@ def plot_effective_speedup(datasets, out_dir):
             "eff_rate": [robust_speedup_total(d) * p for d in alg3_sub],
             "color":    ALG3_COLOR[0],
             "marker":   ALG3_COLOR[1],
+        }
+
+    alg4_sub = sorted(
+        [d for d in datasets if is_alg4(d)
+         and d["metadata"]["method"]   == method
+         and d["metadata"]["mpi_ranks"] == max_ranks],
+        key=lambda d: d["metadata"]["challenge_bits"],
+    )
+    if alg4_sub:
+        p = P_THEORY["alg4"]
+        curves["alg4"] = {
+            "bits":     [d["metadata"]["challenge_bits"] for d in alg4_sub],
+            "eff_rate": [robust_speedup_total(d) * p for d in alg4_sub],
+            "color":    ALG4_COLOR[0],
+            "marker":   ALG4_COLOR[1],
         }
 
     if "k32" not in curves:
@@ -936,6 +1044,7 @@ def main():
     # ── Cross-algorithm comparison ──
     plot_algorithm_comparison(datasets, args.out)
     plot_hit_stats(datasets, args.out)
+    plot_alg4_hit_stats(datasets, args.out)
     plot_effective_speedup(datasets, args.out)
 
     n_out = len([f for f in os.listdir(args.out)

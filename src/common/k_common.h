@@ -241,9 +241,10 @@ typedef struct
     std::vector<int64_t> thread_primes_tested; // per OMP thread
     std::vector<int> thread_primes_found;      // per OMP thread
 
-    // alg3-specific: per-run cofactor classification (empty for k16/k32/k35)
-    std::vector<int> hit_type;      // 1=B-smooth (cofactor==1), 2=almost-smooth (medium prime)
-    std::vector<int> cofactor_bits; // bit-length of cofactor (1 if smooth, 33-64 if almost-smooth)
+    // alg3/alg4-specific: per-run cofactor classification (empty for k16/k32/k35)
+    std::vector<int> hit_type;            // 1=B-smooth, 2=one medium prime, 3=multiple medium primes
+    std::vector<int> cofactor_bits;       // bit-length of cofactor (1 if smooth, else product of medium primes)
+    std::vector<int> medium_factor_count; // alg4: number of medium primes per run (0 or 1 for alg3)
 
     // Warmup run timings (2 runs before bench loop, recorded for transparency)
     std::vector<double> warmup_total_ms;
