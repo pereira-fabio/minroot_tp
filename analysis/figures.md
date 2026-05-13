@@ -168,14 +168,15 @@ algorithm/method combination retains the most efficiency at high rank counts.
 
 ---
 
-## Figure 11 — Algorithm Comparison: k16 vs k32 vs k35 (2 files)
+## Figure 11 — Algorithm Comparison: k16 vs k32 vs k35 vs alg3 (2 files)
 
 **Files:** `11_algorithm_comparison_{method}.png`  where method ∈ {sieve, table}
 
 Two-panel comparison at the maximum available rank count (32 ranks in the standard run):
 
-- **Left:** total time (ms) vs challenge size for k16, k32, and k35. The powm baseline
-  is overlaid. Lines crossing the powm line from above mark each algorithm's breakeven.
+- **Left:** total time (ms) vs challenge size for k16, k32, k35, and alg3. The powm
+  baseline is overlaid. Lines crossing the powm line from above mark each algorithm's
+  breakeven.
 - **Right:** end-to-end speedup over sequential powm for each algorithm.
 
 **What to look for:**
@@ -185,5 +186,80 @@ Two-panel comparison at the maximum available rank count (32 ranks in the standa
 - k35 matches the paper's concrete parameters (B = 2^35) and achieves the highest speedup
   at large challenge sizes, but its breakeven is higher (~12 000–17 000 bits depending
   on method).
+- alg3 (Algorithm 3 — almost-smooth) plateaus near `speedup_total ≈ 0.95` at all large
+  sizes because its reconstruction always includes one sequential `mpz_powm(q₀, e_inv, p)`
+  that costs as much as the brute-force baseline. See Figure 13 for why alg3 is still
+  the most effective algorithm at large sizes despite this apparent ceiling.
 - The crossover points between algorithms show where it is worth paying the higher overhead
   of a larger smoothness bound.
+
+---
+
+## Figure 12 — Algorithm 3 Hit Classification (1 file)
+
+**File:** `12_alg3_hit_stats.png`
+
+Two-panel figure summarising how the alg3 cofactor classifier performs across all benchmarked
+challenge sizes (sieve method, maximum rank count).
+
+- **Left:** stacked bar chart per challenge size showing how many of the 9 warm runs were
+  classified as B-smooth (cofactor = 1, all prime factors ≤ 2^32) vs almost-smooth
+  (cofactor = single prime q₀ ∈ (2^32, 2^65]). Total run count is annotated on each bar.
+- **Right:** cofactor bit-size distribution — error bars showing min/mean/max of
+  `cofactor_bits` per challenge size. Reference lines at 33 bits (minimum q₀) and 65 bits
+  (maximum q₀) confirm the classifier is accepting only primes in the expected range.
+
+**What to look for:**
+- `almost_smooth_count` should equal the total run count (9) at every size, since the
+  challenge files are specifically generated to be (2^32, 2^65)-almost-smooth.
+- `smooth_count > 0` would mean a challenge happened to be fully B-smooth — uncommon but
+  valid; the algorithm handles it correctly (cofactor = 1 path, no extra powm needed).
+- All `cofactor_bits` values should fall in the 33–65 range. A value outside this range
+  would indicate a classifier bug (accepting a composite cofactor or a cofactor too small
+  to be a medium prime).
+- Variation in `cofactor_bits` across sizes is expected — each challenge file has a
+  different q₀. Constant bits within a size is also expected because all 9 warm runs use
+  the same challenge file and therefore the same q₀.
+
+---
+
+## Figure 13 — Effective Throughput vs k32 Baseline (1 file)
+
+**File:** `13_effective_speedup.png`
+
+Plots the **effective inversion rate** for each algorithm relative to k32, accounting for
+both per-attempt wall-clock speed and theoretical success probability from Biryukov et al.
+(CRYPTO 2024).
+
+The metric is:
+
+```
+eff_rate      = speedup_total × P_success
+eff_ratio     = eff_rate_algo / eff_rate_k32
+```
+
+where `P_success` values used are:
+
+| Algorithm | P_success   |
+|-----------|-------------|
+| k16       | 2^(-16.0)   |
+| k32       | 2^(-24.9)   |
+| k35       | 2^(-21.0)   |
+| alg3      | 2^(-18.0)   |
+
+The k32 horizontal dashed line at 1.0 is the baseline. Values above 1.0 mean that algorithm
+produces successful cube-root inversions faster than k32 per unit time.
+
+**What to look for:**
+- **alg3** starts near ~119× above k32 at small sizes (where both algorithms have similar
+  `speedup_total` but alg3 succeeds 2^6.9 ≈ 119× more often), then declines as k32's
+  reconstruction speedup advantage grows at large sizes. At 24576 bits alg3 is still ~6.5×
+  above k32: `119 × (0.95 / 17.51) ≈ 6.5`.
+- **k16** sits below k32 at all sizes because k16's lower smoothness bound (B = 2^16)
+  gives it a much lower success probability despite fast reconstruction.
+- **k35** trades a higher success probability than k32 for slower per-attempt reconstruction,
+  resulting in a curve that crosses k32 only at very large challenge sizes.
+- The figure does **not** use empirical success rates — the challenges are pre-generated to
+  be smooth, so blinding almost always succeeds in one attempt. `P_success` is the
+  theoretical rate from the paper and is the correct denominator for comparing algorithms
+  in a real attack scenario.
