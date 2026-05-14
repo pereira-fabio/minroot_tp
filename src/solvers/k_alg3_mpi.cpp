@@ -17,7 +17,7 @@
 // Isolation from Algorithm 2:
 //   Challenges:  data/challenges/alg3/          (separate from k32/k35)
 //   cbrt caches: data/cbrt/<stem>.cbrt_alg3.<rank>  (different suffix)
-//   Results:     data/results/alg3_mpi_N*/
+//   Results:     results/algo3/alg3_mpi_N*/
 //   Prime table: reuses data/k32_primes.bin read-only (sieve method only)
 //
 // Communication pattern: identical to k32_mpi.

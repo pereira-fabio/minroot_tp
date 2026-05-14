@@ -13,7 +13,7 @@
 // Isolation from Algorithm 3:
 //   Challenges:  data/challenges/alg4/
 //   cbrt caches: data/cbrt/<stem>.cbrt_alg4.<rank>
-//   Results:     data/results/alg4_mpi_N*/
+//   Results:     results/algo4/alg4_mpi_N*/
 //   Prime table: reuses data/k32_primes.bin read-only (sieve method only)
 //
 // Communication pattern: identical to alg3_mpi.
@@ -228,6 +228,7 @@ static int solve_one(
         auto t_fac0 = std::chrono::high_resolution_clock::now();
 
         int attempt = 0;
+        bool bench_succeeded = false;
         const int MAX_ATTEMPTS = 256;
         size_t blinded_nbytes = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
         unsigned char *blinded_buf = (unsigned char *)malloc(blinded_nbytes);
@@ -315,6 +316,7 @@ static int solve_one(
             if (complete)
                 break;
         } // end blinding retry loop
+        bench_succeeded = (attempt < MAX_ATTEMPTS);
 
         free(blinded_buf);
 
@@ -326,7 +328,7 @@ static int solve_one(
             double dt = std::chrono::duration<double, std::milli>(
                             t_fac1 - t_fac0).count();
             accum_record(&fac_acc, dt);
-            if (bench > 0)
+            if (bench > 0 && bench_succeeded)
                 json_results.factor_times.push_back(dt);
             if (bench == 0)
             {
@@ -335,7 +337,7 @@ static int solve_one(
                        local_factors.count, attempt + 1);
                 fflush(stdout);
             }
-            if (bench > 0)
+            if (bench > 0 && bench_succeeded)
             {
                 json_results.blinding_attempts.push_back(attempt + 1);
 
@@ -400,7 +402,7 @@ static int solve_one(
                                    (int64_t)(my_hi - my_lo + 1),
                                    rank, nranks);
 
-        if (rank == 0 && bench > 0)
+        if (rank == 0 && bench > 0 && bench_succeeded)
         {
             json_results.cbrt_hit_ms.push_back(cbrt_hit_ms);
             json_results.cbrt_miss_ms.push_back(cbrt_miss_ms);
@@ -414,7 +416,7 @@ static int solve_one(
         {
             accum_record(&loc_acc, max_local_dt);
             cur_max_loc = max_local_dt;
-            if (bench > 0)
+            if (bench > 0 && bench_succeeded)
                 json_results.local_cbrt_times.push_back(max_local_dt);
         }
 
@@ -430,11 +432,11 @@ static int solve_one(
         {
             accum_record(&gat_acc, iter_gat2);
             iter_gat = iter_gat2;
-            if (bench > 0)
+            if (bench > 0 && bench_succeeded)
                 json_results.gather_times.push_back(iter_gat2);
             accum_record(&com_acc, iter_com2);
             iter_com = iter_com2;
-            if (bench > 0)
+            if (bench > 0 && bench_succeeded)
                 json_results.combine_times.push_back(iter_com2);
         }
 
@@ -442,7 +444,7 @@ static int solve_one(
         {
             double recon_dt = cur_max_loc + iter_gat + iter_com;
             accum_record(&recon_acc, recon_dt);
-            if (bench > 0)
+            if (bench > 0 && bench_succeeded)
             {
                 json_results.recon_times.push_back(recon_dt);
                 if (!json_results.factor_times.empty())

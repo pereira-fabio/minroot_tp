@@ -532,8 +532,7 @@ void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
         fprintf(f, "  \"hit_stats\": {\n");
         fprintf(f, "    \"smooth_count\": %d,\n", n_smooth);
         fprintf(f, "    \"almost_smooth_count\": %d,\n", n_almost);
-        if (n_multi > 0)
-            fprintf(f, "    \"multi_medium_count\": %d,\n", n_multi);
+        fprintf(f, "    \"multi_medium_count\": %d,\n", n_multi);
         fprintf(f, "    \"hit_type\": [");
         for (size_t i = 0; i < res.hit_type.size(); i++)
             fprintf(f, "%d%s", res.hit_type[i],

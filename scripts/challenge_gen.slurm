@@ -190,6 +190,39 @@ echo ""
 echo "alg4 group done."
 
 # ---------------------------------------------------------------------------
+# ALG4_MULTI group — runs after alg4 to avoid CPU contention.
+# Uses all available threads.
+#
+# Generates smooth_base × p1 × p2 challenges so the composite cofactor
+# path (Pollard's rho, hit_type=3) in alg4_mpi is exercised.
+# Sizes mirror the alg4 set for direct comparison.
+# Modulo files are written to data/challenges/alg4_multi/ (isolated namespace).
+# ---------------------------------------------------------------------------
+SIZES_ALG4_MULTI="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
+N_SIZES_ALG4_MULTI=$(echo $SIZES_ALG4_MULTI | wc -w)
+
+echo "============================================================"
+echo "Launching alg4_multi group: ${N_SIZES_ALG4_MULTI} sizes × ${NUM_CHALLENGES} challenges"
+echo "  Sizes:   $SIZES_ALG4_MULTI"
+echo "  Threads: ${SLURM_CPUS_PER_TASK} (all available)"
+echo "============================================================"
+echo ""
+
+for SIZE in $SIZES_ALG4_MULTI; do
+    echo "  [alg4_multi] bittarget=${SIZE}..."
+    OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK} ./challenges $NUM_CHALLENGES $SIZE 32 alg4_multi
+    RET=$?
+    if [ $RET -eq 0 ]; then
+        echo "  [alg4_multi] ${SIZE} bits DONE"
+    else
+        echo "  [alg4_multi] ${SIZE} bits FAILED (exit ${RET})"
+    fi
+done
+
+echo ""
+echo "alg4_multi group done."
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "============================================================"
@@ -204,6 +237,8 @@ echo "  data/challenges/alg3/"
 ls data/challenges/alg3/ 2>/dev/null | sed 's/^/    /'
 echo "  data/challenges/alg4/"
 ls data/challenges/alg4/ 2>/dev/null | sed 's/^/    /'
+echo "  data/challenges/alg4_multi/"
+ls data/challenges/alg4_multi/ 2>/dev/null | sed 's/^/    /'
 echo ""
 echo "Job ID: $SLURM_JOB_ID"
 echo "============================================================"

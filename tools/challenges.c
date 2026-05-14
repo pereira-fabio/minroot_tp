@@ -36,6 +36,8 @@ void print_usage(void)
 	printf("  alg3 mode: B-smooth base (B=2^32) plus one medium prime in (2^32,2^65].\n");
 	printf("Example (alg4):        ./challenges 5 2048 32 alg4\n");
 	printf("  alg4 mode: B-smooth base (B=2^32) plus one medium prime in (2^32,2^64].\n");
+	printf("Example (alg4_multi):  ./challenges 5 2048 32 alg4_multi\n");
+	printf("  alg4_multi mode: B-smooth base plus TWO medium primes — composite cofactor.\n");
 }
 
 static void generate_one_challenge(
@@ -274,6 +276,88 @@ static void generate_one_alg4_challenge(
 	mpz_clears(smooth, q0, tmp, NULL);
 }
 
+/*
+ * Generate one composite-cofactor (Algorithm 4 multi-medium) challenge.
+ *
+ * challenge = smooth_base * p1 * p2  where:
+ *   smooth_base = product of primes ≤ 2^32
+ *   p1, p2      = two independent primes, each in (2^32, 2^64]
+ *
+ * This structure forces the cofactor (p1*p2) to be composite, exercising
+ * Pollard's rho path in ksc_alg4_broadcast_cofactor (hit_type = 3).
+ */
+static void generate_one_alg4_multi_challenge(
+	mpz_t result, const mpz_t modulo,
+	mp_bitcnt_t bittarget,
+	gmp_randstate_t rstate,
+	const char *factors_path, int *count_out)
+{
+	mpz_t smooth, p1, p2, tmp;
+	mpz_inits(smooth, p1, p2, tmp, NULL);
+
+	FILE *f = fopen(factors_path, "wb");
+
+	/* Step 1: B-smooth base (primes ≤ 2^32).
+	 * Leave ≥130 bits headroom so p1 and p2 each fit in ≤64 bits. */
+	const mp_bitcnt_t B_BITS = 32;
+	long threshold = (long)bittarget > 130 ? (long)bittarget - 130 : (long)bittarget / 2;
+
+	mpz_set_ui(smooth, 1);
+	int smooth_count = 0;
+	do {
+		mpz_urandomb(tmp, rstate, B_BITS);
+		mpz_nextprime(tmp, tmp);
+		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(tmp, 2) >
+		    mpz_sizeinbase(modulo, 2))
+			continue;
+		if (f) mpz_out_raw(f, tmp);
+		mpz_mul(smooth, smooth, tmp);
+		smooth_count++;
+	} while ((long)mpz_sizeinbase(smooth, 2) < threshold);
+
+		/* Step 2: two independent medium primes p1, p2 each in (2^32, 2^64].
+	 * Bit-lengths are chosen independently (33..63 each) so challenges span
+	 * all cofactor-size combinations, exercising Pollard's rho at varying sizes. */
+	int pair_ok = 0;
+	int pair_tries = 0;
+	mp_bitcnt_t p1_bits, p2_bits;
+
+	while (!pair_ok && pair_tries < 100) {
+		mpz_urandomb(tmp, rstate, 5);
+		p1_bits = 33 + (mp_bitcnt_t)(mpz_get_ui(tmp) % 31); /* 33..63 */
+		mpz_urandomb(tmp, rstate, 5);
+		p2_bits = 33 + (mp_bitcnt_t)(mpz_get_ui(tmp) % 31); /* 33..63 */
+
+		mpz_urandomb(p1, rstate, p1_bits);
+		mpz_setbit(p1, p1_bits - 1);
+		mpz_nextprime(p1, p1);
+
+		mpz_urandomb(p2, rstate, p2_bits);
+		mpz_setbit(p2, p2_bits - 1);
+		mpz_nextprime(p2, p2);
+
+		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(p1, 2) +
+		    mpz_sizeinbase(p2, 2) <= mpz_sizeinbase(modulo, 2))
+			pair_ok = 1;
+		pair_tries++;
+	}
+
+	if (!pair_ok) {
+		/* Fallback: two smallest distinct 33-bit primes. */
+		mpz_set_ui(p1, (1UL << 31) | (1UL << 32));
+		mpz_nextprime(p1, p1);
+		mpz_add_ui(p2, p1, 2);
+		mpz_nextprime(p2, p2);
+	}
+
+	if (f) { mpz_out_raw(f, p1); mpz_out_raw(f, p2); fclose(f); }
+
+	mpz_mul(result, smooth, p1);
+	mpz_mul(result, result, p2);
+	*count_out = smooth_count + 2;
+	mpz_clears(smooth, p1, p2, tmp, NULL);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 4)
@@ -293,15 +377,18 @@ int main(int argc, char **argv)
 	mp_bitcnt_t bittarget = (mp_bitcnt_t)strtoul(argv[2], NULL, 10);
 	mp_bitcnt_t bitbound = (mp_bitcnt_t)strtoul(argv[3], NULL, 10);
 
-	/* Optional 4th argument: "alg3" or "alg4" selects generation mode. */
-	int is_alg3 = (argc == 5 && strcmp(argv[4], "alg3") == 0);
-	int is_alg4 = (argc == 5 && strcmp(argv[4], "alg4") == 0);
+	/* Optional 4th argument: "alg3", "alg4", or "alg4_multi" selects mode. */
+	int is_alg3       = (argc == 5 && strcmp(argv[4], "alg3")       == 0);
+	int is_alg4       = (argc == 5 && strcmp(argv[4], "alg4")       == 0);
+	int is_alg4_multi = (argc == 5 && strcmp(argv[4], "alg4_multi") == 0);
 
 	char savefolder[128];
 	if (is_alg3)
 		snprintf(savefolder, sizeof(savefolder), "data/challenges/alg3/");
 	else if (is_alg4)
 		snprintf(savefolder, sizeof(savefolder), "data/challenges/alg4/");
+	else if (is_alg4_multi)
+		snprintf(savefolder, sizeof(savefolder), "data/challenges/alg4_multi/");
 	else
 		snprintf(savefolder, sizeof(savefolder),
 				 "data/challenges/k%lu/", (unsigned long)bitbound);
@@ -312,7 +399,7 @@ int main(int argc, char **argv)
 			printf("Warning: could not create %s\n", savefolder);
 	}
 
-	if (!is_alg3 && !is_alg4 && bitbound > bittarget)
+	if (!is_alg3 && !is_alg4 && !is_alg4_multi && bitbound > bittarget)
 		printf("Note: bitbound (%lu) > bittarget (%lu).\n",
 			   (unsigned long)bitbound, (unsigned long)bittarget);
 
@@ -326,6 +413,9 @@ int main(int argc, char **argv)
 			   num_outputs, (unsigned long)bittarget);
 	else if (is_alg4)
 		printf("Generating %u alg4 challenge(s), ~%lu bits, smooth(B=2^32) * prime(<=2^64)\n\n",
+			   num_outputs, (unsigned long)bittarget);
+	else if (is_alg4_multi)
+		printf("Generating %u alg4_multi challenge(s), ~%lu bits, smooth(B=2^32) * p1 * p2 (composite cofactor)\n\n",
 			   num_outputs, (unsigned long)bittarget);
 	else
 		printf("Generating %u challenge(s), ~%lu bits, B=2^%lu\n\n",
@@ -346,6 +436,9 @@ int main(int argc, char **argv)
 				 savefolder, (unsigned long)bittarget);
 	else if (is_alg4)
 		snprintf(modulo_path, sizeof(modulo_path), "%smodulo_alg4_%lu.txt",
+				 savefolder, (unsigned long)bittarget);
+	else if (is_alg4_multi)
+		snprintf(modulo_path, sizeof(modulo_path), "%smodulo_alg4_multi_%lu.txt",
 				 savefolder, (unsigned long)bittarget);
 	else
 		snprintf(modulo_path, sizeof(modulo_path), "%smodulo_%lu_%lu.txt",
@@ -395,7 +488,7 @@ int main(int argc, char **argv)
 #endif
 
 #pragma omp parallel for schedule(dynamic, 1) num_threads(n_threads) \
-	shared(savefolder, modulo, bitbound, bittarget, num_outputs, is_alg3, is_alg4)
+	shared(savefolder, modulo, bitbound, bittarget, num_outputs, is_alg3, is_alg4, is_alg4_multi)
 	for (int i = 0; i < (int)num_outputs; i++)
 	{
 		/* Each challenge gets its own deterministic random state */
@@ -415,6 +508,11 @@ int main(int argc, char **argv)
 					 savefolder, i, (unsigned long)bittarget);
 			snprintf(cpath, sizeof(cpath), "%schallenge_%d_alg4_%lu.txt",
 					 savefolder, i, (unsigned long)bittarget);
+		} else if (is_alg4_multi) {
+			snprintf(fpath, sizeof(fpath), "%sfactors_%d_alg4_multi_%lu.txt",
+					 savefolder, i, (unsigned long)bittarget);
+			snprintf(cpath, sizeof(cpath), "%schallenge_%d_alg4_multi_%lu.txt",
+					 savefolder, i, (unsigned long)bittarget);
 		} else {
 			snprintf(fpath, sizeof(fpath), "%sfactors_%d_%lu_%lu.txt",
 					 savefolder, i,
@@ -433,6 +531,9 @@ int main(int argc, char **argv)
 		else if (is_alg4)
 			generate_one_alg4_challenge(result, modulo, bittarget,
 										rstate, fpath, &count);
+		else if (is_alg4_multi)
+			generate_one_alg4_multi_challenge(result, modulo, bittarget,
+											  rstate, fpath, &count);
 		else
 			generate_one_challenge(result, modulo, bitbound, bittarget,
 								   rstate, fpath, &count);

@@ -1,5 +1,8 @@
 """
-ploter.py — Benchmark charts for MinRoot VDF cryptanalysis (k16/k32/k35).
+ploter.py — Benchmark charts for MinRoot VDF cryptanalysis (k16/k32/k35/alg3/alg4).
+
+Results are organised under results/algo2/, results/algo3/, results/algo4/ (and so
+on for future algorithms).  The glob pattern 'results/**/*.json' covers all of them.
 
 Usage (run from project root):
     analysis/env/bin/python3 analysis/ploter.py 'results/**/*.json' [--out DIR] [--format png|pdf] [--ranks N]
@@ -12,7 +15,14 @@ Options:
 Example:
     analysis/env/bin/python3 analysis/ploter.py 'results/**/*.json' --out figures/ --format png
 
-Figures:
+    # single algorithm
+    analysis/env/bin/python3 analysis/ploter.py 'results/algo2/**/*.json' --out figures/algo2/
+
+Output structure:
+    <out>/algoN/        per-algorithm figures (01–10 + hit stats where applicable)
+    <out>/comparison/   cross-algorithm figures (11, 13)
+
+Per-algorithm figures (written to <out>/algo2/, <out>/algo3/, <out>/algo4/):
     01_speedup_total.png            speedup vs challenge size (end-to-end)
     02_speedup_recon.png            speedup vs challenge size (reconstruction only)
     03_total_time_scaling.png       total_ms vs size (log-log) with powm baseline
@@ -20,12 +30,14 @@ Figures:
     05_timing_breakdown_<N>b.png    bar chart per challenge size
     06_recon_breakdown.png          local_cbrt / gather / combine vs size
     07_rank_load_balance_<N>b.png   primes found per MPI rank
-    09_strong_scaling_k<K>_<M>.png  time & speedup vs MPI ranks (per algo/method)
+    09_strong_scaling_<algo>_<M>.png  time & speedup vs MPI ranks
     10_parallel_efficiency.png      scaling efficiency vs ranks
+    12_alg3_hit_stats.png           (algo3) smooth/almost-smooth + q₀ bit distribution
+    14_alg4_hit_stats.png           (algo4) smooth/one-medium/multi-medium + medium prime count
+
+Comparison figures (written to <out>/comparison/):
     11_algorithm_comparison_<M>.png k16 vs k32 vs k35 vs alg3 vs alg4 speedup at max ranks
-    12_alg3_hit_stats.png           smooth vs almost-smooth classification + q₀ bit distribution
     13_effective_speedup.png        inversions-per-unit-time × success-probability vs k32 baseline
-    14_alg4_hit_stats.png           alg4 smooth/almost-smooth/multi-medium + medium prime count
 """
 
 import json
@@ -118,6 +130,12 @@ def algo_name(d):
         return "alg4"
     return "alg3" if is_alg3(d) else f"k{d['metadata']['k_size']}"
 
+ALGO_MAP = {"k16": "algo2", "k32": "algo2", "k35": "algo2", "alg3": "algo3", "alg4": "algo4"}
+
+def algo_group(d):
+    """Map a dataset to its results folder name (algo2 / algo3 / algo4 / …)."""
+    return ALGO_MAP.get(algo_name(d), "unknown")
+
 # Theoretical success probabilities from Biryukov et al. (CRYPTO 2024)
 P_THEORY = {
     "k16":  2**(-16.0),
@@ -134,13 +152,22 @@ OUTPUT_FMT = "png"   # overwritten in main() from --format
 def load_file(path):
     with open(path) as f:
         d = json.load(f)
-    # Inject stable algorithm identity from filename so alg3 files without
-    # hit_stats (old runs) are not misclassified as k32.
-    basename = os.path.basename(path)
-    if basename.startswith("alg4_"):
-        d["_source_algo"] = "alg4"
-    elif basename.startswith("alg3_"):
+    # Detect algorithm identity from the directory path first (results/algoN/…)
+    # so that future algorithms only require a new folder, not a filename convention.
+    # Fall back to filename prefix for files outside the structured tree.
+    norm = path.replace("\\", "/")
+    parts = norm.split("/")
+    algo_dir = next((p for p in parts if p.startswith("algo") and p[4:].isdigit()), None)
+    if algo_dir == "algo3":
         d["_source_algo"] = "alg3"
+    elif algo_dir == "algo4":
+        d["_source_algo"] = "alg4"
+    elif algo_dir is None:
+        basename = os.path.basename(path)
+        if basename.startswith("alg4_"):
+            d["_source_algo"] = "alg4"
+        elif basename.startswith("alg3_"):
+            d["_source_algo"] = "alg3"
     return d
 
 def config_key(d):
@@ -963,6 +990,41 @@ def plot_effective_speedup(datasets, out_dir):
     fig.tight_layout()
     save(fig, os.path.join(out_dir, f"13_effective_speedup.{OUTPUT_FMT}"), "")
 
+# ── Per-algo and comparison runners ───────────────────────────────────────────
+
+def _run_per_algo_plots(datasets, requested_ranks, out_dir):
+    """Figures 01–10 + hit stats for a single algorithm's datasets."""
+    if not datasets:
+        return
+    all_sizes     = sorted(set(d["metadata"]["challenge_bits"] for d in datasets))
+    all_rank_vals = sorted(set(d["metadata"]["mpi_ranks"]      for d in datasets))
+    local_max     = max(all_rank_vals)
+    ranks         = requested_ranks if requested_ranks and requested_ranks in all_rank_vals else local_max
+
+    all_groups    = group_by_config(datasets)
+    cmp_groups    = filter_by_ranks(all_groups, ranks)
+    cmp_styles    = assign_styles(cmp_groups)
+    powm_baseline = get_powm_baseline(datasets, ranks)
+
+    plot_speedup_total(cmp_groups, cmp_styles, out_dir)
+    plot_speedup_recon(cmp_groups, cmp_styles, out_dir)
+    plot_total_time_scaling(cmp_groups, cmp_styles, powm_baseline, out_dir)
+    plot_factor_recon_scaling(cmp_groups, cmp_styles, out_dir)
+    plot_recon_breakdown_scaling(cmp_groups, cmp_styles, out_dir)
+    plot_timing_breakdown_per_size(cmp_groups, cmp_styles, powm_baseline, all_sizes, out_dir)
+    plot_rank_load_balance(datasets, all_sizes, out_dir)
+    plot_strong_scaling(datasets, out_dir)
+    plot_parallel_efficiency(datasets, out_dir)
+    plot_hit_stats(datasets, out_dir)       # no-op when no alg3 data present
+    plot_alg4_hit_stats(datasets, out_dir)  # no-op when no alg4 data present
+
+
+def _run_comparison_plots(datasets, out_dir):
+    """Figures 11 + 13: cross-algorithm comparison into out_dir."""
+    plot_algorithm_comparison(datasets, out_dir)
+    plot_effective_speedup(datasets, out_dir)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1009,47 +1071,39 @@ def main():
         d["metadata"]["challenge_bits"] = snap_to_nominal(d["metadata"]["challenge_bits"])
     datasets = dedup_datasets(datasets)
 
-    all_sizes    = sorted(set(d["metadata"]["challenge_bits"] for d in datasets))
-    all_rank_vals = sorted(set(d["metadata"]["mpi_ranks"]    for d in datasets))
-    max_ranks    = max(all_rank_vals)
-    target_ranks = args.ranks if args.ranks else max_ranks
+    all_sizes     = sorted(set(d["metadata"]["challenge_bits"] for d in datasets))
+    all_rank_vals = sorted(set(d["metadata"]["mpi_ranks"]      for d in datasets))
 
     print(f"  {len(datasets)} datasets")
-    print(f"  Challenge sizes:  {all_sizes}")
-    print(f"  MPI rank counts:  {all_rank_vals}")
-    print(f"  Comparison plots: rank count = {target_ranks}")
+    print(f"  Challenge sizes : {all_sizes}")
+    print(f"  MPI rank counts : {all_rank_vals}")
     print()
 
-    all_groups    = group_by_config(datasets)
-    cmp_groups    = filter_by_ranks(all_groups, target_ranks)
-    cmp_styles    = assign_styles(cmp_groups)
-    powm_baseline = get_powm_baseline(datasets, target_ranks)
+    # ── Group datasets by algorithm folder ──
+    datasets_by_algo = defaultdict(list)
+    for d in datasets:
+        datasets_by_algo[algo_group(d)].append(d)
 
-    print(f"Generating figures → {args.out}/\n")
-
-    # ── Comparison plots at fixed rank count ──
-    plot_speedup_total(cmp_groups, cmp_styles, args.out)
-    plot_speedup_recon(cmp_groups, cmp_styles, args.out)
-    plot_total_time_scaling(cmp_groups, cmp_styles, powm_baseline, args.out)
-    plot_factor_recon_scaling(cmp_groups, cmp_styles, args.out)
-    plot_recon_breakdown_scaling(cmp_groups, cmp_styles, args.out)
-    plot_timing_breakdown_per_size(cmp_groups, cmp_styles, powm_baseline,
-                                   all_sizes, args.out)
-    plot_rank_load_balance(datasets, all_sizes, args.out)
-
-    # ── Scaling plots (vary rank count) ──
-    plot_strong_scaling(datasets, args.out)
-    plot_parallel_efficiency(datasets, args.out)
+    # ── Per-algorithm plots ──
+    for algo_key in sorted(datasets_by_algo):
+        algo_ds   = datasets_by_algo[algo_key]
+        algo_out  = os.path.join(args.out, algo_key)
+        os.makedirs(algo_out, exist_ok=True)
+        algo_ranks = sorted(set(d["metadata"]["mpi_ranks"] for d in algo_ds))
+        print(f"── {algo_key}  ({len(algo_ds)} datasets, ranks {algo_ranks})  →  {algo_out}/\n")
+        _run_per_algo_plots(algo_ds, args.ranks, algo_out)
 
     # ── Cross-algorithm comparison ──
-    plot_algorithm_comparison(datasets, args.out)
-    plot_hit_stats(datasets, args.out)
-    plot_alg4_hit_stats(datasets, args.out)
-    plot_effective_speedup(datasets, args.out)
+    comparison_out = os.path.join(args.out, "comparison")
+    os.makedirs(comparison_out, exist_ok=True)
+    print(f"\n── comparison  →  {comparison_out}/\n")
+    _run_comparison_plots(datasets, comparison_out)
 
-    n_out = len([f for f in os.listdir(args.out)
-                 if f.endswith(f".{OUTPUT_FMT}")])
-    print(f"\nDone. {n_out} {OUTPUT_FMT.upper()} file(s) in {args.out}/")
+    total = sum(
+        1 for root, _, files in os.walk(args.out)
+        for f in files if f.endswith(f".{OUTPUT_FMT}")
+    )
+    print(f"\nDone. {total} {OUTPUT_FMT.upper()} file(s) in {args.out}/")
 
 if __name__ == "__main__":
     main()
