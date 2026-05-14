@@ -134,17 +134,16 @@ echo "k16/k32/k35 groups done."
 # Sizes chosen to match the alg3_mpi --all set plus a few extras.
 # Modulo files are written to data/challenges/alg3/ (isolated namespace).
 # ---------------------------------------------------------------------------
-SIZES_ALG3="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
-N_SIZES_ALG3=$(echo $SIZES_ALG3 | wc -w)
+N_SIZES_ALG3=$(echo $SIZES | wc -w)
 
 echo "============================================================"
 echo "Launching alg3 group: ${N_SIZES_ALG3} sizes × ${NUM_CHALLENGES} challenges"
-echo "  Sizes:   $SIZES_ALG3"
+echo "  Sizes:   $SIZES"
 echo "  Threads: ${SLURM_CPUS_PER_TASK} (all available)"
 echo "============================================================"
 echo ""
 
-for SIZE in $SIZES_ALG3; do
+for SIZE in $SIZES; do
     echo "  [alg3] bittarget=${SIZE}..."
     OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK} ./challenges $NUM_CHALLENGES $SIZE 32 alg3
     RET=$?
@@ -165,12 +164,11 @@ echo "alg3 group done."
 # Sizes mirror the alg3 set so both algorithms are directly comparable.
 # Modulo files are written to data/challenges/alg4/ (isolated namespace).
 # ---------------------------------------------------------------------------
-SIZES_ALG4="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
-N_SIZES_ALG4=$(echo $SIZES_ALG4 | wc -w)
+N_SIZES_ALG4=$(echo $SIZES | wc -w)
 
 echo "============================================================"
 echo "Launching alg4 group: ${N_SIZES_ALG4} sizes × ${NUM_CHALLENGES} challenges"
-echo "  Sizes:   $SIZES_ALG4"
+echo "  Sizes:   $SIZES"
 echo "  Threads: ${SLURM_CPUS_PER_TASK} (all available)"
 echo "============================================================"
 echo ""

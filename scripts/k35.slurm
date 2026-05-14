@@ -63,7 +63,7 @@ BENCH=50
 # k35 breakeven vs powm is ~17000 bits; smaller sizes still useful for comparison
 SIZES="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
 
-JSON_DIR=$SLURM_SUBMIT_DIR/data/results/k35_mpi_N${N_NODES}
+JSON_DIR=$SLURM_SUBMIT_DIR/data/results/k35_$SLURM_JOB_ID/N${N_NODES}
 mkdir -p $JSON_DIR
 
 # ---------------------------------------------------------------------------

@@ -55,7 +55,7 @@ BENCH=50
 
 SIZES="256 512 1024 2048 4096 6144 8192 12288 16384 20480 24576"
 
-JSON_DIR=$SLURM_SUBMIT_DIR/data/results/alg3_mpi_N${N_NODES}
+JSON_DIR=$SLURM_SUBMIT_DIR/data/results/alg3_$SLURM_JOB_ID/N${N_NODES}
 mkdir -p $JSON_DIR
 
 # ---------------------------------------------------------------------------
