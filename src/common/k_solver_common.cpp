@@ -185,16 +185,16 @@ void ksc_gather_and_combine_cbrt(
 // ---------------------------------------------------------------------------
 
 void ksc_compute_local_cbrt(mpz_t result,
-                             const kfactor_list_t *factors,
-                             const mpz_t e,
-                             const mpz_t modulo,
-                             cbrt_cache_t *cache,
-                             bool *cache_dirty,
-                             double *hit_ms_out,
-                             double *miss_ms_out,
-                             int *hits_out,
-                             int *misses_out,
-                             bool record)
+                            const kfactor_list_t *factors,
+                            const mpz_t e,
+                            const mpz_t modulo,
+                            cbrt_cache_t *cache,
+                            bool *cache_dirty,
+                            double *hit_ms_out,
+                            double *miss_ms_out,
+                            int *hits_out,
+                            int *misses_out,
+                            bool record)
 {
     int n = factors->count;
 
@@ -943,8 +943,22 @@ int ksc_alg3_broadcast_cofactor(
 // ksc_alg4_broadcast_cofactor
 // ---------------------------------------------------------------------------
 
-#define ALG4_B_COFACTOR_BITS 64
-#define ALG4_MAX_MEDIUM 4 // generous upper bound; two primes >2^32 exceed 2^64
+// ALG4_B_COFACTOR_BITS: maximum bit-length of the cofactor that this function
+// will attempt to factor via Pollard's rho.
+//
+// For alg4 (single medium prime):   cofactor is prime <= 2^64 → 64 bits.
+// For alg4_multi (two medium primes): cofactor = p1*p2 where each p_i is in
+//   (2^32, 2^64].  Both primes have at least 33 bits, so their product has
+//   at least 66 bits and at most 2*63 = 126 bits.  Setting the limit to 128
+//   covers all alg4_multi challenges without accepting unreasonably large
+//   composites.
+//
+// kf_try_factor_b64smooth is recursive: it splits via Pollard's rho and
+// checks each factor for 2^64-smoothness.  A 126-bit composite of two
+// 63-bit primes is correctly handled — the recursion terminates when each
+// half is confirmed prime and <= 2^64.
+#define ALG4_B_COFACTOR_BITS 128
+#define ALG4_MAX_MEDIUM 4 // up to 4 medium primes (alg4_multi uses 2)
 
 int ksc_alg4_broadcast_cofactor(
     kfactor_list_t *medium_factors_out,
@@ -1010,7 +1024,10 @@ int ksc_alg4_broadcast_cofactor(
             else if (mpz_sizeinbase(q, 2) <= ALG4_B_COFACTOR_BITS + 1 &&
                      mpz_probab_prime_p(q, 15))
             {
-                // Single medium prime ≤ 2^64
+                // Single medium prime in (2^32, 2^128].
+                // alg4:       q0 in (2^32, 2^64]  — 33..64 bits
+                // alg4_multi: p1 or p2 alone never reaches here because
+                //             they are multiplied together before we see them.
                 complete = 1;
                 n_medium = 1;
                 kfl_append_mpz(medium_factors_out, q, 1);
@@ -1025,7 +1042,16 @@ int ksc_alg4_broadcast_cofactor(
             }
             else if (mpz_sizeinbase(q, 2) <= ALG4_B_COFACTOR_BITS + 1)
             {
-                // Composite ≤ 2^64: try Pollard's rho
+                // Composite cofactor with all prime factors <= 2^64.
+                //
+                // alg4_multi structure: cofactor = p1 * p2 where each p_i is
+                // a prime in (2^32, 2^64].  The product is 66..126 bits —
+                // previously unreachable because ALG4_B_COFACTOR_BITS was 64.
+                //
+                // kf_try_factor_b64smooth handles this recursively:
+                //   1. Pollard's rho splits q into p1 and p2.
+                //   2. Each half is <= 64 bits → confirmed 2^64-smooth.
+                //   3. Returns true with both primes in poly.
                 kfactor_list_t poly;
                 kfl_init(&poly);
                 bool ok = kf_try_factor_b64smooth(q, &poly, 1);
@@ -1047,9 +1073,7 @@ int ksc_alg4_broadcast_cofactor(
                                     poly.items[i].prime);
                                 if (tmp && written > 0 && written <= cbrt_bytes)
                                 {
-                                    memcpy(medium_buf
-                                           + (size_t)slot * cbrt_bytes
-                                           + cbrt_bytes - written,
+                                    memcpy(medium_buf + (size_t)slot * cbrt_bytes + cbrt_bytes - written,
                                            tmp, written);
                                     free(tmp);
                                 }
@@ -1059,7 +1083,8 @@ int ksc_alg4_broadcast_cofactor(
                 }
                 kfl_free(&poly);
             }
-            // else: cofactor > 2^64 → retry (complete stays 0)
+            // else: cofactor > 2^128 or cannot be fully factored into
+            // 2^64-smooth components → retry with a new blinding factor.
         }
         mpz_clears(q, r, NULL);
     }

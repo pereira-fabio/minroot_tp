@@ -442,6 +442,34 @@ static int solve_one(
             kf_trial_divide_sieve(blinded_challenge, my_lo, my_hi,
                                   sp_count, sp, &local_factors);
 
+            // -- Rank 0: catch small primes (≤ 65536) missed by the sieve --
+            //
+            // The sieve covers [65537, 2^32].  Challenges generated with small
+            // random seeds can include prime factors ≤ 65536 (from the smooth
+            // base) that are below the sieve start.  This is especially likely
+            // for 256-bit alg4_multi challenges where only ~4 primes are needed.
+            //
+            // Fix: rank 0 additionally trial-divides by all primes in sp[]
+            // (the Eratosthenes base, covering [2, 65536]).  This is O(6542)
+            // mpz_tdiv_ui calls — negligible cost even for large challenges.
+            // Other ranks don't need this: by MPI partitioning, rank 0 is
+            // responsible for its sieve slice AND the sub-65537 range.
+            if (rank == 0)
+            {
+                for (int i = 0; i < sp_count; i++)
+                {
+                    unsigned long p = (unsigned long)sp[i];
+                    if (mpz_divisible_ui_p(blinded_challenge, p))
+                    {
+                        // count_exponent tallies the exact power without
+                        // modifying blinded_challenge.
+                        int e = count_exponent(blinded_challenge, p);
+                        if (e > 0)
+                            kfl_append_ul(&local_factors, p, e);
+                    }
+                }
+            }
+
             // -- ALG4 cofactor check --
             // Each rank computes the product of its found prime powers,
             // then ksc_alg4_broadcast_cofactor gathers all products to rank 0,
