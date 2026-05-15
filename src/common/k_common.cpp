@@ -380,46 +380,40 @@ void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
     int n_total = res.bench_count;
     int n_warm = (n_total > 1) ? n_total - 1 : 0;
 
-    // Compute warm averages — exclude runs where blinding exhausted all precomputed
-    // pairs (blinding_attempts > 1). Those runs retried 256+ times and are not
-    // representative of normal performance. They are kept in warm_runs for
-    // transparency but excluded from warm_avg and speedup calculations.
+    // Compute warm averages.
+    //
+    // Two distinct failure modes:
+    //   (a) bench_succeeded = false (blinding exhausted all 256 attempts):
+    //       Nothing is pushed to any vector for that run.  Use factor_times.size()
+    //       as the authoritative count of recorded runs — do NOT loop to n_warm.
+    //   (b) bench_succeeded = true but blinding_attempts[i] > 1:
+    //       Run completed but needed multiple blinding rounds; timing is skewed.
+    //       Recorded in warm_runs but excluded from warm_avg.
+    //
+    // runs_failed = (a) runs  |  runs_valid = recorded runs that pass filter (b)
     double warm_factor_avg = 0.0, warm_recon_avg = 0.0, warm_total_avg = 0.0;
-    int n_valid = 0;
-    int n_failed = 0;
-    // factor_times, recon_times, total_times and blinding_attempts are all
-    // pushed for bench > 0 only, so each has exactly n_warm entries, 0-indexed
-    // [0..n_warm-1].  The old loop used i=1..n_warm reading times[i], which
-    // accessed times[n_warm] — one past the end (UB).  Fixed: use i=0..n_warm-1
-    // and index all four vectors with the same i.
-    if (n_warm > 0)
+    int n_recorded = (int)res.factor_times.size(); // runs where bench_succeeded = true
+    int n_failed   = n_warm - n_recorded;          // runs where bench exhausted blindings
+    int n_valid    = 0;
+    for (int i = 0; i < n_recorded; i++)
     {
-        for (int i = 0; i < n_warm; i++)
+        bool bad_blinding = (i < (int)res.blinding_attempts.size() &&
+                             res.blinding_attempts[i] > 1);
+        if (!bad_blinding)
         {
-            bool failed = false;
-            if (i < (int)res.blinding_attempts.size() &&
-                res.blinding_attempts[i] > 1)
-            {
-                failed = true;
-                n_failed++;
-            }
-            if (!failed)
-            {
-                if (i < (int)res.factor_times.size())
-                    warm_factor_avg += res.factor_times[i];
-                if (i < (int)res.recon_times.size())
-                    warm_recon_avg += res.recon_times[i];
-                if (i < (int)res.total_times.size())
-                    warm_total_avg += res.total_times[i];
-                n_valid++;
-            }
+            warm_factor_avg += res.factor_times[i];
+            if (i < (int)res.recon_times.size())
+                warm_recon_avg += res.recon_times[i];
+            if (i < (int)res.total_times.size())
+                warm_total_avg += res.total_times[i];
+            n_valid++;
         }
-        if (n_valid > 0)
-        {
-            warm_factor_avg /= n_valid;
-            warm_recon_avg /= n_valid;
-            warm_total_avg /= n_valid;
-        }
+    }
+    if (n_valid > 0)
+    {
+        warm_factor_avg /= n_valid;
+        warm_recon_avg  /= n_valid;
+        warm_total_avg  /= n_valid;
     }
 
     fprintf(f, "{\n");
@@ -435,7 +429,7 @@ void write_benchmark_json(const char *filepath, const benchmark_results_t &res)
     fprintf(f, "    \"runs_warm\": %d,\n", n_warm);
     fprintf(f, "    \"runs_valid\": %d,\n", n_valid);
     fprintf(f, "    \"runs_failed\": %d,\n", n_failed);
-    fprintf(f, "    \"note\": \"run 0=cold-start, runs with blinding_attempts>1 excluded from warm_avg\",\n");
+    fprintf(f, "    \"note\": \"run 0=cold-start; runs_failed=blinding exhausted; runs_valid=recorded with attempts==1\",\n");
     fprintf(f, "    \"powm_baseline_ms\": %.4f\n", res.powm_baseline_ms);
     fprintf(f, "  },\n");
 
