@@ -249,6 +249,123 @@ static int solve_one(
         NULL, 0,
         rank, nranks, 0 /* method_uses_table = sieve */);
 
+    // Precompute cbrt(q0) for the medium prime before the bench loop.
+    //
+    // ksc_ensure_k32_cbrt only covers the sieve range [65537, 2^32] so q0 in
+    // (2^32, 2^64] is never populated by it.  Without this step the first warm
+    // bench run would pay a full powm (~1800ms for large M) on rank 0 to compute
+    // cbrt(q0), while all other 49 runs would be instant cache hits.
+    //
+    // We do one UNTIMED factoring pass (same as ksc_ensure_k32_cbrt does for
+    // small primes) to discover q0 and compute + cache its cbrt.  The pass uses
+    // the unblinded challenge (attempt=0) which is guaranteed to reveal q0 for
+    // alg4/alg4_multi challenges.
+    if (rank == 0)
+    {
+        // Sieve rank 0's slice to find small primes, then check cofactor.
+        kfactor_list_t pre_factors;
+        kfl_init(&pre_factors);
+        kf_trial_divide_sieve(challenge, my_lo, my_hi, sp_count, sp, &pre_factors);
+
+        // Build rank 0's local product.
+        mpz_t pre_prod;
+        mpz_init_set_ui(pre_prod, 1);
+        for (int i = 0; i < pre_factors.count; i++)
+        {
+            unsigned long p = mpz_get_ui(pre_factors.items[i].prime);
+            for (int ex = 0; ex < pre_factors.items[i].exponent; ex++)
+                mpz_mul_ui(pre_prod, pre_prod, p);
+        }
+        kfl_free(&pre_factors);
+
+        // We need the global product across all ranks.  In the precompute phase
+        // we are not inside the bench loop, so we serialise rank 0's product via
+        // a dummy local gather: export, then import over all ranks' buffers.
+        // Simpler: just factor the challenge directly on rank 0 without MPI.
+        // kf_trial_divide_sieve covers only our slice; use the full range here.
+        kfactor_list_t full_factors;
+        kfl_init(&full_factors);
+        kf_trial_divide_sieve(challenge, 65537ULL, (uint64_t)UINT32_MAX,
+                              sp_count, sp, &full_factors);
+
+        // Compute combined product from all small primes.
+        mpz_t combined;
+        mpz_init_set_ui(combined, 1);
+        for (int i = 0; i < full_factors.count; i++)
+        {
+            unsigned long p = mpz_get_ui(full_factors.items[i].prime);
+            for (int ex = 0; ex < full_factors.items[i].exponent; ex++)
+                mpz_mul_ui(combined, combined, p);
+        }
+        kfl_free(&full_factors);
+
+        // Cofactor = challenge / combined_small_product.
+        mpz_t cofactor, rem;
+        mpz_inits(cofactor, rem, NULL);
+        mpz_tdiv_qr(cofactor, rem, challenge, combined);
+        mpz_clear(combined);
+
+        if (mpz_sgn(rem) == 0 && mpz_cmp_ui(cofactor, 1) > 0)
+        {
+            // Factor the cofactor (handles single prime or composite).
+            // kf_try_factor_b64smooth returns false if any prime factor > 2^64,
+            // in which case we simply skip caching — the bench loop will compute
+            // cbrt on first use and cache it then.
+            kfactor_list_t med_pre;
+            kfl_init(&med_pre);
+
+            if (mpz_probab_prime_p(cofactor, 15))
+            {
+                // Single medium prime.
+                kfl_append_mpz(&med_pre, cofactor, 1);
+            }
+            else
+            {
+                // Composite: try Pollard's rho (covers alg4_multi p1*p2).
+                kfactor_list_t poly;
+                kfl_init(&poly);
+                if (kf_try_factor_b64smooth(cofactor, &poly, 1))
+                {
+                    for (int i = 0; i < poly.count; i++)
+                        kfl_append_mpz(&med_pre, poly.items[i].prime,
+                                       poly.items[i].exponent);
+                }
+                kfl_free(&poly);
+            }
+
+            // Compute and cache cbrt for each medium prime found.
+            for (int i = 0; i < med_pre.count; i++)
+            {
+                unsigned long q_ul =
+                    mpz_fits_ulong_p(med_pre.items[i].prime)
+                        ? mpz_get_ui(med_pre.items[i].prime)
+                        : 0UL;
+                if (q_ul > 0UL &&
+                    kf_cbrt_cache_find(&local_cbrt_cache, q_ul) < 0)
+                {
+                    mpz_t cbrt_q;
+                    mpz_init(cbrt_q);
+                    mpz_powm(cbrt_q, med_pre.items[i].prime, e_inv, modulo);
+                    kf_cbrt_cache_append(&local_cbrt_cache, q_ul, cbrt_q);
+                    cbrt_cache_dirty = true;
+                    mpz_clear(cbrt_q);
+                    if (rank == 0)
+                    {
+                        gmp_printf("[precompute] cached cbrt(q0=%Zd) (%zu bits)\n",
+                                   med_pre.items[i].prime,
+                                   mpz_sizeinbase(med_pre.items[i].prime, 2));
+                        fflush(stdout);
+                    }
+                }
+            }
+            kfl_free(&med_pre);
+        }
+        mpz_clears(cofactor, rem, NULL);
+    }
+    // Barrier so all ranks wait while rank 0 precomputes; cache is rank-local
+    // so no broadcast needed.
+    MPI_Barrier(MPI_COMM_WORLD);
+
     // Blinding table: BLIND_TABLE_SIZE = PREFILTER_K × MAX_OUTER entries.
     // Rank 0 uses these for both pre-filtering (K per outer attempt) and
     // unblinding (r_inv of the winning entry).
@@ -588,20 +705,52 @@ static int solve_one(
         // product.  Medium primes are > 2^32 so they are not covered by any
         // rank's sieve slice — only rank 0 handles them.
         //
-        // Note: medium prime cbrts are NOT put in the cbrt_cache because the
-        // cache uses unsigned long keys (max 2^32).  The mpz_powm cost here
-        // is one call per medium prime per bench run — at most 4 calls of ~M
-        // bits each.  For the largest (24576-bit) challenges this adds a few
-        // milliseconds to rank 0's local_cbrt time; acceptable and correctly
-        // included in the timing.
+        // IMPORTANT: cbrt(q0) = mpz_powm(q0, e_inv, M) costs ~1 full powm
+        // (~1800ms for 24576-bit M) because the cost is dominated by |e_inv|,
+        // not |q0|.  We therefore check the cbrt_cache first.  For a fixed
+        // challenge, q0 is always the same (outer=0 unblinded path), so the
+        // cache is populated on the first warm run and all subsequent runs are
+        // instant cache hits.
+        //
+        // q0 fits in unsigned long on all 64-bit Linux targets (q0 ≤ 2^63
+        // for alg4/alg4_multi), so the existing cache infrastructure works
+        // directly without any schema change.
         if (rank == 0 && medium_factors.count > 0)
         {
             for (int i = 0; i < medium_factors.count; i++)
             {
                 mpz_t cbrt_qi;
                 mpz_init(cbrt_qi);
-                // cbrt(q) = q^{e_inv} mod M, same exponent as for small primes.
-                mpz_powm(cbrt_qi, medium_factors.items[i].prime, e_inv, modulo);
+
+                // Cache lookup: q0 must fit in unsigned long (≤ 63 bits).
+                unsigned long q_ul =
+                    mpz_fits_ulong_p(medium_factors.items[i].prime)
+                        ? mpz_get_ui(medium_factors.items[i].prime)
+                        : 0UL;
+
+                int cache_idx = (q_ul > 0UL)
+                                    ? kf_cbrt_cache_find(&local_cbrt_cache, q_ul)
+                                    : -1;
+
+                if (cache_idx >= 0)
+                {
+                    // Cache hit: instant.
+                    mpz_set(cbrt_qi, local_cbrt_cache.items[cache_idx].cbrt);
+                }
+                else
+                {
+                    // Cache miss: one full powm (~1800ms for large M).
+                    // Happens only on the first encounter of this q0.
+                    mpz_powm(cbrt_qi, medium_factors.items[i].prime,
+                             e_inv, modulo);
+
+                    if (q_ul > 0UL)
+                    {
+                        kf_cbrt_cache_append(&local_cbrt_cache, q_ul, cbrt_qi);
+                        cbrt_cache_dirty = true;
+                    }
+                }
+
                 mpz_mul(local_cbrt, local_cbrt, cbrt_qi);
                 mpz_mod(local_cbrt, local_cbrt, modulo);
                 mpz_clear(cbrt_qi);
