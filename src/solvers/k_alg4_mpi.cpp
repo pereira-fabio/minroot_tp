@@ -249,57 +249,41 @@ static int solve_one(
         NULL, 0,
         rank, nranks, 0 /* method_uses_table = sieve */);
 
-    // Precompute cbrt(q0) for the medium prime before the bench loop.
+    // Precompute cbrt(q0) for the medium prime(s) before the bench loop.
     //
-    // ksc_ensure_k32_cbrt only covers the sieve range [65537, 2^32] so q0 in
-    // (2^32, 2^64] is never populated by it.  Without this step the first warm
-    // bench run would pay a full powm (~1800ms for large M) on rank 0 to compute
-    // cbrt(q0), while all other 49 runs would be instant cache hits.
+    // Without this, bench run 1 pays a full powm (~1800ms for large M) per
+    // medium prime on rank 0.  With this block all warm bench runs are instant
+    // cache hits.
     //
-    // We do one UNTIMED factoring pass (same as ksc_ensure_k32_cbrt does for
-    // small primes) to discover q0 and compute + cache its cbrt.  The pass uses
-    // the unblinded challenge (attempt=0) which is guaranteed to reveal q0 for
-    // alg4/alg4_multi challenges.
+    // We only precompute when the precompute itself is FAST:
+    //   (a) cofactor is prime  → one direct powm, always do it.
+    //   (b) cofactor ≤ 2^64   → both factors ≤ 2^32, kf_factor_recursive is
+    //                            instant (trial division, no Pollard needed).
+    //
+    // We deliberately SKIP composites > 2^64 (alg4_multi p1*p2 with 63-bit
+    // factors).  kf_pollard_rho_brent has no inner iteration limit so it
+    // can run for √(2^63) ≈ 3 billion steps per c-value, hanging all other
+    // MPI ranks at MPI_Barrier for minutes.  For those challenges the first
+    // bench run will hit a cache miss (~1800ms × 2), cache the result, and
+    // all 49 subsequent runs will be instant hits — an acceptable trade-off.
     if (rank == 0)
     {
-        // Sieve rank 0's slice to find small primes, then check cofactor.
+        // Sieve the FULL [65537, 2^32] range on rank 0 to get the smooth part.
         kfactor_list_t pre_factors;
         kfl_init(&pre_factors);
-        kf_trial_divide_sieve(challenge, my_lo, my_hi, sp_count, sp, &pre_factors);
+        kf_trial_divide_sieve(challenge, 65537ULL, (uint64_t)UINT32_MAX,
+                              sp_count, sp, &pre_factors);
 
-        // Build rank 0's local product.
-        mpz_t pre_prod;
-        mpz_init_set_ui(pre_prod, 1);
+        mpz_t combined;
+        mpz_init_set_ui(combined, 1);
         for (int i = 0; i < pre_factors.count; i++)
         {
             unsigned long p = mpz_get_ui(pre_factors.items[i].prime);
             for (int ex = 0; ex < pre_factors.items[i].exponent; ex++)
-                mpz_mul_ui(pre_prod, pre_prod, p);
+                mpz_mul_ui(combined, combined, p);
         }
         kfl_free(&pre_factors);
 
-        // We need the global product across all ranks.  In the precompute phase
-        // we are not inside the bench loop, so we serialise rank 0's product via
-        // a dummy local gather: export, then import over all ranks' buffers.
-        // Simpler: just factor the challenge directly on rank 0 without MPI.
-        // kf_trial_divide_sieve covers only our slice; use the full range here.
-        kfactor_list_t full_factors;
-        kfl_init(&full_factors);
-        kf_trial_divide_sieve(challenge, 65537ULL, (uint64_t)UINT32_MAX,
-                              sp_count, sp, &full_factors);
-
-        // Compute combined product from all small primes.
-        mpz_t combined;
-        mpz_init_set_ui(combined, 1);
-        for (int i = 0; i < full_factors.count; i++)
-        {
-            unsigned long p = mpz_get_ui(full_factors.items[i].prime);
-            for (int ex = 0; ex < full_factors.items[i].exponent; ex++)
-                mpz_mul_ui(combined, combined, p);
-        }
-        kfl_free(&full_factors);
-
-        // Cofactor = challenge / combined_small_product.
         mpz_t cofactor, rem;
         mpz_inits(cofactor, rem, NULL);
         mpz_tdiv_qr(cofactor, rem, challenge, combined);
@@ -307,63 +291,77 @@ static int solve_one(
 
         if (mpz_sgn(rem) == 0 && mpz_cmp_ui(cofactor, 1) > 0)
         {
-            // Factor the cofactor (handles single prime or composite).
-            // kf_try_factor_b64smooth returns false if any prime factor > 2^64,
-            // in which case we simply skip caching — the bench loop will compute
-            // cbrt on first use and cache it then.
-            kfactor_list_t med_pre;
-            kfl_init(&med_pre);
+            bool precomputed = false;
 
             if (mpz_probab_prime_p(cofactor, 15))
             {
-                // Single medium prime.
-                kfl_append_mpz(&med_pre, cofactor, 1);
-            }
-            else
-            {
-                // Composite: try Pollard's rho (covers alg4_multi p1*p2).
-                kfactor_list_t poly;
-                kfl_init(&poly);
-                if (kf_try_factor_b64smooth(cofactor, &poly, 1))
-                {
-                    for (int i = 0; i < poly.count; i++)
-                        kfl_append_mpz(&med_pre, poly.items[i].prime,
-                                       poly.items[i].exponent);
-                }
-                kfl_free(&poly);
-            }
-
-            // Compute and cache cbrt for each medium prime found.
-            for (int i = 0; i < med_pre.count; i++)
-            {
-                unsigned long q_ul =
-                    mpz_fits_ulong_p(med_pre.items[i].prime)
-                        ? mpz_get_ui(med_pre.items[i].prime)
-                        : 0UL;
+                // (a) Single medium prime — precompute directly.
+                unsigned long q_ul = mpz_fits_ulong_p(cofactor)
+                                         ? mpz_get_ui(cofactor)
+                                         : 0UL;
                 if (q_ul > 0UL &&
                     kf_cbrt_cache_find(&local_cbrt_cache, q_ul) < 0)
                 {
                     mpz_t cbrt_q;
                     mpz_init(cbrt_q);
-                    mpz_powm(cbrt_q, med_pre.items[i].prime, e_inv, modulo);
+                    mpz_powm(cbrt_q, cofactor, e_inv, modulo);
                     kf_cbrt_cache_append(&local_cbrt_cache, q_ul, cbrt_q);
                     cbrt_cache_dirty = true;
                     mpz_clear(cbrt_q);
-                    if (rank == 0)
-                    {
-                        gmp_printf("[precompute] cached cbrt(q0=%Zd) (%zu bits)\n",
-                                   med_pre.items[i].prime,
-                                   mpz_sizeinbase(med_pre.items[i].prime, 2));
-                        fflush(stdout);
-                    }
+                    printf("[precompute] cached cbrt(q0) (%zu bits)\n",
+                           mpz_sizeinbase(cofactor, 2));
+                    fflush(stdout);
+                    precomputed = true;
                 }
             }
-            kfl_free(&med_pre);
+            else if (mpz_sizeinbase(cofactor, 2) <= 64)
+            {
+                // (b) Composite ≤ 2^64: both factors ≤ 2^32, fast to factor.
+                kfactor_list_t poly;
+                kfl_init(&poly);
+                if (kf_try_factor_b64smooth(cofactor, &poly, 1))
+                {
+                    for (int i = 0; i < poly.count; i++)
+                    {
+                        unsigned long q_ul =
+                            mpz_fits_ulong_p(poly.items[i].prime)
+                                ? mpz_get_ui(poly.items[i].prime)
+                                : 0UL;
+                        if (q_ul > 0UL &&
+                            kf_cbrt_cache_find(&local_cbrt_cache, q_ul) < 0)
+                        {
+                            mpz_t cbrt_q;
+                            mpz_init(cbrt_q);
+                            mpz_powm(cbrt_q, poly.items[i].prime,
+                                     e_inv, modulo);
+                            kf_cbrt_cache_append(&local_cbrt_cache,
+                                                 q_ul, cbrt_q);
+                            cbrt_cache_dirty = true;
+                            mpz_clear(cbrt_q);
+                        }
+                    }
+                    precomputed = true;
+                    printf("[precompute] cached cbrt for %d medium prime(s) "
+                           "(composite %zu bits)\n",
+                           poly.count, mpz_sizeinbase(cofactor, 2));
+                    fflush(stdout);
+                }
+                kfl_free(&poly);
+            }
+            else
+            {
+                // Composite > 2^64 (alg4_multi with large p1*p2).
+                // Skipping precompute — Pollard's rho would be too slow here.
+                // First bench run will cache-miss and compute cbrt on-the-fly.
+                printf("[precompute] cofactor %zu bits is composite > 2^64 "
+                       "— skipping precompute, first bench run will cache.\n",
+                       mpz_sizeinbase(cofactor, 2));
+                fflush(stdout);
+                (void)precomputed;
+            }
         }
         mpz_clears(cofactor, rem, NULL);
     }
-    // Barrier so all ranks wait while rank 0 precomputes; cache is rank-local
-    // so no broadcast needed.
     MPI_Barrier(MPI_COMM_WORLD);
 
     // Blinding table: BLIND_TABLE_SIZE = PREFILTER_K × MAX_OUTER entries.
