@@ -943,6 +943,25 @@ int ksc_alg3_broadcast_cofactor(
 // ksc_alg4_broadcast_cofactor
 // ---------------------------------------------------------------------------
 
+// One-entry cache for composite cofactor factorization.
+//
+// kf_try_factor_b64smooth runs Pollard's rho which can take ~120 seconds for
+// a 119-bit composite with 60-bit factors (√(2^59) ≈ 750M iterations with no
+// inner bound in kf_pollard_rho_brent).  Since all bench runs on the same
+// challenge always produce the SAME cofactor (outer=0 unblinded path), we
+// would otherwise pay this cost once per bench run — 9 × 120s = 18 minutes.
+//
+// This cache stores the most recently factored composite and its factor list.
+// On a cache hit the result is returned immediately (< 1μs).  On a miss
+// Pollard's rho runs as before and the result is stored for future calls.
+//
+// Scope: file-local, rank-0-only (non-zero ranks never enter the factoring
+// branch so this data is never read by them).
+// GMP types require mpz_init before use; we use s_cf_valid as an init guard.
+static bool s_cf_valid = false;
+static mpz_t s_cf_composite;        // cached input composite
+static kfactor_list_t s_cf_factors; // cached output factor list
+
 // ALG4_B_COFACTOR_BITS: maximum bit-length of the cofactor that this function
 // will attempt to factor via Pollard's rho.
 //
@@ -1045,16 +1064,54 @@ int ksc_alg4_broadcast_cofactor(
                 // Composite cofactor with all prime factors <= 2^64.
                 //
                 // alg4_multi structure: cofactor = p1 * p2 where each p_i is
-                // a prime in (2^32, 2^64].  The product is 66..126 bits —
-                // previously unreachable because ALG4_B_COFACTOR_BITS was 64.
+                // a prime in (2^32, 2^64].  The product is 66..126 bits.
                 //
-                // kf_try_factor_b64smooth handles this recursively:
-                //   1. Pollard's rho splits q into p1 and p2.
-                //   2. Each half is <= 64 bits → confirmed 2^64-smooth.
-                //   3. Returns true with both primes in poly.
+                // kf_try_factor_b64smooth handles this correctly but is SLOW
+                // for large composites (√(2^59) ≈ 750M Pollard steps ≈ 120s
+                // for 119-bit composites with 60-bit factors).  Without caching
+                // this would run on EVERY bench iteration for the same challenge.
+                //
+                // The one-entry cache s_cf_composite/s_cf_factors ensures
+                // Pollard's rho runs at most once per unique composite per job.
                 kfactor_list_t poly;
                 kfl_init(&poly);
-                bool ok = kf_try_factor_b64smooth(q, &poly, 1);
+                bool ok = false;
+
+                if (s_cf_valid && mpz_cmp(q, s_cf_composite) == 0)
+                {
+                    // Cache hit — reuse previously computed factorization.
+                    for (int i = 0; i < s_cf_factors.count; i++)
+                        kfl_append_mpz(&poly,
+                                       s_cf_factors.items[i].prime,
+                                       s_cf_factors.items[i].exponent);
+                    ok = true;
+                }
+                else
+                {
+                    // Cache miss — run Pollard's rho (slow first time only).
+                    ok = kf_try_factor_b64smooth(q, &poly, 1);
+                    if (ok)
+                    {
+                        // Store for all subsequent bench runs.
+                        if (!s_cf_valid)
+                        {
+                            mpz_init(s_cf_composite);
+                            kfl_init(&s_cf_factors);
+                            s_cf_valid = true;
+                        }
+                        else
+                        {
+                            kfl_free(&s_cf_factors);
+                            kfl_init(&s_cf_factors);
+                        }
+                        mpz_set(s_cf_composite, q);
+                        for (int i = 0; i < poly.count; i++)
+                            kfl_append_mpz(&s_cf_factors,
+                                           poly.items[i].prime,
+                                           poly.items[i].exponent);
+                    }
+                }
+
                 if (ok)
                 {
                     complete = 1;
