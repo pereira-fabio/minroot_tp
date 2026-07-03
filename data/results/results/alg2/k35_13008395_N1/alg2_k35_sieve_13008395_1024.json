@@ -1,0 +1,56 @@
+{
+  "metadata": {
+    "algorithm": "k35",
+    "method": "sieve",
+    "exponent": 3,
+    "smoothness_bound_bits": 35,
+    "challenge_bits": 1019,
+    "mpi_ranks": 2,
+    "nodes": 1,
+    "threads_per_rank": 32,
+    "runs_warm": 9,
+    "runs_valid": 9,
+    "runs_failed": 0,
+    "note": "warm challenges only (cold challenge_0 discarded upstream); runs_failed = blinding exhausted; one timed run per distinct challenge",
+    "powm_baseline_ms": 0.0000
+  },
+  "warm_avg": {
+    "factor_ms": 2516.6252,
+    "recon_ms": 0.0532,
+    "local_cbrt_ms": 0.0452,
+    "gather_ms": 0.0060,
+    "combine_ms": 0.0019,
+    "total_ms": 2516.6784,
+    "speedup_recon": 0.0000,
+    "speedup_total": 0.0000
+  },
+  "warm_stats": {
+    "factor_ms": {"mean": 2516.6252, "std": 16.9117, "min": 2474.0906, "max": 2526.1735, "median": 2523.2851, "p25": 2523.0108, "p75": 2524.0973},
+    "recon_ms": {"mean": 0.0532, "std": 0.0071, "min": 0.0457, "max": 0.0659, "median": 0.0502, "p25": 0.0478, "p75": 0.0585},
+    "total_ms": {"mean": 2516.6784, "std": 16.9138, "min": 2474.1363, "max": 2526.2213, "median": 2523.3335, "p25": 2523.0584, "p75": 2524.1583},
+    "speedup_total": {"mean": 0.0000, "std": 0.0000, "min": 0.0000, "max": 0.0000, "median": 0.0000, "p25": 0.0000, "p75": 0.0000}
+  },
+  "warm_runs": {
+      "factor_ms": [2523.7935, 2523.2851, 2526.1735, 2507.2949, 2474.0906, 2524.7272, 2523.1541, 2523.0108, 2524.0973],
+      "recon_ms": [0.0536, 0.0484, 0.0478, 0.0585, 0.0457, 0.0659, 0.0502, 0.0476, 0.0609],
+      "local_cbrt_ms": [0.0467, 0.0408, 0.0408, 0.0524, 0.0388, 0.0492, 0.0428, 0.0404, 0.0551],
+      "gather_ms": [0.0049, 0.0057, 0.0049, 0.0043, 0.0052, 0.0148, 0.0053, 0.0052, 0.0040],
+      "combine_ms": [0.0020, 0.0019, 0.0021, 0.0018, 0.0018, 0.0020, 0.0021, 0.0020, 0.0018],
+      "cbrt_hit_ms": [0.0009, 0.0011, 0.0019, 0.0015, 0.0009, 0.0012, 0.0013, 0.0012, 0.0015],
+      "cbrt_miss_ms": [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
+      "cbrt_hits": [12, 14, 16, 20, 15, 12, 13, 15, 21],
+      "cbrt_misses": [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "blinding_attempts": [1, 1, 1, 1, 1, 1, 1, 1, 1],
+      "total_ms": [2523.8471, 2523.3335, 2526.2213, 2507.3535, 2474.1363, 2524.7931, 2523.2043, 2523.0584, 2524.1583],
+      "speedup_total": [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000]
+  },
+  "warmup_runs": {
+    "note": "2 silent runs before bench loop to prime CPU caches",
+    "total_ms": [5.181, 0.031, 5.954, 0.037, 6.821, 0.041, 8.555, 0.051, 6.737, 0.040, 5.129, 0.033, 5.538, 0.032, 6.385, 0.037, 8.918, 0.052]
+  },
+  "prime_stats": {
+    "tested_per_rank": [17179836928, 17179836928],
+    "found_per_rank": [12, 18]
+  },
+  "thread_balance": {}
+}

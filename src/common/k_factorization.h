@@ -187,7 +187,8 @@ void kf_compute_cbrt_from_factors(mpz_t result,
                                   const kfactor_list_t *found,
                                   const mpz_t modulo,
                                   cbrt_cache_t *cache,
-                                  bool *cache_dirty);
+                                  bool *cache_dirty,
+                                  unsigned long exponent);
 
 // ---------------------------------------------------------------------------
 // Blinding pair table (Algorithm 2 precomputation, Biryukov et al. §2)
@@ -198,12 +199,13 @@ void kf_compute_cbrt_from_factors(mpz_t result,
 // done once before the bench loop starts, so the inner loop only indexes in.
 //
 // Each entry holds three values for a single random r ∈ [2, M-1]:
-//   r      — the blinding factor itself
-//   r3     — r^3 mod M  (used in: y = challenge * r^3 mod M)
-//   r_inv  — r^{-1} mod M (used in: result = cbrt(y) * r^{-1} mod M)
+//   r       — the blinding factor itself
+//   r_blind — r^e mod M  (used in: y = challenge * r^e mod M)
+//             e is the root exponent (3 for cube root, 5 for 5th root)
+//   r_inv   — r^{-1} mod M (used in: result = nth_root(y) * r^{-1} mod M)
 //
-// Both r3 and r_inv are precomputed so the online loop contains no powm and
-// no extended-GCD call — only one mpz_mul + mpz_mod per phase.
+// Both r_blind and r_inv are precomputed so the online loop contains no powm
+// and no extended-GCD call — only one mpz_mul + mpz_mod per phase.
 //
 // Recommended table size: R = max_attempts - 1 (one entry per non-trivial
 // attempt).  The paper uses R = 2^{20}–2^{24}; for benchmarking 255 suffices.
@@ -211,16 +213,17 @@ void kf_compute_cbrt_from_factors(mpz_t result,
 
 typedef struct
 {
-    mpz_t r;     // Random blinding factor in [2, M-1]
-    mpz_t r3;    // r^3 mod M  — precomputed blinding multiplier
-    mpz_t r_inv; // r^{-1} mod M — precomputed unblinding multiplier
+    mpz_t r;       // Random blinding factor in [2, M-1]
+    mpz_t r_blind; // r^e mod M  — precomputed blinding multiplier
+    mpz_t r_inv;   // r^{-1} mod M — precomputed unblinding multiplier
 } blinding_pair_t;
 
 // Allocate and fill a table of `count` independently drawn blinding pairs.
 // Each pair satisfies gcd(r, M) = 1 (guaranteed since M is prime and r < M).
 // Seeds GMP's MT RNG from time(NULL) XOR address entropy.
 // Caller must free with kf_blinding_table_free.
-blinding_pair_t *kf_blinding_table_alloc(int count, const mpz_t modulo);
+blinding_pair_t *kf_blinding_table_alloc(int count, const mpz_t modulo,
+                                         unsigned long exponent);
 
 // Release all mpz_t values and free the backing array.
 void kf_blinding_table_free(blinding_pair_t *table, int count);
@@ -231,11 +234,11 @@ void kf_blinding_table_free(blinding_pair_t *table, int count);
 //     r  = 1                     (attempt == 0, fast path for smooth vectors)
 //         OR table[attempt-1].r  (if precomputed table provided)
 //         OR rand [2,M)          (fallback: on-the-fly)
-//     y  = challenge * r^3 mod M
+//     y  = challenge * r^e mod M  (e = exponent: 3 for cube root, 5 for 5th root)
 //     factor y with sieve (prime_table == NULL) or preloaded prime table
 //     if y == ∏ p_i^{e_i}  (B-smooth or almost-smooth via Pollard):
-//         cbrt_y = ∏ cbrt(p_i)^{e_i}  mod M
-//         result = cbrt_y * r^{-1} mod M        (unblinding)
+//         eth_root_y = ∏ p_i^{e_i * e_inv}  mod M
+//         result = eth_root_y * r^{-1} mod M    (unblinding)
 //         return true
 //   return false  (max_attempts exhausted)
 //
@@ -243,6 +246,7 @@ void kf_blinding_table_free(blinding_pair_t *table, int count);
 //   prime_table / prime_table_count : NULL/0 → sieve; non-NULL → table scan.
 //   cache / cache_dirty             : caller manages init, load and save.
 //   attempts_out                    : if non-NULL receives the attempt count.
+//   exponent                        : root exponent (3 = cube root, 5 = 5th root).
 //   table / table_size              : precomputed pairs from
 //                                     kf_blinding_table_alloc(); pass NULL
 //                                     to generate r on-the-fly (old behaviour).
@@ -257,6 +261,7 @@ bool kf_factorize_with_blinding(
     cbrt_cache_t *cache, bool *cache_dirty,
     int max_attempts,
     int *attempts_out,
+    unsigned long exponent,       // root exponent (3 = cube root, 5 = 5th root)
     const blinding_pair_t *table, // precomputed pairs; NULL = on-the-fly
     int table_size);              // number of valid entries in table
 
@@ -292,7 +297,8 @@ bool kf_try_factor_b64smooth(const mpz_t n,
 // ---------------------------------------------------------------------------
 
 void kf_precompute_cbrt_table_k16(mpz_t *cbrt_table, const unsigned long *primes,
-                                  int prime_count, const mpz_t modulo);
+                                  int prime_count, const mpz_t modulo,
+                                  unsigned long exponent);
 void kf_save_cbrt_table_k16(const mpz_t *cbrt_table, int prime_count, const char *filename);
 bool kf_load_cbrt_table_k16(mpz_t *cbrt_table, int prime_count, const char *filename);
 void kf_compute_cube_root_from_factors_k16(mpz_t result, const int *exponents,

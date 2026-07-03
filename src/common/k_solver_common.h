@@ -116,7 +116,8 @@ void ksc_run_and_report_powm_baseline(
     int bench_count,
     const bench_accum_t *recon_acc,
     const bench_accum_t *fac_acc,
-    int rank);
+    int rank,
+    unsigned long exponent);
 
 // ---------------------------------------------------------------------------
 // k16 precomputation
@@ -140,7 +141,8 @@ void ksc_ensure_k16_cbrt(
     int prime_count,
     const mpz_t modulo,
     const char *modulo_file,
-    int rank);
+    int rank,
+    unsigned long exponent);
 
 // ---------------------------------------------------------------------------
 // k32 precomputation

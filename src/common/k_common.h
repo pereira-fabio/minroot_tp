@@ -1,19 +1,20 @@
 #pragma once
 
 // =============================================================================
-// k_common.h — Shared utilities for modular cube root solvers
+// k_common.h — Shared utilities for modular e-th root solvers
 //
 // Mathematical context:
-//   We compute challenge^(1/3) mod M, where M is prime and gcd(3, M-1) = 1.
+//   We compute challenge^(1/e) mod M, where M is prime and gcd(e, M-1) = 1.
+//   e = 3 gives the cube root (original MinRoot VDF), e = 5 gives the 5th root.
 //
 //   By Fermat's little theorem:
-//     x^(1/3) mod M  =  x^e mod M,   e = 3^-1 mod (M-1)
+//     x^(1/e) mod M  =  x^e_inv mod M,   e_inv = e^{-1} mod (M-1)
 //
 //   Homomorphism exploited for factorization-based solvers:
-//     cbrt(a * b) = cbrt(a) * cbrt(b) mod M
+//     eth_root(a * b) = eth_root(a) * eth_root(b) mod M
 //
-//   So if challenge = p1^e1 * p2^e2 * ... * pN^eN, then:
-//     cbrt(challenge) = cbrt(p1)^e1 * cbrt(p2)^e2 * ... * cbrt(pN)^eN mod M
+//   So if challenge = p1^k1 * p2^k2 * ... * pN^kN, then:
+//     eth_root(challenge) = eth_root(p1)^k1 * ... * eth_root(pN)^kN mod M
 //
 //   This lets us replace one expensive powm on a large number with many
 //   cheap powm calls on small primes — precomputed once per modulo file.
@@ -40,23 +41,24 @@ unsigned long *generate_primes_up_to(unsigned long limit, int *count);
 void read_mpz_from_file(mpz_t num, const char *filename);
 
 // ---------------------------------------------------------------------------
-// Cube root — naive baseline (METHOD_POWM in k16)
+// e-th root — naive baseline (METHOD_POWM in k16)
 // ---------------------------------------------------------------------------
 
-// Compute result = value^e mod modulo, where e = 3^-1 mod (modulo-1).
+// Compute result = value^e_inv mod modulo, where e_inv = exponent^{-1} mod (modulo-1).
 // This is O(log modulo) squarings — correct but not parallelizable.
-// Used as comparison baseline and for small factor cube roots in k16.
-// Returns false if 3 has no inverse mod (modulo-1).
-bool compute_cube_root_mod_prime(mpz_t result, const mpz_t value, const mpz_t modulo);
+// Used as comparison baseline and for small factor roots in k16.
+// Returns false if exponent has no inverse mod (modulo-1).
+bool compute_cube_root_mod_prime(mpz_t result, const mpz_t value, const mpz_t modulo,
+                                 unsigned long exponent);
 
 // ---------------------------------------------------------------------------
 // Verification
 // ---------------------------------------------------------------------------
 
-// Verify that candidate^3 mod modulo == challenge_mod.
+// Verify that candidate^exponent mod modulo == challenge_mod.
 // Prints SUCCESS or FAILURE.
 void verify_cube_root(const mpz_t candidate_cuberoot, const mpz_t challenge_mod,
-                      const mpz_t modulo);
+                      const mpz_t modulo, unsigned long exponent);
 
 // ---------------------------------------------------------------------------
 // Factoring helper
@@ -92,25 +94,26 @@ void print_timing_stat_moments(const char *label,
 void print_timing_total(const char *label, double mean,
                         int label_width, const char *extra_text);
 
-void blind_challenge(mpz_t y, const mpz_t challenge, const mpz_t r, const mpz_t modulo);
+void blind_challenge(mpz_t y, const mpz_t challenge, const mpz_t r, const mpz_t modulo,
+                     unsigned long exponent);
 void unblind_root(mpz_t result, const mpz_t y_root, const mpz_t r, const mpz_t modulo);
 
 // ---------------------------------------------------------------------------
 // Sequential powm baseline — the comparison target for all parallel solvers
 // ---------------------------------------------------------------------------
 
-// Compute challenge^e mod modulo sequentially for bench_count iterations,
-// where e = 3^-1 mod (modulo-1).  This is the O(log M) squaring baseline:
-// every squaring depends on the previous one so it cannot be parallelised.
+// Compute challenge^e_inv mod modulo sequentially for bench_count iterations,
+// where e_inv = exponent^{-1} mod (modulo-1).  This is the O(log M) squaring
+// baseline: every squaring depends on the previous one so it cannot be parallelised.
 // In the VDF context this is exactly what the ASIC executes each round.
 //
 // Prints one timing line using print_timing_stat_moments, then returns the
 // average time in ms so callers can compute speedup ratios.
 //
-// result receives the last computed cube root (can be used for verification).
+// result receives the last computed root (can be used for verification).
 double run_powm_baseline(mpz_t result, const mpz_t challenge,
                          const mpz_t modulo, int bench_count,
-                         int label_width);
+                         int label_width, unsigned long exponent);
 
 // ---------------------------------------------------------------------------
 // Unified factor list — (prime, exponent) pairs with mpz_t primes

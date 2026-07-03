@@ -89,42 +89,43 @@ unsigned long *generate_primes_up_to(unsigned long limit, int *count)
 // Cube root via Fermat's little theorem — naive baseline
 // ---------------------------------------------------------------------------
 
-bool compute_cube_root_mod_prime(mpz_t result, const mpz_t value, const mpz_t modulo)
+bool compute_cube_root_mod_prime(mpz_t result, const mpz_t value, const mpz_t modulo,
+                                 unsigned long exponent)
 {
-    mpz_t phi, inverse, three;
-    mpz_inits(phi, inverse, three, NULL);
+    mpz_t phi, e_inv, e_base;
+    mpz_inits(phi, e_inv, e_base, NULL);
 
     // phi = modulo - 1  (Euler's totient for a prime)
     mpz_sub_ui(phi, modulo, 1);
-    mpz_set_ui(three, 3);
+    mpz_set_ui(e_base, exponent);
 
-    // compute e = 3^-1 mod phi  (exists iff gcd(3, phi) = 1)
-    if (mpz_invert(inverse, three, phi) == 0)
+    // compute e_inv = exponent^{-1} mod phi  (exists iff gcd(exponent, phi) = 1)
+    if (mpz_invert(e_inv, e_base, phi) == 0)
     {
-        // cube root does not exist for this modulo
+        // e-th root does not exist for this modulo
         mpz_set_ui(result, 0);
-        mpz_clears(phi, inverse, three, NULL);
+        mpz_clears(phi, e_inv, e_base, NULL);
         return false;
     }
 
-    // result = value^e mod modulo — this is the cube root
-    mpz_powm(result, value, inverse, modulo);
-    mpz_clears(phi, inverse, three, NULL);
+    // result = value^e_inv mod modulo — this is the e-th root
+    mpz_powm(result, value, e_inv, modulo);
+    mpz_clears(phi, e_inv, e_base, NULL);
     return true;
 }
 
 void verify_cube_root(const mpz_t candidate_cuberoot, const mpz_t challenge_mod,
-                      const mpz_t modulo)
+                      const mpz_t modulo, unsigned long exponent)
 {
-    mpz_t cubed;
-    mpz_init(cubed);
-    // check: does candidate^3 mod M equal the original challenge mod M?
-    mpz_powm_ui(cubed, candidate_cuberoot, 3, modulo);
-    if (mpz_cmp(cubed, challenge_mod) == 0)
-        printf("SUCCESS: Cube root is correct!\n");
+    mpz_t powered;
+    mpz_init(powered);
+    // check: does candidate^exponent mod M equal the original challenge mod M?
+    mpz_powm_ui(powered, candidate_cuberoot, exponent, modulo);
+    if (mpz_cmp(powered, challenge_mod) == 0)
+        printf("SUCCESS: %lu-th root is correct!\n", exponent);
     else
-        printf("FAILURE: Cube root is incorrect\n");
-    mpz_clear(cubed);
+        printf("FAILURE: %lu-th root is incorrect\n", exponent);
+    mpz_clear(powered);
 }
 
 // ---------------------------------------------------------------------------
@@ -214,15 +215,16 @@ void print_timing_total(const char *label, double mean,
     }
 }
 
-// Computes y = (c * r^3) mod M
-void blind_challenge(mpz_t y, const mpz_t challenge, const mpz_t r, const mpz_t modulo)
+// Computes y = (c * r^exponent) mod M
+void blind_challenge(mpz_t y, const mpz_t challenge, const mpz_t r, const mpz_t modulo,
+                     unsigned long exponent)
 {
-    mpz_t r3;
-    mpz_init(r3);
-    mpz_powm_ui(r3, r, 3, modulo); // r^3 mod M
-    mpz_mul(y, challenge, r3);     // c * r^3
-    mpz_mod(y, y, modulo);         // (c * r^3) mod M
-    mpz_clear(r3);
+    mpz_t r_blind;
+    mpz_init(r_blind);
+    mpz_powm_ui(r_blind, r, exponent, modulo); // r^e mod M
+    mpz_mul(y, challenge, r_blind);
+    mpz_mod(y, y, modulo);
+    mpz_clear(r_blind);
 }
 
 // Computes result = (y_root * r^-1) mod M
@@ -244,28 +246,28 @@ void unblind_root(mpz_t result, const mpz_t y_root, const mpz_t r, const mpz_t m
 
 double run_powm_baseline(mpz_t result, const mpz_t challenge,
                          const mpz_t modulo, int bench_count,
-                         int label_width)
+                         int label_width, unsigned long exponent)
 {
-    mpz_t e, phi, three;
-    mpz_inits(e, phi, three, NULL);
+    mpz_t e_inv, phi, e_base;
+    mpz_inits(e_inv, phi, e_base, NULL);
     mpz_sub_ui(phi, modulo, 1);
-    mpz_set_ui(three, 3);
-    mpz_invert(e, three, phi);
-    mpz_clears(phi, three, NULL);
+    mpz_set_ui(e_base, exponent);
+    mpz_invert(e_inv, e_base, phi);
+    mpz_clears(phi, e_base, NULL);
 
     double sum = 0.0, sumsq = 0.0;
 
     for (int i = 0; i < bench_count; i++)
     {
         auto t0 = std::chrono::high_resolution_clock::now();
-        mpz_powm(result, challenge, e, modulo);
+        mpz_powm(result, challenge, e_inv, modulo);
         auto t1 = std::chrono::high_resolution_clock::now();
         double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
         sum += dt;
         sumsq += dt * dt;
     }
 
-    mpz_clear(e);
+    mpz_clear(e_inv);
 
     print_timing_stat_moments("powm (sequential baseline):",
                               sum, sumsq, bench_count, label_width, true);

@@ -3,31 +3,34 @@ CFLAGS   = -O2 -fopenmp
 INCLUDE  = -I src/common
 LIBS     = -lgmp
 
-COMMON_SRC = src/common/k_common.cpp \
-             src/common/k_factorization.cpp \
-             src/common/k_solver_common.cpp
+COMMON_SRC = src/common/common.cpp \
+             src/common/factorization.cpp \
+             src/common/solver_common.cpp
 
 .PHONY: all clean challenges
 
-all: k16_mpi k32_mpi k35_mpi alg3_mpi alg4_mpi challenges
+all: alg2_k16 alg2_k32 alg2_k35 alg3 alg4 alg7 challenges
 
-k16_mpi: src/solvers/k16_mpi.cpp $(COMMON_SRC)
+alg2_k16: src/aion/alg2_k16.cpp $(COMMON_SRC)
 	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
-k32_mpi: src/solvers/k32_mpi.cpp $(COMMON_SRC)
+alg2_k32: src/aion/alg2_k32.cpp $(COMMON_SRC)
 	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
-k35_mpi: src/solvers/k35_mpi.cpp $(COMMON_SRC)
+alg2_k35: src/aion/alg2_k35.cpp $(COMMON_SRC)
 	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
-alg3_mpi: src/solvers/k_alg3_mpi.cpp $(COMMON_SRC)
+alg3: src/aion/alg3.cpp $(COMMON_SRC)
 	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
-alg4_mpi: src/solvers/k_alg4_mpi.cpp $(COMMON_SRC)
+alg4: src/aion/alg4.cpp $(COMMON_SRC)
+	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
+
+alg7: src/aion/alg7.cpp $(COMMON_SRC)
 	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
 challenges: tools/challenges.c
 	gcc $(CFLAGS) $^ $(LIBS) -o $@
 
 clean:
-	rm -f k16_mpi k32_mpi k35_mpi alg3_mpi alg4_mpi challenges
+	rm -f alg2_k16 alg2_k32 alg2_k35 alg3 alg4 alg7 challenges

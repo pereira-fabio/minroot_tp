@@ -1,0 +1,66 @@
+{
+  "metadata": {
+    "algorithm": "alg7",
+    "method": "sieve",
+    "exponent": 3,
+    "smoothness_bound_bits": 32,
+    "challenge_bits": 398,
+    "mpi_ranks": 2,
+    "nodes": 1,
+    "threads_per_rank": 32,
+    "runs_warm": 1,
+    "runs_valid": 1,
+    "runs_failed": 0,
+    "note": "warm challenges only (cold challenge_0 discarded upstream); runs_failed = blinding exhausted; one timed run per distinct challenge",
+    "powm_baseline_ms": 0.0328
+  },
+  "warm_avg": {
+    "factor_ms": 138.5781,
+    "recon_ms": 280.3795,
+    "local_cbrt_ms": 0.0322,
+    "gather_ms": 0.0008,
+    "combine_ms": 0.0015,
+    "total_ms": 418.9576,
+    "speedup_recon": 0.0001,
+    "speedup_total": 0.0001
+  },
+  "warm_stats": {
+    "factor_ms": {"mean": 138.5781, "std": 0.0000, "min": 138.5781, "max": 138.5781, "median": 138.5781, "p25": 138.5781, "p75": 138.5781},
+    "recon_ms": {"mean": 280.3795, "std": 0.0000, "min": 280.3795, "max": 280.3795, "median": 280.3795, "p25": 280.3795, "p75": 280.3795},
+    "total_ms": {"mean": 418.9576, "std": 0.0000, "min": 418.9576, "max": 418.9576, "median": 418.9576, "p25": 418.9576, "p75": 418.9576},
+    "speedup_total": {"mean": 0.0001, "std": 0.0000, "min": 0.0001, "max": 0.0001, "median": 0.0001, "p25": 0.0001, "p75": 0.0001}
+  },
+  "warm_runs": {
+      "factor_ms": [138.5781],
+      "recon_ms": [280.3795],
+      "local_cbrt_ms": [0.0322],
+      "gather_ms": [0.0008],
+      "combine_ms": [0.0015],
+      "cbrt_hit_ms": [0.0010],
+      "cbrt_miss_ms": [0.0000],
+      "cbrt_hits": [7],
+      "cbrt_misses": [0],
+      "blinding_attempts": [1],
+      "total_ms": [418.9576],
+      "speedup_total": [0.0001]
+  },
+  "prime_stats": {
+    "tested_per_rank": [2147450879, 2147450880],
+    "found_per_rank": [7, 5]
+  },
+  "hit_stats": {
+    "smooth_count": 0,
+    "almost_smooth_count": 1,
+    "multi_medium_count": 0,
+    "smooth_frac": 0.0000,
+    "almost_smooth_frac": 1.0000,
+    "multi_medium_frac": 0.0000,
+    "cofactor_bits_min": 33,
+    "cofactor_bits_mean": 33.00,
+    "cofactor_bits_max": 33,
+    "hit_type": [2],
+    "cofactor_bits": [33],
+    "medium_factor_count": [1]
+  },
+  "thread_balance": {}
+}

@@ -343,7 +343,8 @@ void ksc_run_and_report_powm_baseline(
     int bench_count,
     const bench_accum_t *recon_acc,
     const bench_accum_t *fac_acc,
-    int rank)
+    int rank,
+    unsigned long exponent)
 {
     if (rank != 0)
         return;
@@ -356,7 +357,7 @@ void ksc_run_and_report_powm_baseline(
 #endif
     mpz_t tmp;
     mpz_init(tmp);
-    double powm_avg = run_powm_baseline(tmp, challenge, modulo, bench_count, 30);
+    double powm_avg = run_powm_baseline(tmp, challenge, modulo, bench_count, 30, exponent);
     r->powm_baseline_ms = powm_avg;
     mpz_clear(tmp);
 
@@ -442,7 +443,8 @@ void ksc_ensure_k16_cbrt(
     int prime_count,
     const mpz_t modulo,
     const char *modulo_file,
-    int rank)
+    int rank,
+    unsigned long exponent)
 {
     mkdir_data();
 
@@ -468,7 +470,7 @@ void ksc_ensure_k16_cbrt(
         {
             printf("[rank 0] Building k16 cbrt table → %s\n", base);
             fflush(stdout);
-            kf_precompute_cbrt_table_k16(cbrt_table, primes, prime_count, modulo);
+            kf_precompute_cbrt_table_k16(cbrt_table, primes, prime_count, modulo, exponent);
             kf_save_cbrt_table_k16(cbrt_table, prime_count, base);
             printf("[rank 0] cbrt table saved (%d entries)\n", prime_count);
             fflush(stdout);

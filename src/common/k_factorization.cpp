@@ -268,6 +268,29 @@ void kf_trial_divide_sieve(const mpz_t n,
 
         char *seg = (char *)malloc(KF_SEG_SIZE);
 
+        // Thread-local snapshot of cofactor for the divisibility pre-check.
+        //
+        // The shared mpz_t cofactor is only modified under cof_lock, but the
+        // pre-check `mpz_tdiv_ui(cofactor, c)` previously read it lock-free.
+        // Concurrent reads of a GMP mpz_t while another thread writes its limbs
+        // is a data race: mpz_divexact_ui can change limb count and pointers,
+        // so a concurrent mpz_tdiv_ui may read partially-updated state and return
+        // a wrong remainder, causing a prime factor to be silently missed.
+        //
+        // Fix: each thread keeps local_cof, a thread-private copy used for the
+        // pre-check. It is initialized under the lock and re-synced whenever
+        // this thread acquires the lock and processes a factor. This guarantees:
+        //   - No data race (local_cof is thread-private; cofactor only read under lock)
+        //   - No missed factors: local_cof >= actual cofactor always (factors only
+        //     decrease cofactor), so if c divides actual cofactor it also divides
+        //     local_cof — no false negatives from the pre-check.
+        //   - Occasional false positives (local_cof stale → pre-check passes but
+        //     re-check inside lock fails) are harmless: e=0, nothing appended.
+        mpz_t local_cof;
+        omp_set_lock(&cof_lock);
+        mpz_init_set(local_cof, cofactor);
+        omp_unset_lock(&cof_lock);
+
         for (uint64_t lo = t_lo; lo <= t_hi && !done; lo += KF_SEG_SIZE)
         {
             uint64_t hi = lo + KF_SEG_SIZE - 1;
@@ -289,12 +312,12 @@ void kf_trial_divide_sieve(const mpz_t n,
             {
                 if (!seg[c - lo])
                     continue;
-                // Test against shrinking cofactor (not original n).
-                // As factors are stripped, cofactor shrinks → each test
-                // is proportionally cheaper (limb count drops).
-                if (mpz_tdiv_ui(cofactor, (unsigned long)c) != 0)
+                // Pre-check against thread-local snapshot (no data race).
+                // As factors are stripped, local_cof shrinks → each test is
+                // proportionally cheaper (limb count drops).
+                if (mpz_tdiv_ui(local_cof, (unsigned long)c) != 0)
                     continue;
-                // Factor found — extract full exponent from shared cofactor
+                // Factor found — extract full exponent from shared cofactor.
                 omp_set_lock(&cof_lock);
                 int e = 0;
                 while (mpz_divisible_ui_p(cofactor, (unsigned long)c))
@@ -304,11 +327,15 @@ void kf_trial_divide_sieve(const mpz_t n,
                 }
                 if (mpz_cmp_ui(cofactor, 1) == 0)
                     done = 1;
+                // Sync thread-local snapshot so subsequent pre-checks stay
+                // accurate (reflects factors removed by all threads so far).
+                mpz_set(local_cof, cofactor);
                 omp_unset_lock(&cof_lock);
                 if (e > 0)
                     kfl_append_ul(&tf[t], (unsigned long)c, e);
             }
         }
+        mpz_clear(local_cof);
         free(seg);
     }
 
@@ -773,15 +800,16 @@ void kf_compute_cbrt_from_factors(mpz_t result,
                                   const kfactor_list_t *found,
                                   const mpz_t modulo,
                                   cbrt_cache_t *cache,
-                                  bool *cache_dirty)
+                                  bool *cache_dirty,
+                                  unsigned long exponent)
 {
-    // Precompute e = 3^{-1} mod (M-1) once for this modulo.
-    mpz_t phi, e, three;
-    mpz_inits(phi, e, three, NULL);
+    // Precompute e_inv = exponent^{-1} mod (M-1) once for this modulo.
+    mpz_t phi, e_inv, e_base;
+    mpz_inits(phi, e_inv, e_base, NULL);
     mpz_sub_ui(phi, modulo, 1);
-    mpz_set_ui(three, 3);
-    mpz_invert(e, three, phi);
-    mpz_clears(phi, three, NULL);
+    mpz_set_ui(e_base, exponent);
+    mpz_invert(e_inv, e_base, phi);
+    mpz_clears(phi, e_base, NULL);
 
     mpz_set_ui(result, 1);
 
@@ -799,10 +827,10 @@ void kf_compute_cbrt_from_factors(mpz_t result,
         }
         else
         {
-            // Cache miss: compute p^e mod M and store for next time.
+            // Cache miss: compute p^e_inv mod M and store for next time.
             mpz_t p_mpz;
             mpz_init_set_ui(p_mpz, p);
-            mpz_powm(cbrt_p, p_mpz, e, modulo);
+            mpz_powm(cbrt_p, p_mpz, e_inv, modulo);
             mpz_clear(p_mpz);
             kf_cbrt_cache_append(cache, p, cbrt_p);
             if (cache_dirty)
@@ -826,14 +854,15 @@ void kf_compute_cbrt_from_factors(mpz_t result,
         mpz_clear(cbrt_p);
     }
 
-    mpz_clear(e);
+    mpz_clear(e_inv);
 }
 
 // ===========================================================================
 // blinding_pair_t table — precomputation phase
 // ===========================================================================
 
-blinding_pair_t *kf_blinding_table_alloc(int count, const mpz_t modulo)
+blinding_pair_t *kf_blinding_table_alloc(int count, const mpz_t modulo,
+                                         unsigned long exponent)
 {
     blinding_pair_t *table =
         (blinding_pair_t *)malloc((size_t)count * sizeof(blinding_pair_t));
@@ -849,7 +878,7 @@ blinding_pair_t *kf_blinding_table_alloc(int count, const mpz_t modulo)
 
     for (int i = 0; i < count; i++)
     {
-        mpz_inits(table[i].r, table[i].r3, table[i].r_inv, NULL);
+        mpz_inits(table[i].r, table[i].r_blind, table[i].r_inv, NULL);
 
         do
         {
@@ -857,7 +886,7 @@ blinding_pair_t *kf_blinding_table_alloc(int count, const mpz_t modulo)
         } while (mpz_cmp_ui(r, 2) < 0);
 
         mpz_set(table[i].r, r);
-        mpz_powm_ui(table[i].r3, r, 3, modulo); // r^3 mod M
+        mpz_powm_ui(table[i].r_blind, r, exponent, modulo); // r^e mod M
         mpz_invert(table[i].r_inv, r, modulo);  // r^{-1} mod M
     }
 
@@ -871,7 +900,7 @@ void kf_blinding_table_free(blinding_pair_t *table, int count)
     if (!table)
         return;
     for (int i = 0; i < count; i++)
-        mpz_clears(table[i].r, table[i].r3, table[i].r_inv, NULL);
+        mpz_clears(table[i].r, table[i].r_blind, table[i].r_inv, NULL);
     free(table);
 }
 
@@ -880,7 +909,7 @@ void kf_blinding_table_free(blinding_pair_t *table, int count)
 // ===========================================================================
 //
 // attempt 0: r = 1, y = challenge (no arithmetic; fast path for smooth vectors)
-// attempt i: precomputed path uses table[i-1].{r3, r_inv} — no powm, no invert
+// attempt i: precomputed path uses table[i-1].{r_blind, r_inv} — no powm, no invert
 //            fallback path generates r on-the-fly when table is absent/exhausted
 // ===========================================================================
 
@@ -893,6 +922,7 @@ bool kf_factorize_with_blinding(
     cbrt_cache_t *cache, bool *cache_dirty,
     int max_attempts,
     int *attempts_out,
+    unsigned long exponent,
     const blinding_pair_t *table,
     int table_size)
 {
@@ -929,7 +959,7 @@ bool kf_factorize_with_blinding(
             if (table && idx < table_size)
             {
                 // Precomputed: one mul + one mod, no powm, no invert.
-                mpz_mul(blinded, challenge, table[idx].r3);
+                mpz_mul(blinded, challenge, table[idx].r_blind);
                 mpz_mod(blinded, blinded, modulo);
                 r_inv_ptr = &table[idx].r_inv;
             }
@@ -942,7 +972,7 @@ bool kf_factorize_with_blinding(
                 {
                     mpz_urandomm(r_tmp, rng, modulo);
                 } while (mpz_cmp_ui(r_tmp, 2) < 0);
-                blind_challenge(blinded, challenge, r_tmp, modulo);
+                blind_challenge(blinded, challenge, r_tmp, modulo, exponent);
                 mpz_invert(r_inv_tmp, r_tmp, modulo);
                 r_inv_ptr = &r_inv_tmp;
                 mpz_clear(r_tmp);
@@ -1000,7 +1030,7 @@ bool kf_factorize_with_blinding(
         if (fully_factored)
         {
             kf_compute_cbrt_from_factors(cbrt_y, &found, modulo,
-                                         cache, cache_dirty);
+                                         cache, cache_dirty, exponent);
             if (attempt == 0)
             {
                 mpz_set(result, cbrt_y);
@@ -1026,27 +1056,25 @@ bool kf_factorize_with_blinding(
 // k16 — Precompute and reconstruct
 // ===========================================================================
 
-/**
- * Precomputes cube roots for all 16-bit primes for a given modulo.
- * e = 3^-1 mod (M-1)
- */
 void kf_precompute_cbrt_table_k16(mpz_t *cbrt_table, const unsigned long *primes,
-                                  int prime_count, const mpz_t modulo)
+                                  int prime_count, const mpz_t modulo,
+                                  unsigned long exponent)
 {
-    mpz_t phi, e, three;
-    mpz_inits(phi, e, three, NULL);
+    mpz_t phi, e_inv, e_base;
+    mpz_inits(phi, e_inv, e_base, NULL);
 
     mpz_sub_ui(phi, modulo, 1);
-    mpz_set_ui(three, 3);
+    mpz_set_ui(e_base, exponent);
 
-    // e = 3^-1 mod (M-1)
-    if (!mpz_invert(e, three, phi))
+    // e_inv = exponent^{-1} mod (M-1)
+    if (!mpz_invert(e_inv, e_base, phi))
     {
-        fprintf(stderr, "[ERROR] Modulo not suitable for cube roots (gcd(3, M-1) != 1)\n");
+        fprintf(stderr, "[ERROR] Modulo not suitable for %lu-th roots (gcd(%lu, M-1) != 1)\n",
+                exponent, exponent);
         exit(1);
     }
 
-    printf("[SETUP] Precomputing %d cube roots...\n", prime_count);
+    printf("[SETUP] Precomputing %d %lu-th roots...\n", prime_count, exponent);
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
@@ -1056,11 +1084,11 @@ void kf_precompute_cbrt_table_k16(mpz_t *cbrt_table, const unsigned long *primes
         mpz_t p;
         mpz_init_set_ui(p, primes[i]);
         mpz_init(cbrt_table[i]);
-        mpz_powm(cbrt_table[i], p, e, modulo);
+        mpz_powm(cbrt_table[i], p, e_inv, modulo);
         mpz_clear(p);
     }
 
-    mpz_clears(phi, e, three, NULL);
+    mpz_clears(phi, e_inv, e_base, NULL);
 }
 
 void kf_save_cbrt_table_k16(const mpz_t *cbrt_table, int prime_count, const char *filename)

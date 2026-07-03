@@ -4,6 +4,12 @@ ploter.py — Benchmark charts for MinRoot VDF cryptanalysis (k16/k32/k35/alg3/a
 Results are organised under results/algo2/, results/algo3/, results/algo4/ (and so
 on for future algorithms).  The glob pattern 'results/**/*.json' covers all of them.
 
+Schema compatibility: reads both the current benchmark JSON (2026-06-12: identity in
+`metadata.algorithm`, no `cold_run` section, extra `warm_stats`/`speedup_total[]`
+blocks) and the older schema (`metadata.k_size`, `cold_run`). `normalize_schema()`
+reconciles the two at load time, so the existing canonical result batches and new
+paper-scale runs ({256,384,512,768,1024}) all plot unchanged.
+
 Usage (run from project root):
     analysis/env/bin/python3 analysis/ploter.py 'results/**/*.json' [--out DIR] [--format png|pdf] [--ranks N]
 
@@ -30,6 +36,7 @@ Per-algorithm figures (written to <out>/algo2/, <out>/algo3/, <out>/algo4/):
     05_timing_breakdown_<N>b.png    bar chart per challenge size
     06_recon_breakdown.png          local_cbrt / gather / combine vs size
     07_rank_load_balance_<N>b.png   primes found per MPI rank
+    08_cold_vs_warm.png             cold (challenge_0) vs warm total_ms (only if cold_run present)
     09_strong_scaling_<algo>_<M>.png  time & speedup vs MPI ranks
     10_parallel_efficiency.png      scaling efficiency vs ranks
     12_alg3_hit_stats.png           (algo3) smooth/almost-smooth + q₀ bit distribution
@@ -93,7 +100,9 @@ BAR_COLORS = {
 # bitbound bits smaller than the requested target (e.g. 237 instead of 256 for k16).
 # All actual values are snapped to the nearest nominal before plotting so that
 # k16/k32/k35 share the same x-axis positions for the same "challenge size".
-NOMINAL_SIZES = [256, 512, 1024, 2048, 4096, 6144, 7000, 8192, 12288, 16384, 20480, 24576]
+# 384 and 768 are the paper-scale set introduced 2026-06-11 ({256,384,512,768,1024});
+# they must be listed here or 384→256 / 768→512 would mis-snap and dedup would drop them.
+NOMINAL_SIZES = [256, 384, 512, 768, 1024, 2048, 4096, 6144, 7000, 8192, 12288, 16384, 20480, 24576]
 
 def snap_to_nominal(bits):
     return min(NOMINAL_SIZES, key=lambda n: abs(n - bits))
@@ -118,19 +127,35 @@ ALG3_COLOR = ("#d62728", "D")   # red diamond — distinct from k32
 ALG4_COLOR = ("#9467bd", "v")   # purple triangle-down — distinct from all others
 
 def is_alg4(d):
-    return d.get("_source_algo") == "alg4"
+    # New schema carries an explicit `algorithm` field; old schema only has the
+    # `_source_algo` tag injected from the path/filename at load time.
+    return d["metadata"].get("algorithm") == "alg4" or d.get("_source_algo") == "alg4"
 
 def is_alg3(d):
     if is_alg4(d):
         return False
+    # When the explicit `algorithm` field is present (new schema, also back-filled
+    # for old files), trust it — do NOT fall back to the `"hit_stats" in d`
+    # heuristic, which misfires for alg7 (which reuses alg3's reconstruction path
+    # and also emits hit_stats). The heuristic is only for legacy files that have
+    # neither `algorithm` nor a `_source_algo` tag.
+    a = d["metadata"].get("algorithm")
+    if a:
+        return a == "alg3"
     return d.get("_source_algo") == "alg3" or "hit_stats" in d
 
 def algo_name(d):
+    # Prefer the explicit `algorithm` field (new schema, also back-filled for old
+    # files in load_file). Falls back to the alg3/alg4 heuristics + k_size.
+    a = d["metadata"].get("algorithm")
+    if a:
+        return a
     if is_alg4(d):
         return "alg4"
     return "alg3" if is_alg3(d) else f"k{d['metadata']['k_size']}"
 
-ALGO_MAP = {"k16": "algo2", "k32": "algo2", "k35": "algo2", "alg3": "algo3", "alg4": "algo4"}
+ALGO_MAP = {"k16": "algo2", "k32": "algo2", "k35": "algo2",
+            "alg3": "algo3", "alg4": "algo4", "alg7": "algo7"}
 
 def algo_group(d):
     """Map a dataset to its results folder name (algo2 / algo3 / algo4 / …)."""
@@ -168,7 +193,37 @@ def load_file(path):
             d["_source_algo"] = "alg4"
         elif basename.startswith("alg3_"):
             d["_source_algo"] = "alg3"
+    normalize_schema(d)
     return d
+
+def normalize_schema(d):
+    """Reconcile the 2026-06-12 JSON schema with the older one so both plot.
+
+    New schema (2026-06-12): `metadata.algorithm` ("k16"/"k32"/"k35"/"alg3"/"alg4"/
+    "alg7") replaces the old `metadata.k_size`, and the `cold_run` section is gone.
+    This back-fills `k_size` / `_source_algo` for new files and synthesises an
+    `algorithm` tag for old files, so the rest of the plotter is schema-agnostic."""
+    m = d.setdefault("metadata", {})
+    algo = m.get("algorithm")
+    if algo:
+        # New schema → provide the legacy fields the older code paths still use.
+        if algo in ("alg3", "alg4"):
+            d["_source_algo"] = algo
+        if "k_size" not in m:
+            if algo.startswith("k") and algo[1:].isdigit():
+                m["k_size"] = int(algo[1:])
+            else:
+                # alg3/alg4/alg7: use the smoothness bound B as a k_size proxy
+                # (only matters for grouping; these are excluded from the k16/32/35
+                # comparison subsets, which gate on is_alg3/is_alg4).
+                m["k_size"] = m.get("smoothness_bound_bits", 32)
+    else:
+        # Old schema → synthesise `algorithm` so algo_name can use it uniformly.
+        sa = d.get("_source_algo")
+        if sa in ("alg3", "alg4"):
+            m["algorithm"] = sa
+        elif "k_size" in m:
+            m["algorithm"] = f"k{m['k_size']}"
 
 def config_key(d):
     """Unique key: (algo, method, mpi_ranks).  alg3 and k32 share k_size=32 but
@@ -219,6 +274,29 @@ def get_powm_baseline(datasets, target_ranks=None):
                 if bits not in baseline:
                     baseline[bits] = pv
     return baseline
+
+def inject_powm_baselines(datasets):
+    """Join the sequential baseline into sieve/table datasets.
+
+    Sieve/table runs use --skip-powm-baseline, so their metadata.powm_baseline_ms
+    is 0; the baseline lives only in the matching *_powm_* file. The baseline is
+    sequential (rank-independent — challenge^e_inv mod M), so key it by
+    (algo, snapped challenge_bits) and patch every dataset that lacks one. Without
+    this, the speedup figures (which read powm_baseline_ms per dataset) come out 0
+    for every sieve/table point. Call AFTER snapping + dedup. Returns #patched."""
+    base = {}
+    for d in datasets:
+        pb = d["metadata"].get("powm_baseline_ms") or 0.0
+        if pb > 0:
+            base.setdefault((algo_name(d), d["metadata"]["challenge_bits"]), pb)
+    patched = 0
+    for d in datasets:
+        if (d["metadata"].get("powm_baseline_ms") or 0.0) <= 0:
+            pb = base.get((algo_name(d), d["metadata"]["challenge_bits"]))
+            if pb:
+                d["metadata"]["powm_baseline_ms"] = pb
+                patched += 1
+    return patched
 
 def assign_styles(groups):
     styles = {}
@@ -508,6 +586,56 @@ def plot_recon_breakdown_scaling(groups, styles, out_dir):
     hint_title(ax, "Reconstruction Phase Breakdown vs Size", LOWER)
     save(fig, os.path.join(out_dir, f"06_recon_breakdown.{OUTPUT_FMT}"), "")
 
+# ── Figure 08: Cold (challenge_0) vs warm total time ──────────────────────────
+
+def cold_point(d, key):
+    """Cold-run value (challenge_0). Both schemas carry it as a top-level
+    `cold_run` object; returns None if the section is absent or empty `{}`
+    (e.g. pre-2026-06-12 result batches that predate the cold_run restore)."""
+    cr = d.get("cold_run")
+    if not cr:
+        return None
+    v = cr.get(key)
+    return v if v else None
+
+def plot_cold_vs_warm(groups, styles, out_dir):
+    """Cold (cache-cold challenge_0) vs warm steady-state total_ms per size.
+    Purely additive: existing figures are untouched. The cold curve is only drawn
+    for configs whose JSON carries a `cold_run`; the whole figure is skipped if no
+    file does (so it is a no-op on cold_run-less batches)."""
+    sizes = all_bits_in(groups)
+    fig, ax = plt.subplots(figsize=(9, 5))
+    any_cold = False
+    for ck, datasets in sorted(g for g in groups.items() if g[0][1] != "powm"):
+        col, mk = styles[ck]
+        lbl = config_label(datasets[0])
+        xs   = [d["metadata"]["challenge_bits"] for d in datasets]
+        warm = [robust_mean(d, "total_ms") for d in datasets]
+        ax.plot(xs, warm, marker=mk, color=col, linewidth=1.8, markersize=6,
+                label=f"{lbl} — warm")
+        cxs, cold = [], []
+        for d in datasets:
+            cv = cold_point(d, "total_ms")
+            if cv:
+                cxs.append(d["metadata"]["challenge_bits"]); cold.append(cv); any_cold = True
+        if cxs:
+            ax.plot(cxs, cold, marker=mk, color=col, linewidth=1.2, markersize=8,
+                    markerfacecolor="none", linestyle="--", alpha=0.85,
+                    label=f"{lbl} — cold (challenge_0)")
+    if not any_cold:
+        plt.close(fig)
+        print("  [SKIP] cold vs warm: no cold_run in these files")
+        return
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    apply_log_y_style(ax, fmt=ms_fmt)
+    set_size_ticks(ax, sizes)
+    ax.set_xlabel("Challenge size (bits)")
+    ax.set_ylabel("Total time (ms)")
+    ax.legend(fontsize=7, loc="upper left", framealpha=0.9)
+    hint_title(ax, "Cold (challenge_0) vs Warm Total Time", LOWER)
+    save(fig, os.path.join(out_dir, f"08_cold_vs_warm.{OUTPUT_FMT}"), "")
+
 # ── Figure 07: Per-rank prime load balance ────────────────────────────────────
 
 def plot_rank_load_balance(datasets, sizes, out_dir):
@@ -695,9 +823,11 @@ def plot_algorithm_comparison(datasets, out_dir):
         all_bits = []
         for k_size in [16, 32, 35]:
             subset = sorted(
+                # Select by explicit identity, not k_size: normalize_schema()
+                # back-fills k_size=smoothness_bound_bits (=32) for alg3/alg4/alg7,
+                # so `k_size==32` alone would sweep those into the k32 curve.
                 [d for d in datasets
-                 if d["metadata"]["k_size"]    == k_size
-                 and not is_alg3(d)
+                 if algo_name(d)               == f"k{k_size}"
                  and d["metadata"]["method"]   == method
                  and d["metadata"]["mpi_ranks"] == max_ranks],
                 key=lambda d: d["metadata"]["challenge_bits"],
@@ -909,9 +1039,10 @@ def plot_effective_speedup(datasets, out_dir):
     curves = {}
     for k_size in [16, 32, 35]:
         subset = sorted(
+            # Identity-based selection (see plot_algorithm_comparison): avoids the
+            # k_size=32 collision with alg3/alg4/alg7 from normalize_schema().
             [d for d in datasets
-             if d["metadata"]["k_size"]    == k_size
-             and not is_alg3(d)
+             if algo_name(d)               == f"k{k_size}"
              and d["metadata"]["method"]   == method
              and d["metadata"]["mpi_ranks"] == max_ranks],
             key=lambda d: d["metadata"]["challenge_bits"],
@@ -1011,6 +1142,7 @@ def _run_per_algo_plots(datasets, requested_ranks, out_dir):
     plot_total_time_scaling(cmp_groups, cmp_styles, powm_baseline, out_dir)
     plot_factor_recon_scaling(cmp_groups, cmp_styles, out_dir)
     plot_recon_breakdown_scaling(cmp_groups, cmp_styles, out_dir)
+    plot_cold_vs_warm(cmp_groups, cmp_styles, out_dir)  # no-op when no cold_run present
     plot_timing_breakdown_per_size(cmp_groups, cmp_styles, powm_baseline, all_sizes, out_dir)
     plot_rank_load_balance(datasets, all_sizes, out_dir)
     plot_strong_scaling(datasets, out_dir)
@@ -1071,6 +1203,11 @@ def main():
         d["metadata"]["challenge_bits"] = snap_to_nominal(d["metadata"]["challenge_bits"])
     datasets = dedup_datasets(datasets)
 
+    # Join the sequential baseline into sieve/table files (which skip it).
+    n_patched = inject_powm_baselines(datasets)
+    if n_patched:
+        print(f"  Joined powm baseline into {n_patched} sieve/table dataset(s)")
+
     all_sizes     = sorted(set(d["metadata"]["challenge_bits"] for d in datasets))
     all_rank_vals = sorted(set(d["metadata"]["mpi_ranks"]      for d in datasets))
 
@@ -1107,3 +1244,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Edit: 2026-06-12  (new-schema support; is_alg3 trusts algorithm field [alg7 no longer
+# misclassified]; identity-based k16/32/35 selection [no k_size=32 collision with
+# alg3/4/7]; inject_powm_baselines joins the skipped sieve/table baseline for speedup plots;
+# fig 08 cold-vs-warm overlay [additive, no-op when no cold_run present])

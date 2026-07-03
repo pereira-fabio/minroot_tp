@@ -1,0 +1,72 @@
+{
+  "metadata": {
+    "algorithm": "alg4",
+    "method": "sieve",
+    "exponent": 3,
+    "smoothness_bound_bits": 32,
+    "challenge_bits": 225,
+    "mpi_ranks": 2,
+    "nodes": 1,
+    "threads_per_rank": 32,
+    "prefilter_b0": 1048576,
+    "prefilter_t_bits": 76,
+    "runs_warm": 9,
+    "runs_valid": 9,
+    "runs_failed": 0,
+    "note": "warm challenges only (cold challenge_0 discarded upstream); runs_failed = blinding exhausted; one timed run per distinct challenge",
+    "powm_baseline_ms": 0.0000
+  },
+  "warm_avg": {
+    "factor_ms": 22807.0460,
+    "recon_ms": 0.0125,
+    "local_cbrt_ms": 0.0111,
+    "gather_ms": 0.0005,
+    "combine_ms": 0.0009,
+    "total_ms": 22807.0585,
+    "speedup_recon": 0.0000,
+    "speedup_total": 0.0000
+  },
+  "warm_stats": {
+    "factor_ms": {"mean": 22807.0460, "std": 49973.8437, "min": 290.4883, "max": 152868.6682, "median": 1355.4591, "p25": 428.7352, "p75": 15814.1488},
+    "recon_ms": {"mean": 0.0125, "std": 0.0027, "min": 0.0099, "max": 0.0180, "median": 0.0121, "p25": 0.0104, "p75": 0.0135},
+    "total_ms": {"mean": 22807.0585, "std": 49973.8441, "min": 290.4981, "max": 152868.6816, "median": 1355.4695, "p25": 428.7458, "p75": 15814.1609},
+    "speedup_total": {"mean": 0.0000, "std": 0.0000, "min": 0.0000, "max": 0.0000, "median": 0.0000, "p25": 0.0000, "p75": 0.0000}
+  },
+  "warm_runs": {
+      "factor_ms": [290.4883, 375.1005, 428.7352, 1430.9580, 32203.6574, 152868.6682, 15814.1488, 496.1986, 1355.4591],
+      "recon_ms": [0.0099, 0.0151, 0.0107, 0.0180, 0.0129, 0.0135, 0.0121, 0.0104, 0.0104],
+      "local_cbrt_ms": [0.0084, 0.0135, 0.0092, 0.0166, 0.0115, 0.0118, 0.0106, 0.0089, 0.0091],
+      "gather_ms": [0.0006, 0.0006, 0.0005, 0.0005, 0.0005, 0.0005, 0.0006, 0.0006, 0.0005],
+      "combine_ms": [0.0009, 0.0009, 0.0010, 0.0009, 0.0009, 0.0012, 0.0009, 0.0009, 0.0008],
+      "cbrt_hit_ms": [0.0001, 0.0001, 0.0001, 0.0004, 0.0003, 0.0002, 0.0002, 0.0002, 0.0001],
+      "cbrt_miss_ms": [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
+      "cbrt_hits": [4, 5, 3, 6, 6, 3, 5, 5, 3],
+      "cbrt_misses": [0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "blinding_attempts": [1, 1, 1, 1, 1, 1, 1, 1, 1],
+      "total_ms": [290.4981, 375.1156, 428.7458, 1430.9761, 32203.6703, 152868.6816, 15814.1609, 496.2089, 1355.4695],
+      "speedup_total": [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000]
+  },
+  "warmup_runs": {
+    "note": "2 silent runs before bench loop to prime CPU caches",
+    "total_ms": [0.009, 0.007, 0.008, 0.008, 0.008, 0.008, 0.013, 0.008, 0.009, 0.009, 0.007, 0.007, 0.010, 0.008, 0.009, 0.009, 0.008, 0.007]
+  },
+  "prime_stats": {
+    "tested_per_rank": [2147450879, 2147450880],
+    "found_per_rank": [2, 3]
+  },
+  "hit_stats": {
+    "smooth_count": 0,
+    "almost_smooth_count": 0,
+    "multi_medium_count": 9,
+    "smooth_frac": 0.0000,
+    "almost_smooth_frac": 0.0000,
+    "multi_medium_frac": 1.0000,
+    "cofactor_bits_min": 70,
+    "cofactor_bits_mean": 94.22,
+    "cofactor_bits_max": 116,
+    "hit_type": [3, 3, 3, 3, 3, 3, 3, 3, 3],
+    "cofactor_bits": [70, 79, 98, 94, 109, 116, 106, 82, 94],
+    "medium_factor_count": [2, 2, 2, 2, 2, 2, 2, 2, 2]
+  },
+  "thread_balance": {}
+}
