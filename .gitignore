@@ -39,6 +39,7 @@ build/
 
 # Python virtual environment
 analysis/env/
+analysis/venv/
 
 # ── Project-specific generated files ─────────────────────
 # Generated benchmark figures
@@ -61,3 +62,4 @@ slurm-*.out
 *~
 .vscode/
 .idea/
+.claude/
