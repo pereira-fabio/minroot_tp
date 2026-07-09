@@ -29,7 +29,7 @@
 # ---------------------------------------------------------------------------
 
 # Canonical sizes matching src/common/sizes.h KSC_CANONICAL_SIZES_LIST
-SIZES="256 384 512 768 1024 2048"
+SIZES="256 384 512 768 1024 2048 4096 8192 16384 24576"
 
 # Number of challenge files: challenge_0 = cold, challenge_1..N-1 = warm
 N_CHALLENGES=10
