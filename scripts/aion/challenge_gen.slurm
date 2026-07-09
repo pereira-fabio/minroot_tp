@@ -49,7 +49,7 @@ trap 'rm -f challenges' EXIT
 export NUM_CHALLENGES=50
 # Paper-scale moduli (Gap 1): 256-bit MinRoot prime and near sizes.
 # 2048 added 2026-06-25: matches RFC 3526 Group 14 / RFC 7919 ffdhe2048.
-export SIZES="256 384 512 768 1024 2048"
+export SIZES="256 384 512 768 1024 2048 4096 8192 16384 24576"
 
 # ---------------------------------------------------------------------------
 # Compilation (runs once on the batch node; binary is on shared NFS)

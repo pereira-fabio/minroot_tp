@@ -34,7 +34,7 @@
 #   sbatch k35_e5.slurm
 #
 # Results land in:
-#   data/results/alg2/k35_e5_<jobid>_N<nodes>/
+#   data/results/aion/alg2/k35_e5_<jobid>_N<nodes>/
 # ---------------------------------------------------------------------------
 
 module load compiler/GCC/13.2.0
@@ -59,7 +59,7 @@ N_CHALLENGES=${N_CHALLENGE_COUNTS[$SLURM_ARRAY_TASK_ID]}
 # ---------------------------------------------------------------------------
 DATA_DIR=data/challenges/k35
 
-JSON_DIR=$SLURM_SUBMIT_DIR/data/results/alg2/k35_e5_${SLURM_JOB_ID}_N${N_NODES}
+JSON_DIR=$SLURM_SUBMIT_DIR/data/results/aion/alg2/k35_e5_${SLURM_JOB_ID}_N${N_NODES}
 mkdir -p $JSON_DIR
 
 CBRT_DIR=$SLURM_SUBMIT_DIR/data/cbrt/alg2_k35_e5/N${N_NODES}
@@ -158,4 +158,4 @@ echo "runs_failed counts blinding-exhaustion outliers excluded from averages."
 echo "Job finished  (Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID)"
 echo "============================================================"
 
-# Edit: 2026-06-25
+# Edit: 2026-07-06

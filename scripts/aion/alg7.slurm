@@ -31,7 +31,7 @@
 # Reuses alg3 challenge files (challenge_0..N-1; same modulus structure).
 # Multi-challenge: challenge_0 = cold warmup (saved as cold_run), 1..N-1 merged.
 # cbrt caches: data/cbrt/alg7_e3/N<nodes>/  (per-N --cbrt-dir, no cross-task races)
-# Results:     data/results/alg7/alg7_<JOBID>_N<nodes>/alg7_mpi_<method>_<JOBID>_<size>.json
+# Results:     data/results/aion/alg7/alg7_<JOBID>_N<nodes>/alg7_mpi_<method>_<JOBID>_<size>.json
 # ---------------------------------------------------------------------------
 
 module load compiler/GCC/13.2.0
@@ -57,7 +57,7 @@ N_CHALLENGES=${N_CHALLENGE_COUNTS[$SLURM_ARRAY_TASK_ID]}
 DATA_DIR=data/challenges/alg3
 R=1048576   # 2^20 candidates per pass (4 MB log_sum per rank)
 
-JSON_DIR=$SLURM_SUBMIT_DIR/data/results/alg7/alg7_${SLURM_JOB_ID}_N${N_NODES}
+JSON_DIR=$SLURM_SUBMIT_DIR/data/results/aion/alg7/alg7_${SLURM_JOB_ID}_N${N_NODES}
 mkdir -p $JSON_DIR
 
 # Per-N cbrt cache dir — isolates concurrent array tasks (no cross-task races).
@@ -153,4 +153,4 @@ echo "speedup_total = powm_baseline / (factor_ms + recon_ms)"
 echo "Job finished  (Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID)"
 echo "============================================================"
 
-# Edit: 2026-06-25
+# Edit: 2026-07-06

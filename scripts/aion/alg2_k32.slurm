@@ -28,7 +28,7 @@
 # become available — you do not need to resubmit or change anything.
 #
 # Results land in separate directories per node count:
-#   data/results/alg2/k32_<jobid>_N1/   ...   data/results/alg2/k32_<jobid>_N64/
+#   data/results/aion/alg2/k32_<jobid>_N1/   ...   data/results/aion/alg2/k32_<jobid>_N64/
 #
 # To run only specific tasks, e.g. tasks 2 and 3:
 #   sbatch --array=2-3 k32.slurm
@@ -56,7 +56,7 @@ N_CHALLENGES=${N_CHALLENGE_COUNTS[$SLURM_ARRAY_TASK_ID]}
 # ---------------------------------------------------------------------------
 DATA_DIR=data/challenges/k32
 
-JSON_DIR=$SLURM_SUBMIT_DIR/data/results/alg2/k32_${SLURM_JOB_ID}_N${N_NODES}
+JSON_DIR=$SLURM_SUBMIT_DIR/data/results/aion/alg2/k32_${SLURM_JOB_ID}_N${N_NODES}
 mkdir -p $JSON_DIR
 
 CBRT_DIR=$SLURM_SUBMIT_DIR/data/cbrt/alg2_k32_e3/N${N_NODES}
@@ -146,4 +146,4 @@ echo "runs_failed counts blinding-exhaustion outliers excluded from averages."
 echo "Job finished  (Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID)"
 echo "============================================================"
 
-# Edit: 2026-06-25
+# Edit: 2026-07-06

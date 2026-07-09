@@ -20,7 +20,7 @@
 # a disjoint prime-range slice; factor_ms = max(device times), ~1/N_GPUS scaling.
 # k16 and alg7 are unaffected (k16 doesn't benefit; alg7 has its own kernel).
 #
-# JSON naming: results/iris/<alg>/G{N_GPUS}/<alg>_<method>_JOBID_SIZE_eE.json
+# JSON naming: data/results/iris/<alg>/G{N_GPUS}/<alg>_<method>_JOBID_SIZE_eE.json
 #
 # Prerequisites (copy from AION once):
 #   rsync -av <aion>:<proj>/data/challenges/  <iris>:<proj>/data/challenges/
@@ -57,8 +57,8 @@ nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv,noheader
 # Using it directly is simpler and faster than spawning nvidia-smi.
 N_GPUS=${SLURM_GPUS_ON_NODE:-1}
 
-# Results go into per-algorithm subdirs (mirrors CPU layout: results/alg2/G1, alg3/G2 ...)
-IRIS_BASE="results/iris"
+# Results go into per-algorithm subdirs (data/results/iris/alg2/G1, alg3/G2 ...)
+IRIS_BASE="data/results/iris"
 ALG2_DIR="$IRIS_BASE/alg2/G${N_GPUS}"
 ALG3_DIR="$IRIS_BASE/alg3/G${N_GPUS}"
 ALG4_DIR="$IRIS_BASE/alg4/G${N_GPUS}"
@@ -328,4 +328,4 @@ echo "Results in: $IRIS_BASE/alg{2,3,4,7}/G${N_GPUS}/"
 find "$ALG2_DIR" "$ALG3_DIR" "$ALG4_DIR" "$ALG7_DIR" -name "*_${SLURM_JOB_ID}_*.json" 2>/dev/null | wc -l | xargs -I{} echo "  {} JSON files written"
 echo "Done — check all_gpu_${SLURM_JOB_ID}.out"
 
-# Edit: 2026-06-30
+# Edit: 2026-07-06

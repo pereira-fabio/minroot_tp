@@ -27,11 +27,16 @@ import json, glob, os, math
 # ---------------------------------------------------------------------------
 # Dickman–de Bruijn function ρ(u)
 # Solves the delay ODE: u·ρ'(u) = -ρ(u-1), ρ(u) = 1 for 0 ≤ u ≤ 1
-# Method of steps with linear interpolation, 2000 points per unit interval.
-# Accurate to ~4 significant figures for u up to ~20.
+# Method of steps with linear interpolation.
+# NOTE: at 4000 points/unit the linear-interp lookup error accumulates in the
+# tail (rho(9) came out ~3.6e-10 vs the true ~1.0e-9, and rho(10) collapsed to
+# ~0). 40000 points/unit converges the whole 1<=u<=20 range to Granville's
+# tabulated values. This only affects the theoretical P(hit) / reference tables;
+# every effective-RATE and ratio table below is unchanged because the shared
+# rho(8) factor cancels in numerator and denominator.
 # ---------------------------------------------------------------------------
 
-_DICKMAN_N = 4000  # points per unit interval
+_DICKMAN_N = 40000  # points per unit interval
 
 def _rho_lookup(u1, rho):
     """Interpolate rho at value u1 (u1 >= 0). Returns 1.0 for u1 <= 1."""
@@ -370,3 +375,5 @@ print()
 print("B=2^32: P(k32 hit at n bits) = ρ(n/32)")
 print("B=2^35: P(k35 hit at n bits) = ρ(n/35)  [paper's primary Algo2]")
 print()
+
+# Edit: 2026-07-07
