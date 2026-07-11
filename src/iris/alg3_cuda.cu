@@ -354,7 +354,7 @@ int main(int argc, char **argv) {
         float cold_km = launch_all(y_smooth);
 
         auto tc0 = std::chrono::high_resolution_clock::now();
-        kf_compute_cbrt_from_factors(result, &solved_factors, modulo, &cbrt_cache, &cache_dirty, exponent);
+        kf_compute_cbrt_from_factors_omp(result, &solved_factors, modulo, &cbrt_cache, &cache_dirty, exponent);
         if (has_q0) {
             mpz_t cbrt_q0; mpz_init(cbrt_q0);
             compute_eth_root_mod_prime(cbrt_q0, q0_saved, modulo, exponent);
@@ -411,7 +411,7 @@ int main(int argc, char **argv) {
             xfer.d2h_ms.push_back(std::chrono::duration<double, std::milli>(t_d2h1 - t_d2h0).count());
 
             auto tr0 = std::chrono::high_resolution_clock::now();
-            kf_compute_cbrt_from_factors(result, &fl_w, modulo, &cbrt_cache, &cache_dirty, exponent);
+            kf_compute_cbrt_from_factors_omp(result, &fl_w, modulo, &cbrt_cache, &cache_dirty, exponent);
             // Type 1: prime cofactor (alg3 challenge always has this structure)
             if (mpz_cmp_ui(cof_w, 1) != 0 && mpz_sizeinbase(cof_w, 2) <= 65
                     && mpz_probab_prime_p(cof_w, 25) > 0) {
@@ -471,4 +471,4 @@ cleanup:
 
     return solved_attempt >= 0 ? 0 : 2;
 }
-// Edit: 2026-06-29
+// Edit: 2026-07-11

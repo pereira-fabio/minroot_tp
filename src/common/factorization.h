@@ -190,6 +190,17 @@ void kf_compute_cbrt_from_factors(mpz_t result,
                                   bool *cache_dirty,
                                   unsigned long exponent);
 
+// OpenMP-parallel variant of the above, for single-process (IRIS GPU) solvers
+// where reconstruction is not distributed across MPI ranks. Computes the
+// per-factor cube roots concurrently; output is identical to the serial version.
+// Cache reads happen in the parallel region, cache writes serially afterward.
+void kf_compute_cbrt_from_factors_omp(mpz_t result,
+                                      const kfactor_list_t *found,
+                                      const mpz_t modulo,
+                                      cbrt_cache_t *cache,
+                                      bool *cache_dirty,
+                                      unsigned long exponent);
+
 // ---------------------------------------------------------------------------
 // Blinding pair table (Algorithm 2 precomputation, Biryukov et al. §2)
 //
@@ -267,4 +278,4 @@ bool kf_load_cbrt_table_k16(mpz_t *cbrt_table, int prime_count, const char *file
 void kf_compute_cube_root_from_factors_k16(mpz_t result, const int *exponents,
                                            const mpz_t *cbrt_table, int prime_count,
                                            const mpz_t modulo);
-// Edit: 2026-06-01
+// Edit: 2026-07-11

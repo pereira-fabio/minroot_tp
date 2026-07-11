@@ -80,6 +80,21 @@ __global__ void k16_trial_divide_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Per-device state for the multi-GPU candidate-batch split. Each device holds
+// its own slice of the 256-candidate batch and the FULL prime table in its own
+// constant memory (26 KB — nothing to tile, unlike k32's 813 MB table, so the
+// batch rather than the primes is what we split across devices).
+// ---------------------------------------------------------------------------
+struct K16Dev {
+    int cb_lo;                 // first global candidate index this device owns
+    int n_cand;                // number of candidates this device owns
+    uint64_t *d_y_batch;       // n_cand * MAX_LIMBS
+    uint64_t *d_out_factors;   // n_cand * MAX_GPU_FACTORS
+    int      *d_out_counts;    // n_cand
+    cudaEvent_t ev0, ev1;
+};
+
+// ---------------------------------------------------------------------------
 // Host utilities
 // ---------------------------------------------------------------------------
 
@@ -102,6 +117,7 @@ static void print_usage(const char *prog) {
         "  --exponent E           root exponent (default: 3)\n"
         "  --attempts N           batch size — blinded candidates per kernel (default: 256)\n"
         "  --n-challenges N       challenge files to run (default: 10)\n"
+        "  --n-gpus N             split the candidate batch across N devices (default: 1)\n"
         "  --json FILE            write JSON output\n",
         prog);
 }
@@ -120,6 +136,7 @@ int main(int argc, char **argv) {
     const char *json_path      = nullptr;
     gpu_method_t method        = GPU_METHOD_SIEVE;
     int n_challenges           = 10;
+    int n_gpus                 = 1;
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--data")         && i+1<argc) data_dir     = argv[++i];
@@ -130,6 +147,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--attempts")     && i+1<argc) batch_size   = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--json")         && i+1<argc) json_path    = argv[++i];
         else if (!strcmp(argv[i], "--method")       && i+1<argc) method       = gpu_parse_method(argv[++i]);
+        else if (!strcmp(argv[i], "--n-gpus")       && i+1<argc) n_gpus       = atoi(argv[++i]);
         else if (argv[i][0] != '-') {
             if (!challenge_file) challenge_file = argv[i];
             else if (!modulo_file) modulo_file  = argv[i];
@@ -137,6 +155,17 @@ int main(int argc, char **argv) {
     }
     if (batch_size < 1 || batch_size > 4096) {
         fprintf(stderr, "Error: --attempts must be in [1, 4096]\n"); return 1;
+    }
+
+    // Clamp n_gpus to the number of visible devices (mirrors alg2_k32_cuda.cu).
+    {
+        int avail = 0; cudaGetDeviceCount(&avail);
+        if (n_gpus < 1) n_gpus = 1;
+        if (avail > 0 && n_gpus > avail) {
+            fprintf(stderr, "Warning: requested %d GPUs but only %d visible; using %d\n",
+                    n_gpus, avail, avail);
+            n_gpus = avail;
+        }
     }
 
     // Derive paths from --data/--size when given (overrides positional args)
@@ -192,9 +221,8 @@ int main(int argc, char **argv) {
     uint32_t *primes32 = (uint32_t *)malloc(n_primes * sizeof(uint32_t));
     for (int i = 0; i < n_primes; i++) primes32[i] = (uint32_t)primes_ul[i];
 
-    CUDA_CHECK(cudaMemcpyToSymbol(d_k16_primes, primes32, n_primes * sizeof(uint32_t)));
-    CUDA_CHECK(cudaMemcpyToSymbol(d_n_k16_primes, &n_primes, sizeof(int)));
-    CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
+    // Prime table + nlimbs are uploaded to EACH device's constant memory in the
+    // per-device setup loop below (the batch is split across devices, not the primes).
 
     // ---- cbrt cache ----
     cbrt_cache_t cache;
@@ -208,18 +236,36 @@ int main(int argc, char **argv) {
     blinding_pair_t *btable = kf_blinding_table_alloc(batch_size, modulo, exponent);
     printf("Blinding table ready (%d entries).\n", batch_size);
 
-    // ---- Allocate GPU buffers ----
+    // ---- Shared host buffers (full batch; filled by gathering all devices) ----
     uint64_t *h_y_batch;
     CUDA_CHECK(cudaMallocHost(&h_y_batch, (size_t)batch_size * MAX_LIMBS * sizeof(uint64_t)));
-    uint64_t *d_y_batch;
-    CUDA_CHECK(cudaMalloc(&d_y_batch, (size_t)batch_size * MAX_LIMBS * sizeof(uint64_t)));
     uint64_t *h_out_factors;
     CUDA_CHECK(cudaMallocHost(&h_out_factors, (size_t)batch_size * MAX_GPU_FACTORS * sizeof(uint64_t)));
-    uint64_t *d_out_factors;
-    CUDA_CHECK(cudaMalloc(&d_out_factors, (size_t)batch_size * MAX_GPU_FACTORS * sizeof(uint64_t)));
     int *h_out_counts = (int *)calloc(batch_size, sizeof(int));
-    int *d_out_counts;
-    CUDA_CHECK(cudaMalloc(&d_out_counts, batch_size * sizeof(int)));
+
+    // ---- Per-device setup: split the candidate batch across n_gpus devices ----
+    std::vector<K16Dev> devs((size_t)n_gpus);
+    {
+        int base = batch_size / n_gpus;
+        for (int g = 0; g < n_gpus; g++) {
+            CUDA_CHECK(cudaSetDevice(g));
+            int cb_lo  = g * base;
+            int n_cand = (g == n_gpus - 1) ? (batch_size - cb_lo) : base;
+            devs[g].cb_lo  = cb_lo;
+            devs[g].n_cand = n_cand;
+            // Full prime table + nlimbs into THIS device's constant memory.
+            CUDA_CHECK(cudaMemcpyToSymbol(d_k16_primes, primes32, n_primes * sizeof(uint32_t)));
+            CUDA_CHECK(cudaMemcpyToSymbol(d_n_k16_primes, &n_primes, sizeof(int)));
+            CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
+            CUDA_CHECK(cudaMalloc(&devs[g].d_y_batch,     (size_t)n_cand * MAX_LIMBS * sizeof(uint64_t)));
+            CUDA_CHECK(cudaMalloc(&devs[g].d_out_factors, (size_t)n_cand * MAX_GPU_FACTORS * sizeof(uint64_t)));
+            CUDA_CHECK(cudaMalloc(&devs[g].d_out_counts,  (size_t)n_cand * sizeof(int)));
+            CUDA_CHECK(cudaEventCreate(&devs[g].ev0));
+            CUDA_CHECK(cudaEventCreate(&devs[g].ev1));
+            printf("  GPU %d: candidates [%d, %d) (%d of %d)\n",
+                   g, cb_lo, cb_lo + n_cand, n_cand, batch_size);
+        }
+    }
 
     // ---- Build batch of blinded candidates (slot 0 = unblinded) ----
     memset(h_y_batch, 0, (size_t)batch_size * MAX_LIMBS * sizeof(uint64_t));
@@ -237,39 +283,57 @@ int main(int argc, char **argv) {
         }
         mpz_clear(y_tmp);
     }
-    CUDA_CHECK(cudaMemcpy(d_y_batch, h_y_batch,
-                          (size_t)batch_size * MAX_LIMBS * sizeof(uint64_t),
-                          cudaMemcpyHostToDevice));
+    for (int g = 0; g < n_gpus; g++) {
+        CUDA_CHECK(cudaSetDevice(g));
+        CUDA_CHECK(cudaMemcpy(devs[g].d_y_batch,
+                              h_y_batch + (size_t)devs[g].cb_lo * MAX_LIMBS,
+                              (size_t)devs[g].n_cand * MAX_LIMBS * sizeof(uint64_t),
+                              cudaMemcpyHostToDevice));
+    }
 
-    cudaEvent_t ev0, ev1;
-    CUDA_CHECK(cudaEventCreate(&ev0));
-    CUDA_CHECK(cudaEventCreate(&ev1));
-
-    // Helper: launch batch kernel, return kernel_ms.
-    // d_y_batch stays on GPU; only reset output buffers between runs.
+    // Helper: launch the batch kernel on every device (each over its candidate
+    // slice, against the full prime table), then gather all device outputs into
+    // the shared host buffers. Returns the wall-clock kernel time (max across
+    // devices = effective per-launch cost). d_y_batch stays resident on each GPU.
     auto launch_batch = [&]() -> float {
-        CUDA_CHECK(cudaMemset(d_out_factors, 0, (size_t)batch_size * MAX_GPU_FACTORS * sizeof(uint64_t)));
-        CUDA_CHECK(cudaMemset(d_out_counts, 0, batch_size * sizeof(int)));
-        CUDA_CHECK(cudaEventRecord(ev0));
-        k16_trial_divide_kernel<<<batch_size, 256>>>(d_y_batch, batch_size, d_out_factors, d_out_counts);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaEventRecord(ev1));
-        CUDA_CHECK(cudaEventSynchronize(ev1));
+        for (int g = 0; g < n_gpus; g++) {
+            CUDA_CHECK(cudaSetDevice(g));
+            CUDA_CHECK(cudaMemset(devs[g].d_out_factors, 0,
+                                  (size_t)devs[g].n_cand * MAX_GPU_FACTORS * sizeof(uint64_t)));
+            CUDA_CHECK(cudaMemset(devs[g].d_out_counts, 0, (size_t)devs[g].n_cand * sizeof(int)));
+            CUDA_CHECK(cudaEventRecord(devs[g].ev0));
+            k16_trial_divide_kernel<<<devs[g].n_cand, 256>>>(devs[g].d_y_batch, devs[g].n_cand,
+                                                             devs[g].d_out_factors, devs[g].d_out_counts);
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaEventRecord(devs[g].ev1));
+        }
         float km = 0;
-        CUDA_CHECK(cudaEventElapsedTime(&km, ev0, ev1));
+        for (int g = 0; g < n_gpus; g++) {
+            CUDA_CHECK(cudaSetDevice(g));
+            CUDA_CHECK(cudaEventSynchronize(devs[g].ev1));
+            float t = 0;
+            CUDA_CHECK(cudaEventElapsedTime(&t, devs[g].ev0, devs[g].ev1));
+            if (t > km) km = t;
+        }
+        // Gather each device's candidate slice into the shared host buffers.
+        for (int g = 0; g < n_gpus; g++) {
+            CUDA_CHECK(cudaSetDevice(g));
+            CUDA_CHECK(cudaMemcpy(h_out_counts + devs[g].cb_lo, devs[g].d_out_counts,
+                                  (size_t)devs[g].n_cand * sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_out_factors + (size_t)devs[g].cb_lo * MAX_GPU_FACTORS,
+                                  devs[g].d_out_factors,
+                                  (size_t)devs[g].n_cand * MAX_GPU_FACTORS * sizeof(uint64_t),
+                                  cudaMemcpyDeviceToHost));
+        }
         return km;
     };
 
     // ---- Cold run: find smooth slot + reconstruct (warms cbrt cache) ----
+    // launch_batch() already gathered all devices' outputs into h_out_* buffers.
     float cold_kernel_ms = launch_batch();
-    CUDA_CHECK(cudaMemcpy(h_out_factors, d_out_factors,
-                          (size_t)batch_size * MAX_GPU_FACTORS * sizeof(uint64_t),
-                          cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_out_counts, d_out_counts,
-                          batch_size * sizeof(int), cudaMemcpyDeviceToHost));
 
-    printf("Cold kernel: %.3f ms for %d candidates × %d primes\n",
-           cold_kernel_ms, batch_size, n_primes);
+    printf("Cold kernel: %.3f ms for %d candidates × %d primes (%d GPU(s))\n",
+           cold_kernel_ms, batch_size, n_primes, n_gpus);
 
     // Find smooth slot (always slot 0 since challenge file stores smooth y)
     int solved_b = -1;
@@ -311,7 +375,7 @@ int main(int argc, char **argv) {
         printf("No k16-smooth slot found in cold batch. Challenge may not be k16-smooth.\n");
         std::vector<double> empty;
         gpu_write_json_warm(json_path, "k16", method, exponent, 16, challenge_bits,
-                            0.0, cold_factor_ms, 0.0, empty, empty, 0);
+                            0.0, cold_factor_ms, 0.0, empty, empty, 0, n_gpus);
         goto cleanup;
     }
 
@@ -350,20 +414,21 @@ int main(int argc, char **argv) {
             // Update slot 0 only (challenge_i is smooth at slot 0 by generator)
             export_limbs(y_w, h_y_batch + 0 * MAX_LIMBS, MAX_LIMBS);
             auto t_h2d0 = std::chrono::high_resolution_clock::now();
-            CUDA_CHECK(cudaMemcpy(d_y_batch, h_y_batch,
+            // Global slot 0 lives on device 0 (local slot 0). Only slot 0 is the
+            // real challenge; the other slots stay resident for timing amortization.
+            CUDA_CHECK(cudaSetDevice(0));
+            CUDA_CHECK(cudaMemcpy(devs[0].d_y_batch, h_y_batch,
                                   MAX_LIMBS * sizeof(uint64_t), cudaMemcpyHostToDevice));
             auto t_h2d1 = std::chrono::high_resolution_clock::now();
 
             float km = launch_batch();
 
-            // Read slot 0 result (always smooth at attempt 0)
+            // Read slot 0 result (always smooth at attempt 0). launch_batch()
+            // already gathered device 0's slot-0 output into h_out_*.
             auto t_d2h0 = std::chrono::high_resolution_clock::now();
-            CUDA_CHECK(cudaMemcpy(h_out_counts, d_out_counts, batch_size * sizeof(int), cudaMemcpyDeviceToHost));
             int gpu_count_w = h_out_counts[0];
             kfactor_list_t fl_w; kfl_init(&fl_w);
             if (gpu_count_w > 0 && gpu_count_w <= MAX_GPU_FACTORS) {
-                CUDA_CHECK(cudaMemcpy(h_out_factors, d_out_factors,
-                                      (size_t)gpu_count_w * sizeof(uint64_t), cudaMemcpyDeviceToHost));
                 mpz_t cof_w; mpz_init_set(cof_w, y_w);
                 for (int j = 0; j < gpu_count_w; j++) {
                     unsigned long p = (unsigned long)h_out_factors[j];
@@ -398,7 +463,7 @@ int main(int argc, char **argv) {
         gpu_write_json_warm(json_path, "k16", method, exponent, 16, challenge_bits,
                             0.0,
                             cold_factor_ms, cold_recon_ms,
-                            factor_ms_v, recon_ms_v, 1, 1, hit_stats, xfer);
+                            factor_ms_v, recon_ms_v, 1, n_gpus, hit_stats, xfer);
     }
 
 cleanup:
@@ -413,13 +478,16 @@ cleanup:
     free(h_out_counts);
     CUDA_CHECK(cudaFreeHost(h_y_batch));
     CUDA_CHECK(cudaFreeHost(h_out_factors));
-    CUDA_CHECK(cudaFree(d_y_batch));
-    CUDA_CHECK(cudaFree(d_out_factors));
-    CUDA_CHECK(cudaFree(d_out_counts));
-    CUDA_CHECK(cudaEventDestroy(ev0));
-    CUDA_CHECK(cudaEventDestroy(ev1));
+    for (int g = 0; g < n_gpus; g++) {
+        CUDA_CHECK(cudaSetDevice(g));
+        CUDA_CHECK(cudaFree(devs[g].d_y_batch));
+        CUDA_CHECK(cudaFree(devs[g].d_out_factors));
+        CUDA_CHECK(cudaFree(devs[g].d_out_counts));
+        CUDA_CHECK(cudaEventDestroy(devs[g].ev0));
+        CUDA_CHECK(cudaEventDestroy(devs[g].ev1));
+    }
 
     return solved_b >= 0 ? 0 : 2;
 }
 
-// Edit: 2026-06-29
+// Edit: 2026-07-11

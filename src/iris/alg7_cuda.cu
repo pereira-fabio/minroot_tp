@@ -69,6 +69,11 @@ __constant__ uint64_t d_x_limbs[MAX_LIMBS];
 __constant__ uint64_t d_m_limbs[MAX_LIMBS];
 __constant__ int d_nlimbs;
 
+// Limbs of the single winning candidate y = x + best_r*M, uploaded before the
+// Phase-2 GPU factoring kernel (see factor_candidate_kernel / gpu_factor_candidate).
+__constant__ uint64_t d_y_limbs[MAX_LIMBS];
+__constant__ int d_y_nlimbs;
+
 // ---------------------------------------------------------------------------
 // Device helpers — alg7-specific (mulmod_u32 used in inverted_sieve_kernel;
 // mod_big_by_u32 provided by gpu_common.h)
@@ -134,6 +139,29 @@ __global__ void inverted_sieve_kernel(const uint32_t *primes, int64_t nprimes,
 }
 
 // ---------------------------------------------------------------------------
+// Phase-2 kernel: trial-divide the SINGLE winning candidate y (in d_y_limbs)
+// by every sieve prime, recording each prime q with q | y into out_primes[].
+// This replaces the old serial host re-scan (kf_trial_divide_table over all
+// ~200M primes, which dominated recon_ms) with the same on-device trial
+// division that k32 uses — so alg7 factors on the GPU like the other solvers.
+// Multiplicities are recovered on the host afterwards (see gpu_factor_candidate).
+// ---------------------------------------------------------------------------
+
+__global__ void factor_candidate_kernel(const uint32_t *primes, int64_t nprimes,
+                                        uint32_t *out_primes, int *out_count,
+                                        int max_out) {
+    int64_t idx = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+    int64_t stride = (int64_t)blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < nprimes; i += stride) {
+        uint64_t q = primes[i];
+        if (mod_big_by_u32(d_y_limbs, d_y_nlimbs, q) == 0) {
+            int slot = atomicAdd(out_count, 1);
+            if (slot < max_out) out_primes[slot] = (uint32_t)q;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Host: export an mpz_t's limbs (little-endian uint64_t words) into a
 // fixed-size buffer suitable for upload to __constant__ memory.
 // ---------------------------------------------------------------------------
@@ -149,6 +177,56 @@ static int export_limbs(const mpz_t value, uint64_t *out, int max_limbs) {
         exit(1);
     }
     return (int)count;
+}
+
+// ---------------------------------------------------------------------------
+// GPU trial-division of a single candidate y over the sieve primes.
+// Drop-in replacement for kf_trial_divide_table(y, primes, nprimes, found):
+// produces the identical factor list (every sieve prime dividing y, with its
+// full multiplicity), but does the ~200M-prime scan on the GPU instead of one
+// host thread. Multiplicity is recovered on the host by dividing y out fully
+// per distinct prime the kernel reports (the kernel reports each prime once).
+// ---------------------------------------------------------------------------
+
+static void gpu_factor_candidate(const mpz_t y, kfactor_list_t *found,
+                                 const uint32_t *d_primes, int64_t nprimes,
+                                 uint32_t *d_out_primes, int *d_out_count,
+                                 int max_out, int64_t blocks, int tpb) {
+    // Upload y's limbs to constant memory for the kernel.
+    uint64_t y_limbs[MAX_LIMBS];
+    int y_nl = export_limbs(y, y_limbs, MAX_LIMBS);
+    CUDA_CHECK(cudaMemcpyToSymbol(d_y_limbs, y_limbs, sizeof(uint64_t) * MAX_LIMBS));
+    CUDA_CHECK(cudaMemcpyToSymbol(d_y_nlimbs, &y_nl, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_out_count, 0, sizeof(int)));
+
+    factor_candidate_kernel<<<(unsigned)blocks, tpb>>>(d_primes, nprimes,
+                                                       d_out_primes, d_out_count, max_out);
+    CUDA_CHECK(cudaGetLastError());
+
+    int h_count = 0;
+    CUDA_CHECK(cudaMemcpy(&h_count, d_out_count, sizeof(int), cudaMemcpyDeviceToHost));
+    if (h_count > max_out) {
+        // Overflow: more distinct small-prime factors than the output buffer holds.
+        // Not silent — the missing primes leave a composite cofactor, so the
+        // downstream cofactor_ok check fails and the run is flagged unsolved.
+        fprintf(stderr, "Warning: factor_candidate overflow (%d > %d) — increase MAX_OUT_FACTORS\n",
+                h_count, max_out);
+        h_count = max_out;
+    }
+    std::vector<uint32_t> h_primes(h_count);
+    if (h_count > 0)
+        CUDA_CHECK(cudaMemcpy(h_primes.data(), d_out_primes,
+                              sizeof(uint32_t) * h_count, cudaMemcpyDeviceToHost));
+
+    // Recover multiplicities on the host (each reported prime is distinct).
+    mpz_t t; mpz_init_set(t, y);
+    for (int i = 0; i < h_count; i++) {
+        unsigned long q = h_primes[i];
+        int e = 0;
+        while (mpz_divisible_ui_p(t, q)) { mpz_divexact_ui(t, t, q); e++; }
+        if (e > 0) kfl_append_ul(found, q, e);
+    }
+    mpz_clear(t);
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +364,14 @@ int main(int argc, char **argv) {
     CUDA_CHECK(cudaMalloc(&d_log_sum, sizeof(float) * R));
     CUDA_CHECK(cudaMemcpy(d_primes, primes, sizeof(uint32_t) * nprimes, cudaMemcpyHostToDevice));
 
+    // Phase-2 GPU factoring output: distinct sieve primes dividing the winner.
+    // 4096 slots covers challenges well past the 24576-bit ceiling (a B-smooth
+    // n has <= |n|/16 factors with primes > 2^16); overflow is flagged, not silent.
+    const int MAX_OUT_FACTORS = 4096;
+    uint32_t *d_out_primes; int *d_out_count;
+    CUDA_CHECK(cudaMalloc(&d_out_primes, sizeof(uint32_t) * MAX_OUT_FACTORS));
+    CUDA_CHECK(cudaMalloc(&d_out_count, sizeof(int)));
+
     int threads_per_block = 256;
     int64_t blocks = (nprimes + threads_per_block - 1) / threads_per_block;
     if (blocks < 1) blocks = 1;
@@ -335,7 +421,8 @@ int main(int argc, char **argv) {
     // ---- Phase 2: trial divide y, check cofactor ----
     kfactor_list_t found;
     kfl_init(&found);
-    kf_trial_divide_table(y, primes, nprimes, &found);
+    gpu_factor_candidate(y, &found, d_primes, nprimes,
+                         d_out_primes, d_out_count, MAX_OUT_FACTORS, blocks, threads_per_block);
     mpz_set(cofactor, y);
     for (int i = 0; i < found.count; i++)
         for (int k = 0; k < found.items[i].exponent; k++)
@@ -367,8 +454,9 @@ int main(int argc, char **argv) {
         kfl_free(&found);
         kfl_init(&found);
         auto tr0 = std::chrono::high_resolution_clock::now();
-        kf_trial_divide_table(y, primes, nprimes, &found);
-        kf_compute_cbrt_from_factors(result, &found, modulo, &cache, &cache_dirty, exponent);
+        gpu_factor_candidate(y, &found, d_primes, nprimes,
+                             d_out_primes, d_out_count, MAX_OUT_FACTORS, blocks, threads_per_block);
+        kf_compute_cbrt_from_factors_omp(result, &found, modulo, &cache, &cache_dirty, exponent);
         if (has_q0) {
             mpz_t cbrt_q; mpz_init(cbrt_q);
             compute_eth_root_mod_prime(cbrt_q, cofactor, modulo, exponent);
@@ -435,12 +523,13 @@ int main(int argc, char **argv) {
         // Phase 2 (CPU): trial divide y_w, reconstruct
         auto tr0 = std::chrono::high_resolution_clock::now();
         kfactor_list_t fl_w; kfl_init(&fl_w);
-        kf_trial_divide_table(y_w, primes, nprimes, &fl_w);
+        gpu_factor_candidate(y_w, &fl_w, d_primes, nprimes,
+                             d_out_primes, d_out_count, MAX_OUT_FACTORS, blocks, threads_per_block);
         mpz_t cof_w; mpz_init_set(cof_w, y_w);
         for (int j = 0; j < fl_w.count; j++)
             for (int k = 0; k < fl_w.items[j].exponent; k++)
                 mpz_divexact(cof_w, cof_w, fl_w.items[j].prime);
-        kf_compute_cbrt_from_factors(result, &fl_w, modulo, &cache, &cache_dirty, exponent);
+        kf_compute_cbrt_from_factors_omp(result, &fl_w, modulo, &cache, &cache_dirty, exponent);
         if (mpz_cmp_ui(cof_w, 1) != 0 && (long)mpz_sizeinbase(cof_w, 2) <= medium_bits
                 && mpz_probab_prime_p(cof_w, 25) > 0) {
             mpz_t cbrt_q_w; mpz_init(cbrt_q_w);
@@ -486,9 +575,11 @@ int main(int argc, char **argv) {
     free(primes);
     CUDA_CHECK(cudaFree(d_primes));
     CUDA_CHECK(cudaFree(d_log_sum));
+    CUDA_CHECK(cudaFree(d_out_primes));
+    CUDA_CHECK(cudaFree(d_out_count));
     CUDA_CHECK(cudaEventDestroy(ev_start));
     CUDA_CHECK(cudaEventDestroy(ev_stop));
 
     return solved ? 0 : 2;
 }
-// Edit: 2026-06-29
+// Edit: 2026-07-11

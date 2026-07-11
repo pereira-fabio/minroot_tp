@@ -1,5 +1,16 @@
+// _GNU_SOURCE (before any system header) exposes sched_getaffinity / CPU_COUNT,
+// used to size the OpenMP reconstruction to the cores actually granted to this
+// process (see ksc_available_cpus).
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "factorization.h"
 #include "common.h"
+
+#if defined(__linux__)
+#include <sched.h>
+#endif
 
 #include <gmp.h>
 #include <stdio.h>
@@ -920,6 +931,130 @@ void kf_compute_cbrt_from_factors(mpz_t result,
     mpz_clear(e_inv);
 }
 
+// ---------------------------------------------------------------------------
+// Number of CPU cores actually available to THIS process. Uses the scheduler
+// affinity mask (sched_getaffinity), so under SLURM it returns exactly the cores
+// the job was granted (its cpuset/cgroup), not the whole node — no need to set
+// OMP_NUM_THREADS or --cpus-per-task by hand. Falls back to the OpenMP processor
+// count, then to 1. Cached after the first call.
+// ---------------------------------------------------------------------------
+static int ksc_available_cpus(void)
+{
+    static int cached = 0;
+    if (cached > 0) return cached;
+    int n = 0;
+#if defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set) == 0)
+        n = CPU_COUNT(&set);
+#endif
+#ifdef _OPENMP
+    if (n <= 0) n = omp_get_num_procs();
+#endif
+    if (n <= 0) n = 1;
+    cached = n;
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// Parallel (OpenMP) variant of kf_compute_cbrt_from_factors, for single-process
+// solvers (the IRIS GPU port) where reconstruction is NOT distributed across MPI
+// ranks as it is on AION. At large moduli a challenge can have hundreds of
+// distinct prime factors, each needing a full |M|-bit modular exponentiation for
+// its cube root; serially on one core this dominates the runtime (e.g. ~20 min
+// for a 24576-bit k35 challenge). Here the per-factor cube roots are computed
+// concurrently, then combined serially.
+//
+// Output is bit-identical to the serial version: the cube roots are combined in
+// index order and multiplication mod M is commutative, so parallelism changes
+// only *when* each root is computed, not the product.
+//
+// Thread-safety: the cbrt cache is READ (kf_cbrt_cache_find) inside the parallel
+// region but never written there — newly computed roots are appended to the
+// cache in the serial phase afterward. This avoids the data race a naive
+// parallelization would introduce. Without -fopenmp the pragma is ignored and
+// the function runs serially (still correct).
+void kf_compute_cbrt_from_factors_omp(mpz_t result,
+                                      const kfactor_list_t *found,
+                                      const mpz_t modulo,
+                                      cbrt_cache_t *cache,
+                                      bool *cache_dirty,
+                                      unsigned long exponent)
+{
+    mpz_t phi, e_inv, e_base;
+    mpz_inits(phi, e_inv, e_base, NULL);
+    mpz_sub_ui(phi, modulo, 1);
+    mpz_set_ui(e_base, exponent);
+    mpz_invert(e_inv, e_base, phi);
+    mpz_clears(phi, e_base, NULL);
+
+    int n = found->count;
+    if (n <= 0) { mpz_set_ui(result, 1); mpz_clear(e_inv); return; }
+
+    // Per-factor base cube root cbrt(p_i); miss[i] flags a cache miss.
+    mpz_t *cbrts = (mpz_t *) malloc((size_t) n * sizeof(mpz_t));
+    char  *miss  = (char *)  calloc((size_t) n, 1);
+
+    // Use exactly the cores this process was granted; never more threads than
+    // there are factors to root.
+    int nthreads = ksc_available_cpus();
+    if (nthreads > n) nthreads = n;
+
+    // Parallel: compute each factor's cube root. Cache access is read-only here.
+    #pragma omp parallel for schedule(dynamic) num_threads(nthreads)
+    for (int i = 0; i < n; i++)
+    {
+        mpz_init(cbrts[i]);
+        unsigned long p = mpz_get_ui(found->items[i].prime);
+        int idx = kf_cbrt_cache_find(cache, p);
+        if (idx >= 0)
+        {
+            mpz_set(cbrts[i], cache->items[idx].cbrt);
+        }
+        else
+        {
+            mpz_t p_mpz;
+            mpz_init_set_ui(p_mpz, p);
+            mpz_powm(cbrts[i], p_mpz, e_inv, modulo);   // p^(e_inv) mod M
+            mpz_clear(p_mpz);
+            miss[i] = 1;
+        }
+    }
+
+    // Serial: combine into result and append newly computed roots to the cache.
+    mpz_set_ui(result, 1);
+    for (int i = 0; i < n; i++)
+    {
+        if (found->items[i].exponent > 1)
+        {
+            mpz_t powered;
+            mpz_init(powered);
+            mpz_powm_ui(powered, cbrts[i],
+                        (unsigned long) found->items[i].exponent, modulo);
+            mpz_mul(result, result, powered);
+            mpz_clear(powered);
+        }
+        else
+        {
+            mpz_mul(result, result, cbrts[i]);
+        }
+        mpz_mod(result, result, modulo);
+
+        if (miss[i])
+        {
+            unsigned long p = mpz_get_ui(found->items[i].prime);
+            kf_cbrt_cache_append(cache, p, cbrts[i]);
+            if (cache_dirty) *cache_dirty = true;
+        }
+        mpz_clear(cbrts[i]);
+    }
+
+    free(cbrts);
+    free(miss);
+    mpz_clear(e_inv);
+}
+
 // ===========================================================================
 // blinding_pair_t table — precomputation phase
 // ===========================================================================
@@ -1461,4 +1596,4 @@ void kf_trial_divide_table_u64(
         kfl_free(&local);
     }
 }
-// Edit: 2026-06-11
+// Edit: 2026-07-11

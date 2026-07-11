@@ -502,7 +502,7 @@ int main(int argc, char **argv) {
         float cold_km = launch_all(y_smooth);
 
         auto tc0 = std::chrono::high_resolution_clock::now();
-        kf_compute_cbrt_from_factors(result, &solved_factors, modulo, &cache, &cache_dirty, exponent);
+        kf_compute_cbrt_from_factors_omp(result, &solved_factors, modulo, &cache, &cache_dirty, exponent);
         if (solved_attempt > 0) {
             mpz_mul(result, result, btable[solved_attempt - 1].r_inv);
             mpz_mod(result, result, modulo);
@@ -551,7 +551,7 @@ int main(int argc, char **argv) {
             xfer.d2h_ms.push_back(std::chrono::duration<double, std::milli>(t_d2h1 - t_d2h0).count());
 
             auto tr0 = std::chrono::high_resolution_clock::now();
-            kf_compute_cbrt_from_factors(result, &fl_w, modulo, &cache, &cache_dirty, exponent);
+            kf_compute_cbrt_from_factors_omp(result, &fl_w, modulo, &cache, &cache_dirty, exponent);
             // attempt 0 is unblinded: no r_inv needed
             auto tr1 = std::chrono::high_resolution_clock::now();
 
@@ -594,4 +594,4 @@ cleanup:
     return solved_attempt >= 0 ? 0 : 2;
 }
 
-// Edit: 2026-06-29
+// Edit: 2026-07-11

@@ -3,7 +3,11 @@
 #SBATCH --nodes=1
 #SBATCH --partition=gpu
 #SBATCH --qos=low
-#SBATCH --cpus-per-task=4
+# --gres=gpu:4 takes all GPUs on the node, so request all its CPU cores too:
+# the parallel cbrt reconstruction (kf_compute_cbrt_from_factors_omp) sizes
+# itself to whatever cores this process is granted (sched_getaffinity). 28 =
+# an IRIS V100 node (2x14-core Skylake); adjust if your node has a different count.
+#SBATCH --cpus-per-task=28
 #SBATCH --gres=gpu:4
 #SBATCH --output=all_gpu_%j.out
 #SBATCH --error=all_gpu_%j.err
@@ -138,10 +142,13 @@ fi
 
 # ============================================================================
 # Algorithm 2 — k16 (6542 primes <= 65536; batch kernel; sieve + table)
-# Single GPU only (26 KB table fits in L1; extra GPUs offer no benefit)
+# Multi-GPU: --n-gpus splits the 256-candidate BATCH across devices (the 26 KB
+# prime table fits in each GPU's constant memory, so unlike k32 there is nothing
+# to tile — the batch is the split axis). Expect a flat curve: the kernel is
+# microseconds and host-side reconstruction dominates; this measures that.
 # sieve and table produce identical results (primes generated in-memory for both)
 # ============================================================================
-section "ALG2 k16 CUDA — all sizes, $N_CHALLENGES challenges"
+section "ALG2 k16 CUDA — all sizes, $N_CHALLENGES challenges, $N_GPUS GPU(s)"
 
 if [ -x "$BINDIR/alg2_k16_cuda" ]; then
   for EXP in 3 5; do
@@ -155,13 +162,13 @@ if [ -x "$BINDIR/alg2_k16_cuda" ]; then
       echo "--- k16 e=${EXP} size=${SIZE}: sieve ---"
       "$BINDIR/alg2_k16_cuda" \
           --data data/challenges/k16 --size $SIZE \
-          --method sieve --exponent $EXP --n-challenges $N_CHALLENGES \
+          --method sieve --exponent $EXP --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
           --json "$ALG2_DIR"/alg2_k16_sieve_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
 
       echo "--- k16 e=${EXP} size=${SIZE}: table ---"
       "$BINDIR/alg2_k16_cuda" \
           --data data/challenges/k16 --size $SIZE \
-          --method table --exponent $EXP --n-challenges $N_CHALLENGES \
+          --method table --exponent $EXP --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
           --json "$ALG2_DIR"/alg2_k16_table_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
       echo ""
     done
@@ -328,4 +335,4 @@ echo "Results in: $IRIS_BASE/alg{2,3,4,7}/G${N_GPUS}/"
 find "$ALG2_DIR" "$ALG3_DIR" "$ALG4_DIR" "$ALG7_DIR" -name "*_${SLURM_JOB_ID}_*.json" 2>/dev/null | wc -l | xargs -I{} echo "  {} JSON files written"
 echo "Done — check all_gpu_${SLURM_JOB_ID}.out"
 
-# Edit: 2026-07-06
+# Edit: 2026-07-11
