@@ -114,9 +114,11 @@ section() { echo ""; echo "========================================"; echo "$1";
 
 # ============================================================================
 # Algorithm 7 — inverted sieve (reuses alg3 challenge files)
-# Single GPU only (different kernel structure, no prime-range splitting)
+# Multi-GPU: --n-gpus splits the prime range across devices for BOTH the Phase-1
+# inverted-sieve kernel (partial log_sums summed on host) and the Phase-2
+# candidate-factoring kernel (dividing-prime lists merged on host).
 # ============================================================================
-section "ALG7 CUDA — all sizes, $N_CHALLENGES challenges"
+section "ALG7 CUDA — all sizes, $N_CHALLENGES challenges, $N_GPUS GPU(s)"
 
 if [ -x "$BINDIR/alg7_cuda" ]; then
   for EXP in 3 5; do
@@ -131,7 +133,7 @@ if [ -x "$BINDIR/alg7_cuda" ]; then
       "$BINDIR/alg7_cuda" \
           --data data/challenges/alg3 --size $SIZE \
           --method sieve --exponent $EXP --R 20 --bitbound 32 \
-          --n-challenges $N_CHALLENGES \
+          --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
           --json "$ALG7_DIR"/alg7_sieve_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
       echo ""
     done

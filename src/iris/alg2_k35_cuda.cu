@@ -567,7 +567,7 @@ int main(int argc, char **argv) {
         }
 
         gpu_print_benchmark("k35", (int)factor_ms_v.size(), powm_baseline_ms,
-                            _gpu_vmean(factor_ms_v), _gpu_vmean(recon_ms_v));
+                            _gpu_vmean(factor_ms_v), _gpu_vmean(recon_ms_v), n_gpus);
         gpu_write_json_warm(json_path, "k35", method, exponent, 35, challenge_bits,
                             0.0, (double)cold_km, cold_recon_ms,
                             factor_ms_v, recon_ms_v, 1, n_gpus, hit_stats, xfer);

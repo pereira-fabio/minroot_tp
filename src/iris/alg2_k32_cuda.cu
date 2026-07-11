@@ -412,7 +412,7 @@ int main(int argc, char **argv) {
         }
 
         gpu_print_benchmark("k32", (int)factor_ms_v.size(), powm_baseline_ms,
-                            _gpu_vmean(factor_ms_v), _gpu_vmean(recon_ms_v));
+                            _gpu_vmean(factor_ms_v), _gpu_vmean(recon_ms_v), n_gpus);
         gpu_write_json_warm(json_path, "k32", method, exponent, 32, challenge_bits,
                             0.0,   // CPU convention: powm_baseline_ms=0 in sieve/table file
                             cold_factor_ms, cold_recon_ms,

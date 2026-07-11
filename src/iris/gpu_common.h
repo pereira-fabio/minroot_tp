@@ -223,11 +223,13 @@ static inline void _gpu_write_stats_obj(FILE *f, const char *name,
 // Print human-readable benchmark summary to stdout.
 static inline void gpu_print_benchmark(const char *label, int n_warm,
                                         double powm_ms,
-                                        double avg_factor_ms, double avg_recon_ms)
+                                        double avg_factor_ms, double avg_recon_ms,
+                                        int n_gpus = 1)
 {
     double total_ms = avg_factor_ms + avg_recon_ms;
     double speedup  = total_ms > 0.0 ? powm_ms / total_ms : 0.0;
-    printf("\n=== %s — GPU Benchmark (IRIS V100, single GPU) ===\n", label);
+    printf("\n=== %s — GPU Benchmark (IRIS V100, %d GPU%s) ===\n",
+           label, n_gpus, n_gpus == 1 ? "" : "s");
     printf("  powm_baseline_ms : %8.4f  (5-rep avg, sequential mpz_powm)\n", powm_ms);
     printf("  factor_ms  (GPU) : %8.4f  (warm avg over %d runs)\n", avg_factor_ms, n_warm);
     printf("  recon_ms   (CPU) : %8.4f  (warm avg)\n", avg_recon_ms);
@@ -372,4 +374,4 @@ static inline bool gpu_load_challenge(mpz_t y_out, const char *data_dir,
     return true;
 }
 
-// Edit: 2026-06-29 (2)
+// Edit: 2026-07-11

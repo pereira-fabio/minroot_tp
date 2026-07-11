@@ -445,7 +445,7 @@ int main(int argc, char **argv) {
         }
 
         gpu_print_benchmark("alg3", (int)factor_ms_v.size(), powm_baseline_ms,
-                            _gpu_vmean(factor_ms_v), _gpu_vmean(recon_ms_v));
+                            _gpu_vmean(factor_ms_v), _gpu_vmean(recon_ms_v), n_gpus);
         gpu_write_json_warm(json_path, "alg3", method, exponent, 32, challenge_bits,
                             0.0, cold_factor_ms, cold_recon_ms, factor_ms_v, recon_ms_v, 1,
                             n_gpus, hit_stats, xfer);

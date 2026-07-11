@@ -188,43 +188,67 @@ static int export_limbs(const mpz_t value, uint64_t *out, int max_limbs) {
 // per distinct prime the kernel reports (the kernel reports each prime once).
 // ---------------------------------------------------------------------------
 
+// Per-device state for the multi-GPU prime-range split. Each device owns a
+// contiguous slice of the sieve primes plus its own Phase-1 log_sum[R] and
+// Phase-2 factor-output buffers.
+struct Alg7Dev {
+    int64_t   p_lo;            // first prime index this device owns
+    int64_t   p_count;         // number of primes in this device's slice
+    uint32_t *d_primes;        // this device's prime slice
+    float    *d_log_sum;       // R floats — this device's PARTIAL Phase-1 sum
+    uint32_t *d_out_primes;    // Phase-2 dividing-prime output
+    int      *d_out_count;
+    cudaEvent_t ev0, ev1;
+};
+
+// Multi-GPU Phase-2: trial-divide the winning candidate y across ALL devices'
+// prime slices, then merge the dividing primes. The slices are disjoint, so the
+// union has no duplicates; multiplicities are recovered on the host by dividing
+// y out fully per reported prime. Produces the identical factor list to a single
+// device scanning the whole prime table.
 static void gpu_factor_candidate(const mpz_t y, kfactor_list_t *found,
-                                 const uint32_t *d_primes, int64_t nprimes,
-                                 uint32_t *d_out_primes, int *d_out_count,
-                                 int max_out, int64_t blocks, int tpb) {
-    // Upload y's limbs to constant memory for the kernel.
+                                 const Alg7Dev *devs, int n_gpus,
+                                 int tpb, int max_out) {
     uint64_t y_limbs[MAX_LIMBS];
     int y_nl = export_limbs(y, y_limbs, MAX_LIMBS);
-    CUDA_CHECK(cudaMemcpyToSymbol(d_y_limbs, y_limbs, sizeof(uint64_t) * MAX_LIMBS));
-    CUDA_CHECK(cudaMemcpyToSymbol(d_y_nlimbs, &y_nl, sizeof(int)));
-    CUDA_CHECK(cudaMemset(d_out_count, 0, sizeof(int)));
 
-    factor_candidate_kernel<<<(unsigned)blocks, tpb>>>(d_primes, nprimes,
-                                                       d_out_primes, d_out_count, max_out);
-    CUDA_CHECK(cudaGetLastError());
-
-    int h_count = 0;
-    CUDA_CHECK(cudaMemcpy(&h_count, d_out_count, sizeof(int), cudaMemcpyDeviceToHost));
-    if (h_count > max_out) {
-        // Overflow: more distinct small-prime factors than the output buffer holds.
-        // Not silent — the missing primes leave a composite cofactor, so the
-        // downstream cofactor_ok check fails and the run is flagged unsolved.
-        fprintf(stderr, "Warning: factor_candidate overflow (%d > %d) — increase MAX_OUT_FACTORS\n",
-                h_count, max_out);
-        h_count = max_out;
+    // Launch the factoring kernel on every device over its prime slice.
+    for (int g = 0; g < n_gpus; g++) {
+        CUDA_CHECK(cudaSetDevice(g));
+        CUDA_CHECK(cudaMemcpyToSymbol(d_y_limbs, y_limbs, sizeof(uint64_t) * MAX_LIMBS));
+        CUDA_CHECK(cudaMemcpyToSymbol(d_y_nlimbs, &y_nl, sizeof(int)));
+        CUDA_CHECK(cudaMemset(devs[g].d_out_count, 0, sizeof(int)));
+        int64_t blocks = (devs[g].p_count + tpb - 1) / tpb;
+        if (blocks < 1) blocks = 1;
+        factor_candidate_kernel<<<(unsigned)blocks, tpb>>>(devs[g].d_primes, devs[g].p_count,
+                                                           devs[g].d_out_primes, devs[g].d_out_count, max_out);
+        CUDA_CHECK(cudaGetLastError());
     }
-    std::vector<uint32_t> h_primes(h_count);
-    if (h_count > 0)
-        CUDA_CHECK(cudaMemcpy(h_primes.data(), d_out_primes,
-                              sizeof(uint32_t) * h_count, cudaMemcpyDeviceToHost));
 
-    // Recover multiplicities on the host (each reported prime is distinct).
+    // Gather + merge the dividing primes from all devices (disjoint slices → no dups).
     mpz_t t; mpz_init_set(t, y);
-    for (int i = 0; i < h_count; i++) {
-        unsigned long q = h_primes[i];
-        int e = 0;
-        while (mpz_divisible_ui_p(t, q)) { mpz_divexact_ui(t, t, q); e++; }
-        if (e > 0) kfl_append_ul(found, q, e);
+    for (int g = 0; g < n_gpus; g++) {
+        CUDA_CHECK(cudaSetDevice(g));
+        int h_count = 0;
+        CUDA_CHECK(cudaMemcpy(&h_count, devs[g].d_out_count, sizeof(int), cudaMemcpyDeviceToHost));
+        if (h_count > max_out) {
+            // Overflow: more distinct factors on this device than the buffer holds.
+            // Not silent — missing primes leave a composite cofactor, so the
+            // downstream cofactor_ok check fails and the run is flagged unsolved.
+            fprintf(stderr, "Warning: factor_candidate overflow on GPU %d (%d > %d) — increase MAX_OUT_FACTORS\n",
+                    g, h_count, max_out);
+            h_count = max_out;
+        }
+        if (h_count <= 0) continue;
+        std::vector<uint32_t> h_primes(h_count);
+        CUDA_CHECK(cudaMemcpy(h_primes.data(), devs[g].d_out_primes,
+                              sizeof(uint32_t) * h_count, cudaMemcpyDeviceToHost));
+        for (int i = 0; i < h_count; i++) {
+            unsigned long q = h_primes[i];
+            int e = 0;
+            while (mpz_divisible_ui_p(t, q)) { mpz_divexact_ui(t, t, q); e++; }
+            if (e > 0) kfl_append_ul(found, q, e);
+        }
     }
     mpz_clear(t);
 }
@@ -266,6 +290,7 @@ static void print_usage(const char *prog) {
             "  --exponent E           root exponent (default: 3)\n"
             "  --medium-bits K        accept cofactor prime up to 2^K (default: 45)\n"
             "  --n-runs N             warm runs (default: 10)\n"
+            "  --n-gpus N             split the prime range across N devices (default: 1)\n"
             "  --json FILE            write JSON output\n",
             prog);
 }
@@ -280,6 +305,7 @@ int main(int argc, char **argv) {
     unsigned long exponent = 3;
     int medium_bits  = 45;
     int n_challenges = 10;
+    int n_gpus       = 1;
     gpu_method_t method = GPU_METHOD_SIEVE;
     const char *json_path = nullptr;
 
@@ -288,6 +314,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--size")         && i+1<argc) size_bits    = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--n-challenges") && i+1<argc) n_challenges = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--n-runs")       && i+1<argc) n_challenges = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--n-gpus")       && i+1<argc) n_gpus       = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--R")            && i+1<argc) r_log2       = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bitbound")     && i+1<argc) bitbound     = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--exponent")     && i+1<argc) exponent     = strtoul(argv[++i], nullptr, 10);
@@ -349,60 +376,101 @@ int main(int argc, char **argv) {
         std::chrono::high_resolution_clock::now() - t_sieve0).count();
     printf("Generated %ld primes in (65536, 2^%d] in %.1f ms (host)\n", (long)nprimes, bitbound, sieve_ms);
 
+    // ---- Clamp n_gpus to visible devices (mirrors alg2_k32_cuda.cu) ----
+    {
+        int avail = 0; cudaGetDeviceCount(&avail);
+        if (n_gpus < 1) n_gpus = 1;
+        if (avail > 0 && n_gpus > avail) {
+            fprintf(stderr, "Warning: requested %d GPUs but only %d visible; using %d\n",
+                    n_gpus, avail, avail);
+            n_gpus = avail;
+        }
+    }
+
     // ---- GPU setup ----
     uint64_t x_limbs[MAX_LIMBS], m_limbs[MAX_LIMBS];
     int x_nl = export_limbs(challenge_mod, x_limbs, MAX_LIMBS);
     int m_nl = export_limbs(modulo, m_limbs, MAX_LIMBS);
     int nlimbs = (x_nl > m_nl) ? x_nl : m_nl;
-    CUDA_CHECK(cudaMemcpyToSymbol(d_x_limbs, x_limbs, sizeof(uint64_t) * MAX_LIMBS));
-    CUDA_CHECK(cudaMemcpyToSymbol(d_m_limbs, m_limbs, sizeof(uint64_t) * MAX_LIMBS));
-    CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
-
-    uint32_t *d_primes;
-    float *d_log_sum;
-    CUDA_CHECK(cudaMalloc(&d_primes, sizeof(uint32_t) * nprimes));
-    CUDA_CHECK(cudaMalloc(&d_log_sum, sizeof(float) * R));
-    CUDA_CHECK(cudaMemcpy(d_primes, primes, sizeof(uint32_t) * nprimes, cudaMemcpyHostToDevice));
 
     // Phase-2 GPU factoring output: distinct sieve primes dividing the winner.
     // 4096 slots covers challenges well past the 24576-bit ceiling (a B-smooth
     // n has <= |n|/16 factors with primes > 2^16); overflow is flagged, not silent.
     const int MAX_OUT_FACTORS = 4096;
-    uint32_t *d_out_primes; int *d_out_count;
-    CUDA_CHECK(cudaMalloc(&d_out_primes, sizeof(uint32_t) * MAX_OUT_FACTORS));
-    CUDA_CHECK(cudaMalloc(&d_out_count, sizeof(int)));
-
     int threads_per_block = 256;
-    int64_t blocks = (nprimes + threads_per_block - 1) / threads_per_block;
-    if (blocks < 1) blocks = 1;
 
-    cudaEvent_t ev_start, ev_stop;
-    CUDA_CHECK(cudaEventCreate(&ev_start));
-    CUDA_CHECK(cudaEventCreate(&ev_stop));
+    // ---- Per-device setup: split the prime range across n_gpus devices ----
+    std::vector<Alg7Dev> devs((size_t)n_gpus);
+    {
+        int64_t base = nprimes / n_gpus;
+        for (int g = 0; g < n_gpus; g++) {
+            CUDA_CHECK(cudaSetDevice(g));
+            int64_t p_lo    = (int64_t)g * base;
+            int64_t p_count = (g == n_gpus - 1) ? (nprimes - p_lo) : base;
+            devs[g].p_lo    = p_lo;
+            devs[g].p_count = p_count;
+            // Constant memory (challenge x, modulus M, nlimbs) on THIS device.
+            CUDA_CHECK(cudaMemcpyToSymbol(d_x_limbs, x_limbs, sizeof(uint64_t) * MAX_LIMBS));
+            CUDA_CHECK(cudaMemcpyToSymbol(d_m_limbs, m_limbs, sizeof(uint64_t) * MAX_LIMBS));
+            CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
+            CUDA_CHECK(cudaMalloc(&devs[g].d_primes, sizeof(uint32_t) * p_count));
+            CUDA_CHECK(cudaMemcpy(devs[g].d_primes, primes + p_lo,
+                                  sizeof(uint32_t) * p_count, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMalloc(&devs[g].d_log_sum, sizeof(float) * R));
+            CUDA_CHECK(cudaMalloc(&devs[g].d_out_primes, sizeof(uint32_t) * MAX_OUT_FACTORS));
+            CUDA_CHECK(cudaMalloc(&devs[g].d_out_count, sizeof(int)));
+            CUDA_CHECK(cudaEventCreate(&devs[g].ev0));
+            CUDA_CHECK(cudaEventCreate(&devs[g].ev1));
+            printf("  GPU %d: primes [%ld, %ld) (%ld of %ld)\n",
+                   g, (long)p_lo, (long)(p_lo + p_count), (long)p_count, (long)nprimes);
+        }
+    }
 
-    // Helper: run Phase 1 kernel, return kernel time in ms.
+    // Combined host log-sum: sum of every device's PARTIAL log_sum[R].
+    std::vector<float> h_log_sum((size_t)R);
+    std::vector<float> tmp_log_sum((size_t)R);
+
+    // Helper: run Phase 1 on every device (each over its prime slice), sum the
+    // partial log_sums into h_log_sum, and return the max kernel time across devices.
     auto run_phase1 = [&]() -> float {
-        CUDA_CHECK(cudaMemset(d_log_sum, 0, sizeof(float) * R));
-        CUDA_CHECK(cudaEventRecord(ev_start));
-        inverted_sieve_kernel<<<(unsigned)blocks, threads_per_block>>>(d_primes, nprimes, R, d_log_sum);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaEventRecord(ev_stop));
-        CUDA_CHECK(cudaEventSynchronize(ev_stop));
-        float km = 0; CUDA_CHECK(cudaEventElapsedTime(&km, ev_start, ev_stop));
+        for (int g = 0; g < n_gpus; g++) {
+            CUDA_CHECK(cudaSetDevice(g));
+            CUDA_CHECK(cudaMemset(devs[g].d_log_sum, 0, sizeof(float) * R));
+            int64_t blocks = (devs[g].p_count + threads_per_block - 1) / threads_per_block;
+            if (blocks < 1) blocks = 1;
+            CUDA_CHECK(cudaEventRecord(devs[g].ev0));
+            inverted_sieve_kernel<<<(unsigned)blocks, threads_per_block>>>(
+                devs[g].d_primes, devs[g].p_count, R, devs[g].d_log_sum);
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaEventRecord(devs[g].ev1));
+        }
+        float km = 0;
+        for (int g = 0; g < n_gpus; g++) {
+            CUDA_CHECK(cudaSetDevice(g));
+            CUDA_CHECK(cudaEventSynchronize(devs[g].ev1));
+            float t = 0; CUDA_CHECK(cudaEventElapsedTime(&t, devs[g].ev0, devs[g].ev1));
+            if (t > km) km = t;
+        }
+        // Combine: h_log_sum[r] = sum over devices of their partial log_sum[r].
+        memset(h_log_sum.data(), 0, sizeof(float) * (size_t)R);
+        for (int g = 0; g < n_gpus; g++) {
+            CUDA_CHECK(cudaSetDevice(g));
+            CUDA_CHECK(cudaMemcpy(tmp_log_sum.data(), devs[g].d_log_sum,
+                                  sizeof(float) * R, cudaMemcpyDeviceToHost));
+            for (int64_t r = 0; r < R; r++) h_log_sum[(size_t)r] += tmp_log_sum[(size_t)r];
+        }
         return km;
     };
 
     // ---- Discovery run: find best_r ----
-    float disc_km = run_phase1();
-    std::vector<float> log_sum(R);
-    CUDA_CHECK(cudaMemcpy(log_sum.data(), d_log_sum, sizeof(float) * R, cudaMemcpyDeviceToHost));
+    float disc_km = run_phase1();   // fills h_log_sum (summed across all devices)
 
     double total_bits = (double)challenge_bits + r_log2;
     double threshold  = total_bits - medium_bits;
     int64_t best_r = -1;
     float best_score = -1.0f;
     for (int64_t r = 0; r < R; r++) {
-        if (log_sum[r] > best_score) { best_score = log_sum[r]; best_r = r; }
+        if (h_log_sum[r] > best_score) { best_score = h_log_sum[r]; best_r = r; }
     }
     printf("Phase 1: %.3f ms, best_r=%ld, log_sum=%.2f bits (threshold=%.2f)\n",
            disc_km, (long)best_r, best_score, threshold);
@@ -421,8 +489,7 @@ int main(int argc, char **argv) {
     // ---- Phase 2: trial divide y, check cofactor ----
     kfactor_list_t found;
     kfl_init(&found);
-    gpu_factor_candidate(y, &found, d_primes, nprimes,
-                         d_out_primes, d_out_count, MAX_OUT_FACTORS, blocks, threads_per_block);
+    gpu_factor_candidate(y, &found, devs.data(), n_gpus, threads_per_block, MAX_OUT_FACTORS);
     mpz_set(cofactor, y);
     for (int i = 0; i < found.count; i++)
         for (int k = 0; k < found.items[i].exponent; k++)
@@ -454,8 +521,7 @@ int main(int argc, char **argv) {
         kfl_free(&found);
         kfl_init(&found);
         auto tr0 = std::chrono::high_resolution_clock::now();
-        gpu_factor_candidate(y, &found, d_primes, nprimes,
-                             d_out_primes, d_out_count, MAX_OUT_FACTORS, blocks, threads_per_block);
+        gpu_factor_candidate(y, &found, devs.data(), n_gpus, threads_per_block, MAX_OUT_FACTORS);
         kf_compute_cbrt_from_factors_omp(result, &found, modulo, &cache, &cache_dirty, exponent);
         if (has_q0) {
             mpz_t cbrt_q; mpz_init(cbrt_q);
@@ -493,25 +559,26 @@ int main(int argc, char **argv) {
             mpz_set(x_w, challenge_mod);  // single-challenge compat
         }
 
-        // Upload new x_w to constant memory
+        // Upload new x_w to every device's constant memory
         uint64_t x_lims_w[MAX_LIMBS] = {};
         size_t xl_cnt = 0;
         mpz_export(x_lims_w, &xl_cnt, -1, sizeof(uint64_t), 0, 0, x_w);
         auto t_h2d0 = std::chrono::high_resolution_clock::now();
-        CUDA_CHECK(cudaMemcpyToSymbol(d_x_limbs, x_lims_w, sizeof(uint64_t) * MAX_LIMBS));
+        for (int g = 0; g < n_gpus; g++) {
+            CUDA_CHECK(cudaSetDevice(g));
+            CUDA_CHECK(cudaMemcpyToSymbol(d_x_limbs, x_lims_w, sizeof(uint64_t) * MAX_LIMBS));
+        }
         auto t_h2d1 = std::chrono::high_resolution_clock::now();
 
-        float km = run_phase1();
+        float km = run_phase1();   // fills h_log_sum (summed across all devices)
 
-        // Find best_r for this x_w — D2H of log-sum array (R floats = 4 MB at R=2^20)
+        // Find best_r for this x_w from the combined log-sum.
         auto t_d2h0 = std::chrono::high_resolution_clock::now();
-        std::vector<float> ls_w(R);
-        CUDA_CHECK(cudaMemcpy(ls_w.data(), d_log_sum, sizeof(float) * R, cudaMemcpyDeviceToHost));
+        int64_t br_w = 0; float bs_w = -1.0f;
+        for (int64_t r = 0; r < R; r++) if (h_log_sum[r] > bs_w) { bs_w = h_log_sum[r]; br_w = r; }
         auto t_d2h1 = std::chrono::high_resolution_clock::now();
         xfer.h2d_ms.push_back(std::chrono::duration<double, std::milli>(t_h2d1 - t_h2d0).count());
         xfer.d2h_ms.push_back(std::chrono::duration<double, std::milli>(t_d2h1 - t_d2h0).count());
-        int64_t br_w = 0; float bs_w = -1.0f;
-        for (int64_t r = 0; r < R; r++) if (ls_w[r] > bs_w) { bs_w = ls_w[r]; br_w = r; }
 
         // Build y_w = x_w + best_r_w * modulo (integer lift)
         mpz_t y_w, r_mpz_w;
@@ -523,8 +590,7 @@ int main(int argc, char **argv) {
         // Phase 2 (CPU): trial divide y_w, reconstruct
         auto tr0 = std::chrono::high_resolution_clock::now();
         kfactor_list_t fl_w; kfl_init(&fl_w);
-        gpu_factor_candidate(y_w, &fl_w, d_primes, nprimes,
-                             d_out_primes, d_out_count, MAX_OUT_FACTORS, blocks, threads_per_block);
+        gpu_factor_candidate(y_w, &fl_w, devs.data(), n_gpus, threads_per_block, MAX_OUT_FACTORS);
         mpz_t cof_w; mpz_init_set(cof_w, y_w);
         for (int j = 0; j < fl_w.count; j++)
             for (int k = 0; k < fl_w.items[j].exponent; k++)
@@ -557,14 +623,17 @@ int main(int argc, char **argv) {
         kfl_free(&fl_w);
         mpz_clears(y_w, r_mpz_w, cof_w, x_w, nullptr);
     }
-    // Restore original x to constant memory for consistency
-    CUDA_CHECK(cudaMemcpyToSymbol(d_x_limbs, x_limbs, sizeof(uint64_t) * MAX_LIMBS));
+    // Restore original x to every device's constant memory for consistency
+    for (int g = 0; g < n_gpus; g++) {
+        CUDA_CHECK(cudaSetDevice(g));
+        CUDA_CHECK(cudaMemcpyToSymbol(d_x_limbs, x_limbs, sizeof(uint64_t) * MAX_LIMBS));
+    }
 
     gpu_print_benchmark("alg7", (int)factor_ms_v.size(), powm_baseline_ms,
-                        _gpu_vmean(factor_ms_v), _gpu_vmean(recon_ms_v));
+                        _gpu_vmean(factor_ms_v), _gpu_vmean(recon_ms_v), n_gpus);
     gpu_write_json_warm(json_path, "alg7", method, exponent, 32, challenge_bits,
                         0.0, cold_km, cold_recon_ms, factor_ms_v, recon_ms_v, solved,
-                        1, hit_stats, xfer);
+                        n_gpus, hit_stats, xfer);
 
     // ---- Cleanup ----
     if (cache_dirty) kf_cbrt_cache_save(&cache, cache_path);
@@ -573,12 +642,15 @@ int main(int argc, char **argv) {
     mpz_clears(y, r_mpz, cofactor, result, nullptr);
     mpz_clears(challenge, modulo, challenge_mod, nullptr);
     free(primes);
-    CUDA_CHECK(cudaFree(d_primes));
-    CUDA_CHECK(cudaFree(d_log_sum));
-    CUDA_CHECK(cudaFree(d_out_primes));
-    CUDA_CHECK(cudaFree(d_out_count));
-    CUDA_CHECK(cudaEventDestroy(ev_start));
-    CUDA_CHECK(cudaEventDestroy(ev_stop));
+    for (int g = 0; g < n_gpus; g++) {
+        CUDA_CHECK(cudaSetDevice(g));
+        CUDA_CHECK(cudaFree(devs[g].d_primes));
+        CUDA_CHECK(cudaFree(devs[g].d_log_sum));
+        CUDA_CHECK(cudaFree(devs[g].d_out_primes));
+        CUDA_CHECK(cudaFree(devs[g].d_out_count));
+        CUDA_CHECK(cudaEventDestroy(devs[g].ev0));
+        CUDA_CHECK(cudaEventDestroy(devs[g].ev1));
+    }
 
     return solved ? 0 : 2;
 }
