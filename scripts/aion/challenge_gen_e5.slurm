@@ -40,9 +40,10 @@ cd $SLURM_SUBMIT_DIR
 # Configuration
 # ---------------------------------------------------------------------------
 NUM_CHALLENGES=5
-# Paper-scale moduli (Gap 1): 256-bit MinRoot prime and near sizes.
-# 2048 added 2026-06-25: matches RFC 3526 Group 14 / RFC 7919 ffdhe2048.
-SIZES="256 384 512 768 1024 2048"
+# Full sweep (256..24576) — matches challenge_gen.slurm (e3) and src/common/sizes.h
+# so AION --all can benchmark e5 at large moduli too (2026-07-11).
+# Paper-scale {256..2048} are the Gap-1 sizes; 2048 also = RFC 3526 Group 14.
+SIZES="256 384 512 768 1024 2048 4096 8192 16384 24576"
 THREADS_PER_GROUP=$(( SLURM_CPUS_PER_TASK / 3 ))
 
 # ---------------------------------------------------------------------------
@@ -198,4 +199,4 @@ echo ""
 echo "Job ID: $SLURM_JOB_ID"
 echo "============================================================"
 
-# Edit: 2026-06-25
+# Edit: 2026-07-11
