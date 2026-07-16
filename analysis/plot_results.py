@@ -54,7 +54,14 @@ def records():
                 mm = re.search(r"_N(\d+)", f); nodes = int(mm.group(1)) if mm else m.get("nodes")
                 par = NODE2RANK.get(nodes)          # x-axis = MPI ranks
             else:
-                mm = re.search(r"/G(\d+)/", f); par = int(mm.group(1)) if mm else None
+                # x-axis = GPUs ACTUALLY used. Trust metadata.n_gpus, not the /G<k>/
+                # folder: single-GPU-only binaries (k16, alg7) are filed under G2/G3/G4
+                # by a multi-GPU job but truthfully record n_gpus=1, so the folder name
+                # would fabricate a flat 1->4 "scaling" curve. Fall back to the folder
+                # only if metadata lacks the field.
+                par = m.get("n_gpus")
+                if not par:
+                    mm = re.search(r"/G(\d+)/", f); par = int(mm.group(1)) if mm else None
             med = d.get("warm_stats", {}).get("total_ms", {}).get("median", 0)
             yield dict(cluster=cluster, alg=alg, method=meth, size=size, exp=exp,
                        par=par, base=m.get("powm_baseline_ms", 0),
@@ -378,4 +385,4 @@ if __name__ == "__main__":
     print(f"generated  A(scaling)={a}  B(per_size)={b}  C(global)={c}  "
           f"D(per_config)={d}  E(projection)={e}  total={a+b+c+d+e}")
 
-# Edit: 2026-07-07
+# Edit: 2026-07-10
