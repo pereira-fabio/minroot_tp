@@ -41,28 +41,41 @@ def main():
     groups = {}
     conflicts = 0
     files_read = 0
+    skipped_k16 = 0
     for path in split:
         if not os.path.isfile(path):
             continue
         fname = os.path.basename(path)
         vardir = os.path.basename(os.path.dirname(os.path.dirname(path)))  # <variant>_e<exp>
+        # k16 uses a DIFFERENT format — a binary, prime-INDEXED dense table
+        # (fwrite + mpz_out_raw, no prime values), and its primes (<=65536) do
+        # not overlap the sieve solvers (which start at 65537).  Never merge it.
+        if "k16" in vardir:
+            skipped_k16 += 1
+            continue
         me = re.search(r'_e(\d+)$', vardir)
         ms = re.search(r'(\d+)(?:_e\d+)?\.cbrt', fname)   # size right before .cbrt
         if not me or not ms:
             print(f"  [skip] cannot parse (size,exp) from {path}")
             continue
         exp = int(me.group(1)); size = int(ms.group(1))
-        d = groups.setdefault((size, exp), {})
         try:
-            with open(path) as f:
-                f.readline()  # count line — recomputed on write
+            # errors="ignore": a stray binary file (e.g. a k16 dense table that
+            # slipped the name check) decodes to garbage rather than raising —
+            # its first line then fails the isdigit() guard below and is skipped.
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                first = f.readline().strip()
+                if not first.isdigit():   # not a text cbrt cache (count on line 1)
+                    print(f"  [skip] {path}: first line is not a count (binary/foreign format?)")
+                    continue
+                d = groups.setdefault((size, exp), {})
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
                     parts = line.split(' ', 1)
-                    if len(parts) != 2:
-                        continue
+                    if len(parts) != 2 or not parts[0].isdigit():
+                        continue                       # skip any non "<prime> <cbrt>" line
                     prime, cbrt = parts[0], parts[1].strip()
                     if prime in d and d[prime] != cbrt:
                         conflicts += 1     # would mean a MODULUS mismatch — must be 0
@@ -71,13 +84,15 @@ def main():
                                   f"({size}b,e{exp}) — modulus mismatch?  file={path}")
                     d[prime] = cbrt
             files_read += 1
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
             print(f"  [skip] {path}: {e}")
 
-    print(f"\nRead {files_read} split files across {len(groups)} (size,exp) groups.")
+    print(f"\nRead {files_read} split files across {len(groups)} (size,exp) groups"
+          f"  (skipped {skipped_k16} k16 dense-table files — separate format).")
     if conflicts:
-        print(f"  *** {conflicts} cbrt CONFLICTS — do NOT trust the merge; "
-              f"the caches came from different moduli. Investigate before using. ***")
+        print(f"  *** {conflicts} cbrt CONFLICTS — the caches came from different moduli. "
+              f"Refusing to write. Investigate before using. ***")
+        sys.exit(1)   # never write a merged cache built from mismatched moduli
 
     for (size, exp) in sorted(groups):
         d = groups[(size, exp)]
