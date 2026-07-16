@@ -1,12 +1,8 @@
 #!/bin/bash -l
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
-#SBATCH --partition=gpu
-#SBATCH --qos=low
-# --gres=gpu:4 takes all GPUs on the node, so request all its CPU cores too:
-# the parallel cbrt reconstruction (kf_compute_cbrt_from_factors_omp) sizes
-# itself to whatever cores this process is granted (sched_getaffinity). 28 =
-# an IRIS V100 node (2x14-core Skylake); adjust if your node has a different count.
+#SBATCH --partition=l40s
+#SBATCH --qos=besteffort
 #SBATCH --cpus-per-task=28
 #SBATCH --gres=gpu:4
 #SBATCH --output=all_gpu_%j.out

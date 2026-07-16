@@ -1,8 +1,8 @@
 #!/bin/bash -l
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
-#SBATCH --partition=gpu
-#SBATCH --qos=low
+#SBATCH --partition=l40s
+#SBATCH --qos=besteffort
 #SBATCH --cpus-per-task=28
 #SBATCH --gres=gpu:1
 #SBATCH --output=alg_crt_gpu_%j.out
