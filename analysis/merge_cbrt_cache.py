@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 # merge_cbrt_cache.py — one-time merge of the split cbrt caches into one full
-# cache per (size, exponent).  (Advisor M1, 2026-07-16.)
+# cache PER VARIANT, per size.  (Advisor M1, 2026-07-16.)
 #
-# The modulus is deterministic per (size, exponent) — find_prime_parallel(bits,
-# e) in tools/challenges.c — so k32/k35/alg3/alg4 at a given (size, e) share the
-# IDENTICAL M, and cbrt(p) = p^{e^-1} mod M is therefore interchangeable across
-# variants.  This lets us collapse the per-variant / per-node-count / per-rank
-# split caches into ONE full cache that every solver can read:
+# Why per-variant (not one cache for everyone): the prime generator
+# find_prime_parallel() (tools/challenges.c) is a RACE — the first thread to a
+# valid prime wins, non-deterministically — so each variant's independently
+# generated modulo file is a DIFFERENT prime, even at the same size.  cbrt(p) =
+# p^{e^-1} mod M therefore differs across variants and CANNOT be shared between
+# them.  Within a variant, though, every node-count and rank reads the same
+# cached modulo file (same M), so those split caches ARE mergeable — and that
+# per-node-count / per-rank duplication (rebuilt from scratch every job via
+# `rm -rf $CBRT_DIR`) is the real waste this collapses.
 #
 #   data/cbrt/<variant>_e<exp>/N<n>/<file>.cbrt*.<rank>   (existing split)
-#        -> data/cbrt/cbrt_<size>_e<exp>.cbrt             (one merged full cache)
+#        -> data/cbrt/<variant>_e<exp>/cbrt_<size>.cbrt   (one cache per variant+size)
 #
-# The union of all the split files for a (size, e) is the complete prime set any
-# variant needs (k35 contributes its 2^32..2^35 primes; alg3/alg4 their q0
-# mediums; the small-prime overlap is stored once).  No cbrt is recomputed — this
-# is pure file I/O over caches you already built.
+# k16 is skipped (its dense table is a different, binary format).  A cbrt
+# conflict WITHIN a variant (same prime, two values => that variant's modulo was
+# regenerated) skips just that (variant,size) and exits non-zero, leaving the
+# clean ones written.
 #
 # Cache file format (text, from kf_cbrt_cache_save):
 #   line 1 : count
@@ -31,84 +35,87 @@ def main():
     dry = "--dry-run" in sys.argv
     root = args[0] if args else "data/cbrt"
 
-    # Split caches live at:  <root>/<variant>_e<exp>/N<n>/<cachefile>
     split = glob.glob(os.path.join(root, "*_e*", "N*", "*"))
     if not split:
         print(f"No split caches found under {root}/*_e*/N*/ — nothing to merge.")
         return
 
-    # (size, exp) -> { prime(str) : cbrt(str) }
-    groups = {}
-    conflicts = 0
-    files_read = 0
-    skipped_k16 = 0
+    groups = {}            # (vardir, size) -> { prime(str): cbrt(str) }
+    gconflicts = {}        # (vardir, size) -> conflict count
+    files_read = skipped_k16 = 0
+
     for path in split:
         if not os.path.isfile(path):
             continue
         fname = os.path.basename(path)
         vardir = os.path.basename(os.path.dirname(os.path.dirname(path)))  # <variant>_e<exp>
-        # k16 uses a DIFFERENT format — a binary, prime-INDEXED dense table
-        # (fwrite + mpz_out_raw, no prime values), and its primes (<=65536) do
-        # not overlap the sieve solvers (which start at 65537).  Never merge it.
-        if "k16" in vardir:
+        if "k16" in vardir:      # dense binary table — different format, separate primes
             skipped_k16 += 1
             continue
-        me = re.search(r'_e(\d+)$', vardir)
-        ms = re.search(r'(\d+)(?:_e\d+)?\.cbrt', fname)   # size right before .cbrt
-        if not me or not ms:
-            print(f"  [skip] cannot parse (size,exp) from {path}")
+        if not re.search(r'_e\d+$', vardir):
+            print(f"  [skip] not a <variant>_e<exp> dir: {path}")
             continue
-        exp = int(me.group(1)); size = int(ms.group(1))
+        ms = re.search(r'(\d+)(?:_e\d+)?\.cbrt', fname)   # size right before .cbrt
+        if not ms:
+            print(f"  [skip] cannot parse size from {path}")
+            continue
+        size = int(ms.group(1))
+        key = (vardir, size)
         try:
-            # errors="ignore": a stray binary file (e.g. a k16 dense table that
-            # slipped the name check) decodes to garbage rather than raising —
-            # its first line then fails the isdigit() guard below and is skipped.
+            # errors="ignore": a stray binary file decodes to garbage rather than
+            # raising; its first line then fails the isdigit() guard and is skipped.
             with open(path, encoding="utf-8", errors="ignore") as f:
                 first = f.readline().strip()
                 if not first.isdigit():   # not a text cbrt cache (count on line 1)
-                    print(f"  [skip] {path}: first line is not a count (binary/foreign format?)")
+                    print(f"  [skip] {path}: first line is not a count (binary/foreign?)")
                     continue
-                d = groups.setdefault((size, exp), {})
+                d = groups.setdefault(key, {})
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
                     parts = line.split(' ', 1)
                     if len(parts) != 2 or not parts[0].isdigit():
-                        continue                       # skip any non "<prime> <cbrt>" line
+                        continue
                     prime, cbrt = parts[0], parts[1].strip()
                     if prime in d and d[prime] != cbrt:
-                        conflicts += 1     # would mean a MODULUS mismatch — must be 0
-                        if conflicts <= 5:
-                            print(f"  [WARN] prime {prime} has two cbrt values at "
-                                  f"({size}b,e{exp}) — modulus mismatch?  file={path}")
+                        gconflicts[key] = gconflicts.get(key, 0) + 1
+                        if gconflicts[key] <= 3:
+                            print(f"  [WARN] {vardir} {size}b: prime {prime} has two cbrt "
+                                  f"values — this variant's modulo was regenerated?  {path}")
                     d[prime] = cbrt
             files_read += 1
-        except (OSError, UnicodeDecodeError) as e:
+        except OSError as e:
             print(f"  [skip] {path}: {e}")
 
-    print(f"\nRead {files_read} split files across {len(groups)} (size,exp) groups"
-          f"  (skipped {skipped_k16} k16 dense-table files — separate format).")
-    if conflicts:
-        print(f"  *** {conflicts} cbrt CONFLICTS — the caches came from different moduli. "
-              f"Refusing to write. Investigate before using. ***")
-        sys.exit(1)   # never write a merged cache built from mismatched moduli
+    print(f"\nRead {files_read} split files across {len(groups)} (variant,size) groups"
+          f"  (skipped {skipped_k16} k16 dense-table files).")
 
-    for (size, exp) in sorted(groups):
-        d = groups[(size, exp)]
-        out = os.path.join(root, f"cbrt_{size}_e{exp}.cbrt")
-        print(f"  [{size:>6}b e{exp}]  {len(d):>7} unique entries -> {out}"
-              + ("   (dry-run, not written)" if dry else ""))
-        if dry:
+    written = skipped = 0
+    for (vardir, size) in sorted(groups):
+        d = groups[(vardir, size)]
+        c = gconflicts.get((vardir, size), 0)
+        out = os.path.join(root, vardir, f"cbrt_{size}.cbrt")
+        if c:
+            print(f"  [{vardir:16} {size:>6}b]  {c} CONFLICTS — SKIPPED (mixed moduli), not written")
+            skipped += 1
             continue
-        with open(out, "w") as f:
-            f.write(f"{len(d)}\n")
-            for prime in sorted(d, key=int):
-                f.write(f"{prime} {d[prime]}\n")
+        print(f"  [{vardir:16} {size:>6}b]  {len(d):>7} entries -> {out}"
+              + ("   (dry-run)" if dry else ""))
+        if not dry:
+            with open(out, "w") as f:
+                f.write(f"{len(d)}\n")
+                for prime in sorted(d, key=int):
+                    f.write(f"{prime} {d[prime]}\n")
+        written += 1
 
-    if not dry:
-        print("\nDone. Point the solvers at these cbrt_<size>_e<exp>.cbrt files "
-              "and stop the per-job `rm -rf` of the split dirs.")
+    print(f"\n{'Would write' if dry else 'Wrote'} {written} per-variant caches"
+          f"{f'; SKIPPED {skipped} with conflicts' if skipped else ''}.")
+    if not dry and skipped == 0:
+        print("Point each solver at data/cbrt/<variant>_e<exp>/cbrt_<size>.cbrt "
+              "and stop the per-job `rm -rf` of the N<n> split dirs.")
+    if skipped:
+        sys.exit(1)   # flag that some (variant,size) had mixed moduli
 
 if __name__ == "__main__":
     main()
