@@ -49,10 +49,16 @@ echo "Alphas:   $ALPHAS"
 echo "Exponent: $EXPONENT   Challenges: $N_CHALLENGES"
 echo ""
 
-# ---- Build (nvcc; self-contained CRT context, links common + factorization) ----
-make -C src/iris alg_crt_cuda
-if [ $? -ne 0 ]; then echo "Build failed"; exit 1; fi
+# ---- Build (direct nvcc — same flags as all_gpu.slurm; no make) ----
+# Self-contained CRT context; links common + factorization only (MPI-free).
+NVCC_FLAGS="-arch=sm_70 -std=c++17 -O3 -I src/common -Xcompiler -fopenmp"
+COMMON="src/common/common.cpp src/common/factorization.cpp"
+LIBS="-lgmp -lgomp"
 BIN=src/iris/alg_crt_cuda
+echo -n "Building alg_crt_cuda ... "
+nvcc src/iris/alg_crt_cuda.cu $COMMON $NVCC_FLAGS $LIBS -o "$BIN"
+if [ $? -ne 0 ]; then echo "FAILED"; exit 1; fi
+echo "OK"
 
 # recon modes in separate dirs so analysis/crt_best_alpha.py can group each cleanly.
 for RECON in $RECONS; do
@@ -74,4 +80,4 @@ echo "=== done. Compare A vs B with: ==="
 echo "  python3 analysis/crt_best_alpha.py $BASE_DIR/G1/host   # Option A"
 echo "  python3 analysis/crt_best_alpha.py $BASE_DIR/G1/gpu    # Option B"
 
-# Edit: 2026-07-14
+# Edit: 2026-07-16
