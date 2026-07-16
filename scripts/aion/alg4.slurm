@@ -60,9 +60,10 @@ JSON_DIR=$SLURM_SUBMIT_DIR/data/results/aion/alg4/alg4_${SLURM_JOB_ID}_N${N_NODE
 JSON_DIR_MULTI=$SLURM_SUBMIT_DIR/data/results/aion/alg4/alg4_multi_${SLURM_JOB_ID}_N${N_NODES}
 mkdir -p $JSON_DIR $JSON_DIR_MULTI
 
-CBRT_DIR_P1=$SLURM_SUBMIT_DIR/data/cbrt/alg4_e3/N${N_NODES}
-CBRT_DIR_P2=$SLURM_SUBMIT_DIR/data/cbrt/alg4_multi_e3/N${N_NODES}
-rm -rf $CBRT_DIR_P1 $CBRT_DIR_P2
+# M1 (2026-07-16): per-variant dirs (not per-N), never wiped — the solver reads
+# the merged cbrt_<size>.cbrt built by merge_cbrt.slurm (alg4 single vs alg4_multi).
+CBRT_DIR_P1=$SLURM_SUBMIT_DIR/data/cbrt/alg4_e3
+CBRT_DIR_P2=$SLURM_SUBMIT_DIR/data/cbrt/alg4_multi_e3
 mkdir -p $CBRT_DIR_P1 $CBRT_DIR_P2
 
 # ---------------------------------------------------------------------------
@@ -191,4 +192,4 @@ echo "Use warm_avg.* (runs_valid runs) for all analysis."
 echo "Job finished  (Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID)"
 echo "============================================================"
 
-# Edit: 2026-07-06
+# Edit: 2026-07-16

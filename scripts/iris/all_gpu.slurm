@@ -1,8 +1,12 @@
 #!/bin/bash -l
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
-#SBATCH --partition=l40s
-#SBATCH --qos=besteffort
+#SBATCH --partition=gpu
+#SBATCH --qos=low
+# --gres=gpu:4 takes all GPUs on the node, so request all its CPU cores too:
+# the parallel cbrt reconstruction (kf_compute_cbrt_from_factors_omp) sizes
+# itself to whatever cores this process is granted (sched_getaffinity). 28 =
+# an IRIS V100 node (2x14-core Skylake); adjust if your node has a different count.
 #SBATCH --cpus-per-task=28
 #SBATCH --gres=gpu:4
 #SBATCH --output=all_gpu_%j.out
@@ -37,11 +41,8 @@ N_CHALLENGES=10
 cd $SLURM_SUBMIT_DIR
 
 # ---- Modules ---------------------------------------------------------------
-module use /opt/apps/easybuild/systems/iris/rhel810-20250803/2023b/gpu/modules/all
-module load system/CUDA
-
-#module load env/release/2023b
-#module load system/CUDA/12.6.0
+module load env/release/2023b
+module load system/CUDA/12.6.0
 
 if module load math/GMP/6.2.1-GCCcore-13.2.0 2>/dev/null; then
     echo "GMP loaded: math/GMP/6.2.1-GCCcore-13.2.0"

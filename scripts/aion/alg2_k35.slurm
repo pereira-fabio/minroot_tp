@@ -60,8 +60,9 @@ DATA_DIR=data/challenges/k35
 JSON_DIR=$SLURM_SUBMIT_DIR/data/results/aion/alg2/k35_${SLURM_JOB_ID}_N${N_NODES}
 mkdir -p $JSON_DIR
 
-CBRT_DIR=$SLURM_SUBMIT_DIR/data/cbrt/alg2_k35_e3/N${N_NODES}
-rm -rf $CBRT_DIR
+# M1 (2026-07-16): per-variant dir (not per-N), never wiped — the solver reads
+# the merged cbrt_<size>.cbrt built by merge_cbrt.slurm.
+CBRT_DIR=$SLURM_SUBMIT_DIR/data/cbrt/alg2_k35_e3
 mkdir -p $CBRT_DIR
 
 # ---------------------------------------------------------------------------
@@ -150,4 +151,4 @@ echo "runs_failed counts blinding-exhaustion outliers excluded from averages."
 echo "Job finished  (Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID)"
 echo "============================================================"
 
-# Edit: 2026-07-06
+# Edit: 2026-07-16

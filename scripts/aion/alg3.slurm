@@ -57,8 +57,9 @@ DATA_DIR=data/challenges/alg3
 JSON_DIR=$SLURM_SUBMIT_DIR/data/results/aion/alg3/alg3_${SLURM_JOB_ID}_N${N_NODES}
 mkdir -p $JSON_DIR
 
-CBRT_DIR=$SLURM_SUBMIT_DIR/data/cbrt/alg3_e3/N${N_NODES}
-rm -rf $CBRT_DIR
+# M1 (2026-07-16): per-variant dir (not per-N), never wiped — the solver reads
+# the merged cbrt_<size>.cbrt built by merge_cbrt.slurm.
+CBRT_DIR=$SLURM_SUBMIT_DIR/data/cbrt/alg3_e3
 mkdir -p $CBRT_DIR
 
 # ---------------------------------------------------------------------------
@@ -143,4 +144,4 @@ echo "Use warm_avg.* (runs_valid runs) for all analysis."
 echo "Job finished  (Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID)"
 echo "============================================================"
 
-# Edit: 2026-07-06
+# Edit: 2026-07-16

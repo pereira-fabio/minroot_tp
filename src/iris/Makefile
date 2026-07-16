@@ -22,7 +22,7 @@ COMMON_SRC = ../common/common.cpp ../common/factorization.cpp
 
 .PHONY: all clean
 
-all: alg7_cuda alg2_k16_cuda alg2_k32_cuda alg2_k35_cuda alg3_cuda alg4_cuda
+all: alg7_cuda alg2_k16_cuda alg2_k32_cuda alg2_k35_cuda alg3_cuda alg4_cuda alg_crt_cuda
 
 alg7_cuda: alg7_cuda.cu $(COMMON_SRC)
 	$(NVCC) -arch=$(ARCH) $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
@@ -42,7 +42,12 @@ alg3_cuda: alg3_cuda.cu gpu_common.h $(COMMON_SRC)
 alg4_cuda: alg4_cuda.cu gpu_common.h $(COMMON_SRC)
 	$(NVCC) -arch=$(ARCH) $(CXXFLAGS) $(INCLUDE) alg4_cuda.cu $(COMMON_SRC) $(LIBS) -o $@
 
-clean:
-	rm -f alg7_cuda alg2_k16_cuda alg2_k32_cuda alg2_k35_cuda alg3_cuda alg4_cuda
+# GPU CRT (Option A: GPU residues + host reconstruction). Self-contained CRT
+# context (no crt_common.cpp -> no MPI); links only common + factorization.
+alg_crt_cuda: alg_crt_cuda.cu gpu_common.h $(COMMON_SRC)
+	$(NVCC) -arch=$(ARCH) $(CXXFLAGS) $(INCLUDE) alg_crt_cuda.cu $(COMMON_SRC) $(LIBS) -o $@
 
-# Edit: 2026-06-30
+clean:
+	rm -f alg7_cuda alg2_k16_cuda alg2_k32_cuda alg2_k35_cuda alg3_cuda alg4_cuda alg_crt_cuda
+
+# Edit: 2026-07-14

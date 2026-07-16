@@ -178,23 +178,37 @@ static benchmark_results_t run_one(
         }
     }
 
-    // ALG3: cache suffix .cbrt_alg3.<rank> — isolated from k32 caches.
+    // cbrt cache (M1, 2026-07-16): prefer the merged per-variant cache
+    // <cbrt_dir>/cbrt_<size>.cbrt (loaded read-only by every rank, includes the
+    // q0 medium primes); fall back to the per-rank build if it is absent.
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt_alg3", rank);
+                             cbrt_dir, modulo_file, ".cbrt_alg3", rank);  // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
     bool cbrt_cache_dirty = false;
+    bool used_shared = false;
 
     if (method != METHOD_POWM)
-        ksc_ensure_cbrt_cache(
-            &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
-            challenge, modulo, e_inv,
-            my_lo, my_hi, sp_count, sp,
-            (method == METHOD_TABLE) ? prime_slice : NULL,
-            (method == METHOD_TABLE) ? slice_count : 0,
-            false, rank);
+    {
+        char shared_cbrt_path[KSC_CBRT_PATH_MAX];
+        ksc_shared_cbrt_path(shared_cbrt_path, sizeof(shared_cbrt_path),
+                             cbrt_dir, modulo_file);
+        used_shared = kf_cbrt_cache_load(&local_cbrt_cache, shared_cbrt_path);
+        if (rank == 0)
+            printf(used_shared ? "cbrt: loaded merged %s (%d entries)\n"
+                               : "cbrt: no merged cache at %s — per-rank build\n",
+                   shared_cbrt_path, used_shared ? local_cbrt_cache.count : 0);
+        if (!used_shared)
+            ksc_ensure_cbrt_cache(
+                &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
+                challenge, modulo, e_inv,
+                my_lo, my_hi, sp_count, sp,
+                (method == METHOD_TABLE) ? prime_slice : NULL,
+                (method == METHOD_TABLE) ? slice_count : 0,
+                false, rank);
+    }
 
     // Precompute cbrt(q0) for the medium prime before the bench loop so all
     // warm bench runs are instant cache hits (avoids ~1800ms powm on run 1).
@@ -205,6 +219,10 @@ static benchmark_results_t run_one(
     // [65537, 2^32] range alone while all other ranks idled at the barrier
     // below (~nranks× the distributed cost, per challenge).  Coverage is
     // identical (the union of all rank slices is the full range).
+    //
+    // M1 (2026-07-16): skipped entirely when the merged cache is loaded — it
+    // already contains every q0 medium prime, so no per-run precompute is needed.
+    if (!used_shared)
     {
         kfactor_list_t pre_factors;
         kfl_init(&pre_factors);
@@ -309,7 +327,7 @@ static benchmark_results_t run_one(
     free(prime_slice);
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
-    if (cbrt_cache_dirty)
+    if (!used_shared && cbrt_cache_dirty)   // merged cache is read-only
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
     kf_cbrt_cache_clear(&local_cbrt_cache);
     mpz_clear(e_inv);
@@ -594,4 +612,4 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-// Edit: 2026-06-12
+// Edit: 2026-07-16

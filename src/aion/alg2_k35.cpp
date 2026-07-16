@@ -229,21 +229,36 @@ static benchmark_results_t run_one(
     mpz_init(e_inv);
     ksc_compute_e_inv(e_inv, modulo, exponent);
 
+    // cbrt cache (M1, 2026-07-16): prefer the merged per-variant cache
+    // <cbrt_dir>/cbrt_<size>.cbrt (loaded read-only by every rank); fall back to
+    // the per-rank build only if it is absent (a brand-new modulus).
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt35", rank);
+                             cbrt_dir, modulo_file, ".cbrt35", rank);  // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
     bool cbrt_cache_dirty = false;
+    bool used_shared = false;
 
     if (method != METHOD_POWM)
-        ksc_ensure_cbrt_cache(
-            &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
-            challenge, modulo, e_inv,
-            my_lo, my_hi, sp_count, sp,
-            NULL, 0,      // k35 always uses sieve for precompute pass
-            true, rank);  // check sp[] below 65537 on rank 0
+    {
+        char shared_cbrt_path[KSC_CBRT_PATH_MAX];
+        ksc_shared_cbrt_path(shared_cbrt_path, sizeof(shared_cbrt_path),
+                             cbrt_dir, modulo_file);
+        used_shared = kf_cbrt_cache_load(&local_cbrt_cache, shared_cbrt_path);
+        if (rank == 0)
+            printf(used_shared ? "cbrt: loaded merged %s (%d entries)\n"
+                               : "cbrt: no merged cache at %s — per-rank build\n",
+                   shared_cbrt_path, used_shared ? local_cbrt_cache.count : 0);
+        if (!used_shared)
+            ksc_ensure_cbrt_cache(
+                &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
+                challenge, modulo, e_inv,
+                my_lo, my_hi, sp_count, sp,
+                NULL, 0,      // k35 always uses sieve for precompute pass
+                true, rank);  // check sp[] below 65537 on rank 0
+    }
 
     const int BLIND_TABLE_SIZE = 255;
     blinding_pair_t *blind_table = NULL;
@@ -352,7 +367,7 @@ static benchmark_results_t run_one(
 
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
-    if (cbrt_cache_dirty)
+    if (!used_shared && cbrt_cache_dirty)   // merged cache is read-only
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
     free(k32_slice);
     free(k35u_slice);
@@ -650,5 +665,5 @@ int main(int argc, char *argv[])
 }
 
 
-// Edit: 2026-06-12
+// Edit: 2026-07-16
 

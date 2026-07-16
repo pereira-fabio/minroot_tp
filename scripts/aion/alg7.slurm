@@ -61,8 +61,9 @@ JSON_DIR=$SLURM_SUBMIT_DIR/data/results/aion/alg7/alg7_${SLURM_JOB_ID}_N${N_NODE
 mkdir -p $JSON_DIR
 
 # Per-N cbrt cache dir — isolates concurrent array tasks (no cross-task races).
-CBRT_DIR=$SLURM_SUBMIT_DIR/data/cbrt/alg7_e3/N${N_NODES}
-rm -rf $CBRT_DIR
+# M1 (2026-07-16): per-variant dir (not per-N), never wiped — the solver reads
+# the merged cbrt_<size>.cbrt built by merge_cbrt.slurm.
+CBRT_DIR=$SLURM_SUBMIT_DIR/data/cbrt/alg7_e3
 mkdir -p $CBRT_DIR
 
 # ---------------------------------------------------------------------------
@@ -153,4 +154,4 @@ echo "speedup_total = powm_baseline / (factor_ms + recon_ms)"
 echo "Job finished  (Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID)"
 echo "============================================================"
 
-# Edit: 2026-07-06
+# Edit: 2026-07-16

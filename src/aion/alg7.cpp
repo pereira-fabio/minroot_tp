@@ -131,15 +131,27 @@ static benchmark_results_t run_one(
     mpz_init(e_inv);
     ksc_compute_e_inv(e_inv, modulo, exponent);
 
-    // cbrt cache — alg7-specific suffix to avoid conflicts with other solvers
+    // cbrt cache (M1, 2026-07-16): prefer the merged per-variant cache
+    // <cbrt_dir>/cbrt_<size>.cbrt (loaded read-only by every rank); fall back to
+    // the per-rank build (below) if it is absent.
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt_alg7", rank);
+                             cbrt_dir, modulo_file, ".cbrt_alg7", rank);  // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
     bool cbrt_cache_dirty = false;
-    kf_cbrt_cache_load(&local_cbrt_cache, cbrt_cache_path);
+    bool used_shared = false;
+    {
+        char shared_cbrt_path[KSC_CBRT_PATH_MAX];
+        ksc_shared_cbrt_path(shared_cbrt_path, sizeof(shared_cbrt_path),
+                             cbrt_dir, modulo_file);
+        used_shared = kf_cbrt_cache_load(&local_cbrt_cache, shared_cbrt_path);
+        if (rank == 0)
+            printf(used_shared ? "cbrt: loaded merged %s (%d entries)\n"
+                               : "cbrt: no merged cache at %s — per-rank build\n",
+                   shared_cbrt_path, used_shared ? local_cbrt_cache.count : 0);
+    }
 
     // ---- Load prime slice (always: Phase 1 inverted sieve needs actual prime values) ----
     const char *k32_path = ksc_ensure_k32_primes(sp_count, sp, rank);
@@ -163,13 +175,15 @@ static benchmark_results_t run_one(
     }
 
     // Precompute cbrt cache for smooth prime factors in this challenge (untimed).
-    ksc_ensure_cbrt_cache(
-        &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
-        challenge, modulo, e_inv,
-        my_lo, my_hi, sp_count, sp,
-        (method == METHOD_TABLE) ? prime_slice : NULL,
-        (method == METHOD_TABLE) ? (int64_t)slice_count : 0,
-        false, rank);
+    // Skipped when the merged cache is loaded (it already has every prime).
+    if (!used_shared)
+        ksc_ensure_cbrt_cache(
+            &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
+            challenge, modulo, e_inv,
+            my_lo, my_hi, sp_count, sp,
+            (method == METHOD_TABLE) ? prime_slice : NULL,
+            (method == METHOD_TABLE) ? (int64_t)slice_count : 0,
+            false, rank);
 
     // ---- Precompute M_mod_q and M_inv_q for all primes in slice ----
     // M_mod_q[i] = modulo mod prime_slice[i]; M_inv_q[i] = (M mod q)^{-1} mod q.
@@ -495,7 +509,7 @@ static benchmark_results_t run_one(
     mpz_clear(cofactor);
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
-    if (cbrt_cache_dirty)
+    if (!used_shared && cbrt_cache_dirty)   // merged cache is read-only
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
     kf_cbrt_cache_clear(&local_cbrt_cache);
     mpz_clear(e_inv);
@@ -707,4 +721,4 @@ int main(int argc, char *argv[])
 }
 
 
-// Edit: 2026-06-12
+// Edit: 2026-07-16

@@ -821,7 +821,8 @@ int ksc_alg3_broadcast_cofactor(
     const mpz_t blinded,
     const mpz_t local_prod,
     size_t cbrt_bytes,
-    int rank, int nranks)
+    int rank, int nranks,
+    double *primality_ms)
 {
     // --- 1. Export local factor product to fixed-size big-endian buffer ---
     unsigned char *prod_buf = (unsigned char *)calloc(cbrt_bytes, 1);
@@ -878,12 +879,23 @@ int ksc_alg3_broadcast_cofactor(
                 mpz_set_ui(cofactor_out, 1);
             }
             else if (mpz_sizeinbase(q, 2) > 32 &&
-                     mpz_sizeinbase(q, 2) <= ALG3_B_PRIME_BITS + 1 &&
-                     mpz_probab_prime_p(q, 15))
+                     mpz_sizeinbase(q, 2) <= ALG3_B_PRIME_BITS + 1)
             {
-                // Almost-smooth: one medium prime q0 in (2^32, 2^65]
-                complete = 1;
-                mpz_set(cofactor_out, q);
+                // M4 (2026-07-16): the q0 primality test is modelled as a table
+                // lookup, so its wall-time is measured separately and reported
+                // back to be excluded from the factor time (not attack work).
+                auto _p0 = std::chrono::high_resolution_clock::now();
+                int q0_is_prime = mpz_probab_prime_p(q, 15);
+                auto _p1 = std::chrono::high_resolution_clock::now();
+                if (primality_ms)
+                    *primality_ms += std::chrono::duration<double, std::milli>(
+                                         _p1 - _p0).count();
+                if (q0_is_prime)
+                {
+                    // Almost-smooth: one medium prime q0 in (2^32, 2^65]
+                    complete = 1;
+                    mpz_set(cofactor_out, q);
+                }
             }
             // else: cofactor is composite or too large → retry
 
@@ -1192,13 +1204,16 @@ int ksc_reconstruct_y(
     }
 
     mpz_set_ui(cofactor_out, 1);
+    double primality_dt = 0.0;   // M4: q0 primality-test time to exclude
     int complete = ksc_alg3_broadcast_cofactor(
-        cofactor_out, y, local_prod, ctx->cbrt_bytes, rank, nranks);
+        cofactor_out, y, local_prod, ctx->cbrt_bytes, rank, nranks, &primality_dt);
     mpz_clear(local_prod);
 
     auto t_fac2_end = std::chrono::high_resolution_clock::now();
+    // M4 (2026-07-16): exclude the q0 primality-test time (modelled as a table
+    // lookup, not attack work).
     double fac2_dt = std::chrono::duration<double, std::milli>(
-                         t_fac2_end - t_fac2_start).count();
+                         t_fac2_end - t_fac2_start).count() - primality_dt;
     if (fac2_dt_out)
         *fac2_dt_out = fac2_dt;
 
@@ -1411,6 +1426,7 @@ void ksc_run_bench_loop(
         int attempt = 0;
         const int MAX_ATTEMPTS = 256;
         bool bench_succeeded = false;  // false if all blinding attempts exhausted
+        double primality_dt = 0.0;     // M4: q0 primality-test time to exclude from factor_ms
         size_t blinded_nbytes = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
         unsigned char *blinded_buf = (unsigned char *)malloc(blinded_nbytes);
 
@@ -1480,7 +1496,7 @@ void ksc_run_bench_loop(
                 mpz_set_ui(cofactor, 1);
                 complete = ksc_alg3_broadcast_cofactor(
                     cofactor, blinded_challenge, local_prod, cbrt_bytes,
-                    rank, nranks);
+                    rank, nranks, &primality_dt);  // M4: accumulate q0-primality time
             }
             else
             {
@@ -1527,8 +1543,10 @@ void ksc_run_bench_loop(
 
         if (rank == 0)
         {
+            // M4 (2026-07-16): exclude the q0 primality-test time — modelled as a
+            // table lookup, not attack work (advisor 2026-07-15).
             double dt = std::chrono::duration<double, std::milli>(
-                            t_fac1 - t_fac0).count();
+                            t_fac1 - t_fac0).count() - primality_dt;
             accum_record(fac_acc, dt);
             json_results->timing.factor_times.push_back(dt);
             json_results->timing.blinding_attempts.push_back(attempt + 1);

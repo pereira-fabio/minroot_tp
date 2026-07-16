@@ -264,12 +264,18 @@ int ksc_alg2_broadcast_complete(
 // cofactor_out is set on ALL ranks on return (1 if B-smooth, q0 if almost-smooth).
 // Returns 1 if the challenge is fully accounted for (proceed), 0 if retry.
 // ---------------------------------------------------------------------------
+// primality_ms (optional, M4 2026-07-16): if non-NULL, the wall-time of the q0
+// primality test (mpz_probab_prime_p, rank 0 only) is *added* to *primality_ms
+// so the caller can subtract it from the measured factor time — the advisor
+// models q0's primality check as a table lookup, not attack work, so it is not
+// timed.  Pass NULL (default) from untimed precompute paths.
 int ksc_alg3_broadcast_cofactor(
     mpz_t cofactor_out,
     const mpz_t blinded,
     const mpz_t local_prod,
     size_t cbrt_bytes,
-    int rank, int nranks);
+    int rank, int nranks,
+    double *primality_ms = nullptr);
 
 // ---------------------------------------------------------------------------
 // Algorithm 4 — 2^64-smooth completeness check + medium factor broadcast

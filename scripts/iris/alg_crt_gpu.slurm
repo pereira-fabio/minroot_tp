@@ -1,8 +1,8 @@
 #!/bin/bash -l
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
-#SBATCH --partition=l40s
-#SBATCH --qos=besteffort
+#SBATCH --partition=gpu
+#SBATCH --qos=low
 #SBATCH --cpus-per-task=28
 #SBATCH --gres=gpu:1
 #SBATCH --output=alg_crt_gpu_%j.out
@@ -35,12 +35,9 @@ DATA_DIR=data/challenges/alg3
 
 cd $SLURM_SUBMIT_DIR
 
-module use /opt/apps/easybuild/systems/iris/rhel810-20250803/2023b/gpu/modules/all
-module load system/CUDA
-
-#module load env/release/2023b
-#module load system/CUDA/12.6.0
-#module load math/GMP/6.3.0-GCCcore-13.2.0   # adjust name if the link step fails (module spider GMP)
+module load env/release/2023b
+module load system/CUDA/12.6.0
+module load math/GMP/6.3.0-GCCcore-13.2.0   # adjust name if the link step fails (module spider GMP)
 
 BASE_DIR=$SLURM_SUBMIT_DIR/data/results/iris/alg_crt
 
