@@ -209,20 +209,37 @@ static benchmark_results_t run_one(
     mpz_init(e_inv);
     ksc_compute_e_inv(e_inv, modulo, exponent);
 
+    // cbrt cache (M1, 2026-07-16): prefer the merged per-variant cache
+    // <cbrt_dir>/cbrt_<size>.cbrt — every rank loads the full set once, so all
+    // reconstruction lookups hit (no per-rank build, no cold-run warming).  If
+    // it is absent (a brand-new modulus), fall back to the per-rank build, which
+    // analysis/merge_cbrt_cache.py later consolidates.
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt", rank);
+                             cbrt_dir, modulo_file, ".cbrt", rank);  // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
     bool cbrt_cache_dirty = false;
+    bool used_shared = false;
 
     if (method != METHOD_POWM)
-        ksc_ensure_cbrt_cache(
-            &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
-            challenge, modulo, e_inv,
-            my_lo, my_hi, sp_count, sp,
-            prime_slice, slice_count, false, rank);
+    {
+        char shared_cbrt_path[KSC_CBRT_PATH_MAX];
+        ksc_shared_cbrt_path(shared_cbrt_path, sizeof(shared_cbrt_path),
+                             cbrt_dir, modulo_file);
+        used_shared = kf_cbrt_cache_load(&local_cbrt_cache, shared_cbrt_path);
+        if (rank == 0)
+            printf(used_shared ? "cbrt: loaded merged %s (%d entries)\n"
+                               : "cbrt: no merged cache at %s — per-rank build\n",
+                   shared_cbrt_path, used_shared ? local_cbrt_cache.count : 0);
+        if (!used_shared)
+            ksc_ensure_cbrt_cache(
+                &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
+                challenge, modulo, e_inv,
+                my_lo, my_hi, sp_count, sp,
+                prime_slice, slice_count, false, rank);
+    }
 
     const int BLIND_TABLE_SIZE = 255;
     blinding_pair_t *blind_table = NULL;
@@ -286,7 +303,9 @@ static benchmark_results_t run_one(
     free(prime_slice);
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
-    if (cbrt_cache_dirty)
+    // Only the per-rank fallback build is persisted; the merged shared cache is
+    // read-only (never written back).
+    if (!used_shared && cbrt_cache_dirty)
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
     kf_cbrt_cache_clear(&local_cbrt_cache);
     mpz_clear(e_inv);
@@ -600,5 +619,5 @@ int main(int argc, char *argv[])
     MPI_Finalize();
     return 0;
 }
-// Edit: 2026-06-12
+// Edit: 2026-07-16
 
