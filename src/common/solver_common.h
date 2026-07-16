@@ -50,6 +50,21 @@ void ksc_make_cbrt_cache_path(char *buf, size_t bufsz,
                               int rank);
 
 // ---------------------------------------------------------------------------
+// Merged per-variant cbrt cache path (advisor M1, 2026-07-16).
+//
+// Builds  <cbrt_dir>/cbrt_<size>.cbrt  — the ONE full cache per (variant, size)
+// produced by analysis/merge_cbrt_cache.py.  <size> is parsed from the modulo
+// filename (modulo_<...>_<size>.txt or modulo_<...>_<size>_e<N>.txt).  The
+// solvers load this (all ranks, read-only) in preference to the per-rank build:
+// it contains every prime any challenge needs, so reconstruction lookups all
+// hit and no per-rank build / cold run is required.  (Variants have different
+// moduli — the prime generator races — so the cache is per-variant, not shared
+// across variants.)
+// ---------------------------------------------------------------------------
+void ksc_shared_cbrt_path(char *buf, size_t bufsz,
+                          const char *cbrt_dir, const char *modulo_file);
+
+// ---------------------------------------------------------------------------
 // Challenge header — print challenge/modulo/rank info on rank 0
 // ---------------------------------------------------------------------------
 void ksc_print_challenge_header(const mpz_t challenge, const mpz_t modulo,
@@ -401,4 +416,4 @@ void ksc_run_bench_loop(
     int rank, int nranks);
 
 
-// Edit: 2026-06-12
+// Edit: 2026-07-16

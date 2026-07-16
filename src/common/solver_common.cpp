@@ -677,6 +677,33 @@ void ksc_ensure_cbrt_cache(
         kf_cbrt_cache_save(cache, cache_path);
 }
 
+// ---------------------------------------------------------------------------
+// ksc_shared_cbrt_path — <cbrt_dir>/cbrt_<size>.cbrt (merged per-variant cache).
+// <size> parsed from the modulo filename: modulo_<...>_<size>[.txt] or
+// modulo_<...>_<size>_e<N>.txt.
+// ---------------------------------------------------------------------------
+void ksc_shared_cbrt_path(char *buf, size_t bufsz,
+                          const char *cbrt_dir, const char *modulo_file)
+{
+    const char *bname = modulo_file ? modulo_file : "";
+    const char *slash = strrchr(bname, '/');
+    const char *fname = slash ? slash + 1 : bname;
+    char stem[256];
+    strncpy(stem, fname, sizeof(stem) - 1);
+    stem[sizeof(stem) - 1] = '\0';
+    size_t L = strlen(stem);
+    if (L >= 4 && strcmp(stem + L - 4, ".txt") == 0)
+        stem[L - 4] = '\0';
+    // strip a trailing _e<digit> exponent tag if present
+    char *ue = strrchr(stem, '_');
+    if (ue && ue[1] == 'e' && ue[2] >= '0' && ue[2] <= '9')
+        *ue = '\0';
+    // the size label is the trailing _<digits>
+    char *us = strrchr(stem, '_');
+    const char *size = us ? us + 1 : stem;
+    snprintf(buf, bufsz, "%s/cbrt_%s.cbrt", cbrt_dir, size);
+}
+
 // ksc_ensure_k35_primes
 
 // ---------------------------------------------------------------------------
@@ -1593,4 +1620,4 @@ void ksc_run_bench_loop(
 }
 
 
-// Edit: 2026-06-12
+// Edit: 2026-07-16

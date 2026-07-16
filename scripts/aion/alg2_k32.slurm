@@ -59,8 +59,11 @@ DATA_DIR=data/challenges/k32
 JSON_DIR=$SLURM_SUBMIT_DIR/data/results/aion/alg2/k32_${SLURM_JOB_ID}_N${N_NODES}
 mkdir -p $JSON_DIR
 
-CBRT_DIR=$SLURM_SUBMIT_DIR/data/cbrt/alg2_k32_e3/N${N_NODES}
-rm -rf $CBRT_DIR
+# M1 (2026-07-16): point at the per-variant dir (NOT per-N) and DO NOT wipe it —
+# the solver reads the merged cbrt_<size>.cbrt built once by merge_cbrt.slurm.
+# (A brand-new modulus with no merged cache falls back to a per-rank build here,
+#  which analysis/merge_cbrt_cache.py then consolidates.)
+CBRT_DIR=$SLURM_SUBMIT_DIR/data/cbrt/alg2_k32_e3
 mkdir -p $CBRT_DIR
 
 # ---------------------------------------------------------------------------
@@ -146,4 +149,4 @@ echo "runs_failed counts blinding-exhaustion outliers excluded from averages."
 echo "Job finished  (Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID)"
 echo "============================================================"
 
-# Edit: 2026-07-06
+# Edit: 2026-07-16
