@@ -37,8 +37,11 @@ N_CHALLENGES=10
 cd $SLURM_SUBMIT_DIR
 
 # ---- Modules ---------------------------------------------------------------
-module load env/release/2023b
-module load system/CUDA/12.6.0
+module use /opt/apps/easybuild/systems/iris/rhel810-20250803/2023b/gpu/modules/all
+module load system/CUDA
+
+#module load env/release/2023b
+#module load system/CUDA/12.6.0
 
 if module load math/GMP/6.2.1-GCCcore-13.2.0 2>/dev/null; then
     echo "GMP loaded: math/GMP/6.2.1-GCCcore-13.2.0"
