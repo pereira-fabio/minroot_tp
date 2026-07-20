@@ -30,7 +30,7 @@
 //   k32_mpi [challenge] [modulo] [--method sieve|table] [--primes FILE]
 //           [--precompute]
 //   k32_mpi --all [--data DIR] [--method sieve|table] [--primes FILE]
-//          
+//
 //
 // Prime table generation (rank 0 only, one-time, ~10 s):
 //   srun ... k32_mpi --precompute [--primes k32_primes.bin]
@@ -102,7 +102,8 @@
 // k32 factoring strategy
 // ---------------------------------------------------------------------------
 
-typedef struct {
+typedef struct
+{
     uint64_t my_lo, my_hi;
     int sp_count;
     const unsigned *sp;
@@ -130,10 +131,10 @@ static void k32_factor_fn(
 #endif
         bool do_thr = (bench == 1 && rank == 0);
         std::vector<int64_t> thr_tested(do_thr ? nT : 0, 0);
-        std::vector<int>     thr_found (do_thr ? nT : 0, 0);
+        std::vector<int> thr_found(do_thr ? nT : 0, 0);
         kf_trial_divide_table(blinded, c->prime_slice, c->slice_count, out,
                               do_thr ? thr_tested.data() : nullptr,
-                              do_thr ? thr_found.data()  : nullptr,
+                              do_thr ? thr_found.data() : nullptr,
                               do_thr ? nT : 0);
         if (do_thr)
         {
@@ -168,13 +169,14 @@ static benchmark_results_t run_one(
                                         challenge_file, modulo_file, rank))
     {
         mpz_clears(challenge, modulo, result, NULL);
-        return benchmark_results_t{};  // unreachable — ksc_broadcast aborts
+        return benchmark_results_t{}; // unreachable — ksc_broadcast aborts
     }
 
     if (rank == 0)
     {
-        const char *mname = method == METHOD_TABLE ? "table"
-                          : method == METHOD_POWM  ? "powm" : "sieve";
+        const char *mname = method == METHOD_TABLE  ? "table"
+                            : method == METHOD_POWM ? "powm"
+                                                    : "sieve";
         printf("\n=== %s  [%s | %dr×%dt | %zub] ===\n",
                challenge_file, mname, nranks,
 #ifdef _OPENMP
@@ -216,7 +218,7 @@ static benchmark_results_t run_one(
     // analysis/merge_cbrt_cache.py later consolidates.
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt", rank);  // per-rank fallback
+                             cbrt_dir, modulo_file, ".cbrt", rank); // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
@@ -267,12 +269,12 @@ static benchmark_results_t run_one(
     ksc_init_json_results(&json_results, 32, mname32,
                           nranks, n_threads_json, challenge, rank);
     json_results.config.algorithm = "k32";
-    json_results.config.exponent  = exponent;
+    json_results.config.exponent = exponent;
 
     // ---- Strategy + shared bench loop ----
-    k32_ctx_t k32_ctx = { my_lo, my_hi, sp_count, sp, method,
-                           prime_slice, slice_count };
-    ksc_factor_strategy_t strategy = { k32_factor_fn, NULL, false, &k32_ctx };
+    k32_ctx_t k32_ctx = {my_lo, my_hi, sp_count, sp, method,
+                         prime_slice, slice_count};
+    ksc_factor_strategy_t strategy = {k32_factor_fn, NULL, false, &k32_ctx};
 
     ksc_run_bench_loop(
         result, method,
@@ -420,7 +422,8 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[argi], "--n-challenges") == 0 && argi + 1 < argc)
         {
             n_challenges = atoi(argv[++argi]);
-            if (n_challenges < 1) n_challenges = 1;
+            if (n_challenges < 1)
+                n_challenges = 1;
         }
         else if (strcmp(argv[argi], "--cbrt-dir") == 0 && argi + 1 < argc)
         {
@@ -485,7 +488,7 @@ int main(int argc, char *argv[])
         if (run_all)
             printf("Mode:           --all\n");
         if (n_challenges > 1)
-            printf("Challenges:     %d  (challenge_0=cold warmup; 1..%d averaged)\n",
+            printf("Challenges:     %d  (all timed warm runs, 0..%d averaged)\n",
                    n_challenges, n_challenges - 1);
         fflush(stdout);
     }
@@ -545,7 +548,7 @@ int main(int argc, char *argv[])
     {
         // Run all 11 canonical challenge sizes in one MPI execution.
         // Avoids multiple srun calls in the SLURM script (causes reinit hangs).
-        const char *sizes[] = { KSC_CANONICAL_SIZES_LIST };
+        const char *sizes[] = {KSC_CANONICAL_SIZES_LIST};
         for (int s = 0; s < KSC_N_CANONICAL_SIZES; s++)
         {
             char cf[512], mf[512], jf[768];
@@ -565,16 +568,9 @@ int main(int argc, char *argv[])
             }
             else
             {
-                // Cold run: challenge_0 warms OS page cache and cbrt cache; saved as cold_run.
-                snprintf(cf, sizeof(cf), "%s/challenge_0_32_%s.txt", data_dir, sizes[s]);
-                benchmark_results_t cold = run_one(rank, nranks, cf, mf,
-                        sp_count, sp, my_lo, my_hi, method, primes_file, exponent,
-                        cbrt_dir, true /* always skip powm for cold run */);
-
-                // Warm challenges 1..n_challenges-1: merge into one combined result.
                 benchmark_results_t combined;
                 bool has_data = false;
-                for (int ci = 1; ci < n_challenges; ci++)
+                for (int ci = 0; ci < n_challenges; ci++)
                 {
                     char cfi[512];
                     snprintf(cfi, sizeof(cfi), "%s/challenge_%d_32_%s.txt",
@@ -583,7 +579,11 @@ int main(int argc, char *argv[])
                     if (rank == 0)
                     {
                         FILE *fck = fopen(cfi, "r");
-                        if (fck) { fclose(fck); exists = 1; }
+                        if (fck)
+                        {
+                            fclose(fck);
+                            exists = 1;
+                        }
                     }
                     MPI_Bcast(&exists, 1, MPI_INT, 0, MPI_COMM_WORLD);
                     if (!exists)
@@ -597,14 +597,18 @@ int main(int argc, char *argv[])
                                                     sp_count, sp, my_lo, my_hi,
                                                     method, primes_file, exponent,
                                                     cbrt_dir, skip_powm);
-                    if (!has_data) { combined = std::move(r); has_data = true; }
-                    else           { merge_benchmark_results(combined, r); }
+                    if (!has_data)
+                    {
+                        combined = std::move(r);
+                        has_data = true;
+                    }
+                    else
+                    {
+                        merge_benchmark_results(combined, r);
+                    }
                 }
                 if (has_data && rank == 0 && jf_ptr)
-                {
-                    set_cold_run(combined, cold);
                     write_benchmark_json(jf_ptr, combined);
-                }
             }
         }
     }
@@ -619,5 +623,4 @@ int main(int argc, char *argv[])
     MPI_Finalize();
     return 0;
 }
-// Edit: 2026-07-16
-
+// Edit: 2026-07-17

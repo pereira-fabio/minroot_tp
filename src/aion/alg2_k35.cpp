@@ -67,7 +67,6 @@
 static const uint64_t RANGE_LO = 65537ULL;
 static const uint64_t RANGE_HI = (1ULL << 35) + 1024ULL;
 
-
 // ---------------------------------------------------------------------------
 // Small prime generator (same as k32.cpp)
 // ---------------------------------------------------------------------------
@@ -108,7 +107,8 @@ static const uint64_t RANGE_HI = (1ULL << 35) + 1024ULL;
 // table (uint32 lower range + uint64 upper range above 2^32).
 // ---------------------------------------------------------------------------
 
-typedef struct {
+typedef struct
+{
     uint64_t my_lo, my_hi;
     int sp_count;
     const unsigned *sp;
@@ -116,7 +116,7 @@ typedef struct {
     uint32_t *k32_slice;
     uint64_t k32_slice_count;
     uint64_t *k35u_slice;
-    int64_t  k35u_slice_count;
+    int64_t k35u_slice_count;
 } k35_ctx_t;
 
 static void k35_factor_fn(
@@ -155,7 +155,7 @@ static void k35_factor_fn(
             kf_trial_divide_table(blinded, c->k32_slice, c->k32_slice_count, out);
         if (c->k35u_slice && c->k35u_slice_count > 0)
             kf_trial_divide_table_u64(blinded, c->k35u_slice,
-                                       c->k35u_slice_count, out);
+                                      c->k35u_slice_count, out);
     }
     else // METHOD_SIEVE
     {
@@ -165,11 +165,11 @@ static void k35_factor_fn(
 #endif
         bool do_thr = (bench == 1 && rank == 0);
         std::vector<int64_t> thr_tested(do_thr ? nT : 0, 0);
-        std::vector<int>     thr_found (do_thr ? nT : 0, 0);
+        std::vector<int> thr_found(do_thr ? nT : 0, 0);
         kf_trial_divide_sieve(blinded, c->my_lo, c->my_hi,
                               c->sp_count, c->sp, out,
                               do_thr ? thr_tested.data() : nullptr,
-                              do_thr ? thr_found.data()  : nullptr,
+                              do_thr ? thr_found.data() : nullptr,
                               nT);
         if (do_thr)
         {
@@ -205,13 +205,14 @@ static benchmark_results_t run_one(
                                         challenge_file, modulo_file, rank))
     {
         mpz_clears(challenge, modulo, result, NULL);
-        return benchmark_results_t{};  // unreachable — ksc_broadcast aborts
+        return benchmark_results_t{}; // unreachable — ksc_broadcast aborts
     }
 
     if (rank == 0)
     {
-        const char *mname = method == METHOD_TABLE ? "table"
-                          : method == METHOD_POWM  ? "powm" : "sieve";
+        const char *mname = method == METHOD_TABLE  ? "table"
+                            : method == METHOD_POWM ? "powm"
+                                                    : "sieve";
         printf("\n=== %s  [%s | %dr×%dt | %zub] ===\n",
                challenge_file, mname, nranks,
 #ifdef _OPENMP
@@ -234,7 +235,7 @@ static benchmark_results_t run_one(
     // the per-rank build only if it is absent (a brand-new modulus).
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt35", rank);  // per-rank fallback
+                             cbrt_dir, modulo_file, ".cbrt35", rank); // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
@@ -256,8 +257,8 @@ static benchmark_results_t run_one(
                 &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
                 challenge, modulo, e_inv,
                 my_lo, my_hi, sp_count, sp,
-                NULL, 0,      // k35 always uses sieve for precompute pass
-                true, rank);  // check sp[] below 65537 on rank 0
+                NULL, 0,     // k35 always uses sieve for precompute pass
+                true, rank); // check sp[] below 65537 on rank 0
     }
 
     const int BLIND_TABLE_SIZE = 255;
@@ -286,13 +287,13 @@ static benchmark_results_t run_one(
     ksc_init_json_results(&json_results, 35, mname35,
                           nranks, n_threads_json, challenge, rank);
     json_results.config.algorithm = "k35";
-    json_results.config.exponent  = exponent;
+    json_results.config.exponent = exponent;
 
     // Load k35 prime slices for --method table
     uint32_t *k32_slice = nullptr;
-    uint64_t  k32_slice_count = 0;
+    uint64_t k32_slice_count = 0;
     uint64_t *k35u_slice = nullptr;
-    int64_t   k35u_slice_count = 0;
+    int64_t k35u_slice_count = 0;
     if (method == METHOD_TABLE && primes_upper_file)
     {
         const char *k32_path = ksc_ensure_k32_primes(sp_count, sp, rank);
@@ -306,16 +307,16 @@ static benchmark_results_t run_one(
         {
             uint64_t k35u_lo = std::max(my_lo, (uint64_t)UINT32_MAX + 1);
             k35u_slice = kf_load_prime_slice_u64(&k35u_slice_count,
-                                                  primes_upper_file,
-                                                  k35u_lo, my_hi);
+                                                 primes_upper_file,
+                                                 k35u_lo, my_hi);
         }
     }
 
     // ---- Strategy + shared bench loop ----
-    k35_ctx_t k35_ctx = { my_lo, my_hi, sp_count, sp, method,
-                           k32_slice, k32_slice_count,
-                           k35u_slice, k35u_slice_count };
-    ksc_factor_strategy_t strategy = { k35_factor_fn, NULL, false, &k35_ctx };
+    k35_ctx_t k35_ctx = {my_lo, my_hi, sp_count, sp, method,
+                         k32_slice, k32_slice_count,
+                         k35u_slice, k35u_slice_count};
+    ksc_factor_strategy_t strategy = {k35_factor_fn, NULL, false, &k35_ctx};
 
     ksc_run_bench_loop(
         result, method,
@@ -367,7 +368,7 @@ static benchmark_results_t run_one(
 
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
-    if (!used_shared && cbrt_cache_dirty)   // merged cache is read-only
+    if (!used_shared && cbrt_cache_dirty) // merged cache is read-only
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
     free(k32_slice);
     free(k35u_slice);
@@ -475,7 +476,8 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[argi], "--n-challenges") == 0 && argi + 1 < argc)
         {
             n_challenges = atoi(argv[++argi]);
-            if (n_challenges < 1) n_challenges = 1;
+            if (n_challenges < 1)
+                n_challenges = 1;
         }
         else if (strcmp(argv[argi], "--cbrt-dir") == 0 && argi + 1 < argc)
         {
@@ -539,7 +541,7 @@ int main(int argc, char *argv[])
         if (run_all)
             printf("Mode:           --all\n");
         if (n_challenges > 1)
-            printf("Challenges:     %d  (challenge_0=cold warmup; 1..%d averaged)\n",
+            printf("Challenges:     %d  (all timed warm runs, 0..%d averaged)\n",
                    n_challenges, n_challenges - 1);
         fflush(stdout);
     }
@@ -583,7 +585,7 @@ int main(int argc, char *argv[])
 
     if (run_all)
     {
-        const char *sizes[] = { KSC_CANONICAL_SIZES_LIST };
+        const char *sizes[] = {KSC_CANONICAL_SIZES_LIST};
         const char *k35u_p2 = (method == METHOD_TABLE)
                                   ? ksc_ensure_k35_primes(sp_count, sp, rank)
                                   : nullptr;
@@ -606,16 +608,9 @@ int main(int argc, char *argv[])
             }
             else
             {
-                // Cold run: challenge_0 warms OS page cache and cbrt cache; saved as cold_run.
-                snprintf(cf, sizeof(cf), "%s/challenge_0_35_%s.txt", data_dir, sizes[s]);
-                benchmark_results_t cold = run_one(rank, nranks, cf, mf,
-                        sp_count, sp, my_lo, my_hi, method, k35u_p2, exponent,
-                        cbrt_dir, true /* always skip powm for cold run */);
-
-                // Warm challenges 1..n_challenges-1: merge into one combined result.
                 benchmark_results_t combined;
                 bool has_data = false;
-                for (int ci = 1; ci < n_challenges; ci++)
+                for (int ci = 0; ci < n_challenges; ci++)
                 {
                     char cfi[512];
                     snprintf(cfi, sizeof(cfi), "%s/challenge_%d_35_%s.txt",
@@ -624,7 +619,11 @@ int main(int argc, char *argv[])
                     if (rank == 0)
                     {
                         FILE *fck = fopen(cfi, "r");
-                        if (fck) { fclose(fck); exists = 1; }
+                        if (fck)
+                        {
+                            fclose(fck);
+                            exists = 1;
+                        }
                     }
                     MPI_Bcast(&exists, 1, MPI_INT, 0, MPI_COMM_WORLD);
                     if (!exists)
@@ -638,14 +637,18 @@ int main(int argc, char *argv[])
                                                     sp_count, sp, my_lo, my_hi,
                                                     method, k35u_p2, exponent,
                                                     cbrt_dir, skip_powm);
-                    if (!has_data) { combined = std::move(r); has_data = true; }
-                    else           { merge_benchmark_results(combined, r); }
+                    if (!has_data)
+                    {
+                        combined = std::move(r);
+                        has_data = true;
+                    }
+                    else
+                    {
+                        merge_benchmark_results(combined, r);
+                    }
                 }
                 if (has_data && rank == 0 && jf_ptr)
-                {
-                    set_cold_run(combined, cold);
                     write_benchmark_json(jf_ptr, combined);
-                }
             }
         }
     }
@@ -664,6 +667,4 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-
-// Edit: 2026-07-16
-
+// Edit: 2026-07-17

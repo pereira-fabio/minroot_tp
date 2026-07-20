@@ -7,7 +7,7 @@
 // in parallel over small primes via the CRT (crt_common). No factorization, no
 // smoothness, no blinding — works for ANY challenge.
 //
-// Structure mirrors alg7.cpp (MPI, --all sweep, cold/warm merge) minus the sieve.
+// Structure mirrors alg7.cpp (MPI, --all sweep, all-warm-run merge) minus the sieve.
 //
 // Usage:
 //   alg_crt <challenge> <modulo> [--alpha A] [--exponent e]
@@ -224,13 +224,11 @@ int main(int argc, char *argv[])
                 snprintf(cf, sizeof(cf), "%s/challenge_0_alg3_%s.txt", data_dir, sizes[s]);
                 solve_one(rank, nranks, cf, mf, exponent, alpha, jf_ptr);
             } else {
-                char cf[512];
-                snprintf(cf, sizeof(cf), "%s/challenge_0_alg3_%s.txt", data_dir, sizes[s]);
-                benchmark_results_t cold = run_one(rank, nranks, cf, mf, exponent, alpha);
-
+                // Plan A (2026-07-17): all N challenges are timed warm runs — no
+                // separate cold run.
                 benchmark_results_t combined;
                 bool has_data = false;
-                for (int ci = 1; ci < n_challenges; ci++) {
+                for (int ci = 0; ci < n_challenges; ci++) {
                     char cfi[512];
                     snprintf(cfi, sizeof(cfi), "%s/challenge_%d_alg3_%s.txt", data_dir, ci, sizes[s]);
                     int exists = 0;
@@ -242,7 +240,6 @@ int main(int argc, char *argv[])
                     else           { merge_benchmark_results(combined, r); }
                 }
                 if (has_data && rank == 0 && jf_ptr) {
-                    set_cold_run(combined, cold);
                     write_benchmark_json(jf_ptr, combined);
                 }
             }
@@ -255,4 +252,4 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-// Edit: 2026-07-12
+// Edit: 2026-07-17

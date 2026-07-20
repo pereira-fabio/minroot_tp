@@ -120,13 +120,14 @@ static benchmark_results_t run_one(
                                         challenge_file, modulo_file, rank))
     {
         mpz_clears(challenge, modulo, result, NULL);
-        return benchmark_results_t{};  // unreachable — ksc_broadcast aborts
+        return benchmark_results_t{}; // unreachable — ksc_broadcast aborts
     }
 
     if (rank == 0)
     {
-        const char *mname = method == METHOD_TABLE ? "table"
-                          : method == METHOD_POWM  ? "powm" : "sieve";
+        const char *mname = method == METHOD_TABLE  ? "table"
+                            : method == METHOD_POWM ? "powm"
+                                                    : "sieve";
         printf("\n=== %s  [%s | %dr×%dt | %zub] ===\n",
                challenge_file, mname, nranks,
 #ifdef _OPENMP
@@ -148,7 +149,6 @@ static benchmark_results_t run_one(
     int my_start = rank * base_per_rank + (rank < remainder ? rank : remainder);
     int my_count = base_per_rank + (rank < remainder ? 1 : 0);
     int64_t my_tested = (int64_t)my_count;
-
 
     // Setup for early-exit trial division via the common library functions.
     // kf_trial_divide_sieve needs small primes; kf_trial_divide_table needs
@@ -196,7 +196,7 @@ static benchmark_results_t run_one(
     ksc_init_json_results(&json_results, 16, mname,
                           nranks, n_threads, challenge, rank);
     json_results.config.algorithm = "k16";
-    json_results.config.exponent  = exponent;
+    json_results.config.exponent = exponent;
 
     bench_accum_t fac_acc = {0, 0}, loc_acc = {0, 0}, gat_acc = {0, 0},
                   com_acc = {0, 0}, recon_acc = {0, 0};
@@ -434,7 +434,8 @@ int main(int argc, char *argv[])
         else if (!strcmp(argv[i], "--n-challenges") && i + 1 < argc)
         {
             n_challenges = atoi(argv[++i]);
-            if (n_challenges < 1) n_challenges = 1;
+            if (n_challenges < 1)
+                n_challenges = 1;
         }
         else if (!strcmp(argv[i], "--cbrt-dir") && i + 1 < argc)
             cbrt_dir = argv[++i];
@@ -465,11 +466,20 @@ int main(int argc, char *argv[])
         }
         else if (argv[i][0] != '-')
         {
-            if (positional == 0)      { challenge_file = argv[i]; positional++; }
-            else if (positional == 1) { modulo_file    = argv[i]; positional++; }
+            if (positional == 0)
+            {
+                challenge_file = argv[i];
+                positional++;
+            }
+            else if (positional == 1)
+            {
+                modulo_file = argv[i];
+                positional++;
+            }
             else
             {
-                if (rank == 0) fprintf(stderr, "Unexpected argument '%s'\n", argv[i]);
+                if (rank == 0)
+                    fprintf(stderr, "Unexpected argument '%s'\n", argv[i]);
                 MPI_Finalize();
                 return 1;
             }
@@ -516,7 +526,7 @@ int main(int argc, char *argv[])
 
     if (run_all)
     {
-        const char *sizes[] = { KSC_CANONICAL_SIZES_LIST };
+        const char *sizes[] = {KSC_CANONICAL_SIZES_LIST};
         for (int s = 0; s < KSC_N_CANONICAL_SIZES; s++)
         {
             char cf[512], mf[512], jf[512];
@@ -535,15 +545,9 @@ int main(int argc, char *argv[])
             }
             else
             {
-                // Cold run: challenge_0 warms OS page cache and cbrt table; saved as cold_run.
-                snprintf(cf, sizeof(cf), "%s/challenge_0_16_%s.txt", data_dir, sizes[s]);
-                benchmark_results_t cold = run_one(rank, nranks, cf, mf, method, exponent,
-                        cbrt_dir, true /* always skip powm for cold run */);
-
-                // Warm challenges 1..n_challenges-1: merge into one combined result.
                 benchmark_results_t combined;
                 bool has_data = false;
-                for (int ci = 1; ci < n_challenges; ci++)
+                for (int ci = 0; ci < n_challenges; ci++)
                 {
                     char cfi[512];
                     snprintf(cfi, sizeof(cfi), "%s/challenge_%d_16_%s.txt",
@@ -552,7 +556,11 @@ int main(int argc, char *argv[])
                     if (rank == 0)
                     {
                         FILE *fck = fopen(cfi, "r");
-                        if (fck) { fclose(fck); exists = 1; }
+                        if (fck)
+                        {
+                            fclose(fck);
+                            exists = 1;
+                        }
                     }
                     MPI_Bcast(&exists, 1, MPI_INT, 0, MPI_COMM_WORLD);
                     if (!exists)
@@ -564,14 +572,18 @@ int main(int argc, char *argv[])
                     }
                     benchmark_results_t r = run_one(rank, nranks, cfi, mf,
                                                     method, exponent, cbrt_dir, skip_powm);
-                    if (!has_data) { combined = std::move(r); has_data = true; }
-                    else           { merge_benchmark_results(combined, r); }
+                    if (!has_data)
+                    {
+                        combined = std::move(r);
+                        has_data = true;
+                    }
+                    else
+                    {
+                        merge_benchmark_results(combined, r);
+                    }
                 }
                 if (has_data && rank == 0 && jf_ptr)
-                {
-                    set_cold_run(combined, cold);
                     write_benchmark_json(jf_ptr, combined);
-                }
             }
         }
     }
@@ -585,5 +597,4 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-// Edit: 2026-06-12
-
+// Edit: 2026-07-17

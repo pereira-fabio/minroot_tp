@@ -249,34 +249,13 @@ struct alg_hit_data_t
     std::vector<int> medium_factor_count; // number of medium primes per run
 };
 
-// Cold (challenge_0) run — the cache-cold warmup challenge. Saved for completeness
-// ("all the data"), but excluded from the warm averages/stats because its cbrt cache
-// and OS page cache are cold and would bias the steady-state numbers.
-struct cold_run_t
-{
-    bool   present       = false;
-    double factor_ms     = 0.0;
-    double recon_ms      = 0.0;
-    double local_cbrt_ms = 0.0;
-    double gather_ms     = 0.0;
-    double combine_ms    = 0.0;
-    double total_ms      = 0.0;
-};
-
 struct benchmark_results_t
 {
     bench_config_t config;
     bench_timing_t timing;
     bench_stats_t  stats;
     alg_hit_data_t hits;
-    cold_run_t     cold;   // challenge_0 cold-warmup run (present=false unless set)
 };
-
-// Populate dst.cold from a cold (challenge_0) run's results (its first recorded
-// entry). No-op if the cold run recorded nothing. The cold run is saved separately
-// and never folded into the warm averages. Call once, after building the merged
-// warm result and before write_benchmark_json.
-void set_cold_run(benchmark_results_t &dst, const benchmark_results_t &cold_src);
 
 // Serialise benchmark results to a JSON file.
 //
@@ -303,4 +282,4 @@ void write_benchmark_json(const char *filepath,
 void merge_benchmark_results(benchmark_results_t &dst,
                              const benchmark_results_t &src);
 
-// Edit: 2026-06-12
+// Edit: 2026-07-17

@@ -220,6 +220,24 @@ static inline void _gpu_write_stats_obj(FILE *f, const char *name,
         last ? "" : ",");
 }
 
+// Name of the active CUDA device (e.g. "Tesla V100-SXM2-16GB", "NVIDIA L40"),
+// queried once from the driver.  Replaces the old hard-coded "V100" so the JSON
+// metadata reflects whatever GPU actually ran (V100 / L40 / ...).  Falls back to
+// "GPU" if the query fails.
+static inline const char *gpu_device_name()
+{
+    static char name[256] = "";
+    if (name[0]) return name;              // cached after first call
+    int dev = 0;
+    cudaDeviceProp prop;
+    if (cudaGetDevice(&dev) == cudaSuccess &&
+        cudaGetDeviceProperties(&prop, dev) == cudaSuccess)
+        snprintf(name, sizeof(name), "%s", prop.name);
+    else
+        snprintf(name, sizeof(name), "GPU");
+    return name;
+}
+
 // Print human-readable benchmark summary to stdout.
 static inline void gpu_print_benchmark(const char *label, int n_warm,
                                         double powm_ms,
@@ -228,8 +246,8 @@ static inline void gpu_print_benchmark(const char *label, int n_warm,
 {
     double total_ms = avg_factor_ms + avg_recon_ms;
     double speedup  = total_ms > 0.0 ? powm_ms / total_ms : 0.0;
-    printf("\n=== %s — GPU Benchmark (IRIS V100, %d GPU%s) ===\n",
-           label, n_gpus, n_gpus == 1 ? "" : "s");
+    printf("\n=== %s — GPU Benchmark (%s, %d GPU%s) ===\n",
+           label, gpu_device_name(), n_gpus, n_gpus == 1 ? "" : "s");
     printf("  powm_baseline_ms : %8.4f  (5-rep avg, sequential mpz_powm)\n", powm_ms);
     printf("  factor_ms  (GPU) : %8.4f  (warm avg over %d runs)\n", avg_factor_ms, n_warm);
     printf("  recon_ms   (CPU) : %8.4f  (warm avg)\n", avg_recon_ms);
@@ -280,12 +298,12 @@ static inline void gpu_write_json_warm(const char *path,
         "    \"algorithm\": \"%s\",\n    \"method\": \"%s\",\n"
         "    \"exponent\": %lu,\n    \"smoothness_bound_bits\": %d,\n"
         "    \"challenge_bits\": %zu,\n    \"mpi_ranks\": 1,\n"
-        "    \"nodes\": 1,\n    \"gpu\": \"V100\",\n    \"platform\": \"IRIS\",\n"
+        "    \"nodes\": 1,\n    \"gpu\": \"%s\",\n    \"platform\": \"IRIS\",\n"
         "    \"n_gpus\": %d,\n"
         "    \"runs_total\": %d,\n    \"runs_warm\": %d,\n"
         "    \"powm_baseline_ms\": %.4f\n  },\n",
         algorithm, mname, exp_e, smoothness_bound_bits, challenge_bits,
-        n_gpus, n + 1, n, powm_baseline_ms);
+        gpu_device_name(), n_gpus, n + 1, n, powm_baseline_ms);
 
     if (method != GPU_METHOD_POWM) {
         fprintf(f,
@@ -374,4 +392,4 @@ static inline bool gpu_load_challenge(mpz_t y_out, const char *data_dir,
     return true;
 }
 
-// Edit: 2026-07-11
+// Edit: 2026-07-17
