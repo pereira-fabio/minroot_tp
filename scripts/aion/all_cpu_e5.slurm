@@ -49,6 +49,45 @@ export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 export OMP_WAIT_POLICY=active
 
+# ===========================================================================
+# OPTIONAL FLAG — delta-encoded prime table  (advisor M2)
+# ---------------------------------------------------------------------------
+# The table-method solvers k32, k35, alg3 and alg4 share the 813 MB k32 prime
+# table (k35 also a 9.6 GB upper table). Delta/gap encoding stores 1 byte per
+# prime instead of 4/8, shrinking them to ~204 MB / ~1.2 GB with byte-identical
+# trial-division results (gate: tests/delta_table_test; docs:
+# wiki/implementation/delta-prime-table.md). Only affects --method table.
+#
+# HOW TO USE: uncomment the "delta" line below (comment the "flat" line). The
+# first table run auto-builds the .dlt on rank 0 — one-time: ~seconds for k32,
+# ~1 min for k35's 9.6 GB read — and later runs reuse it. Applied ONLY to
+# k32/k35/alg3/alg4 below; k16 does not accept it (and alg7 is not run at e5).
+#
+#   Example — one delta k32 e5 run by hand (what this sweep does per size):
+#     srun --mpi=pmix -N64 --ntasks=128 ./alg2_k32 \
+#          --all --data data/challenges/k32 --exponent 5 --modulo-suffix _e5 \
+#          --method table --table-format delta \
+#          --n-challenges 50 --cbrt-dir data/cbrt/alg2_k32_e5 --json out/k32
+#
+#   Optional — pre-build the .dlt yourself instead of the auto-build:
+#     srun -N1 --ntasks=2 ./alg2_k32 --convert-delta     # writes k32_primes.dlt
+#     # (the .dlt tables are exponent-independent — shared by the e3 and e5 runs)
+#
+# TABLE_FORMAT="--table-format delta"    # <-- UNCOMMENT this for the delta table
+TABLE_FORMAT=""                          #     default: flat (uint32/uint64 table)
+# ===========================================================================
+
+# ===========================================================================
+# NOTE — the pre-filter (paper Algorithm 5) is NOT toggled here (no flag yet).
+# ---------------------------------------------------------------------------
+# It is Phase 0 only: the selection primitive src/common/prefilter.{h,cpp}
+# (prefilter_simple_select), exercised solely by tests/prefilter_test.cpp and
+# gated separately by:   sbatch scripts/aion/prefilter_test.slurm
+# There is no --prefilter solver flag yet — the bench-loop hook (Phase 1) is
+# pending. Once it lands, add a PREFILTER toggle here just like TABLE_FORMAT.
+# The pre-filter raises the smoothness HIT RATE, not speedup_total.
+# ===========================================================================
+
 # ---------------------------------------------------------------------------
 # Map array index -> node count (DESCENDING) and challenge count.
 # ---------------------------------------------------------------------------
@@ -76,7 +115,7 @@ echo ""
 #   this variant; the sweep continues.
 # ---------------------------------------------------------------------------
 run_variant() {
-    local NAME=$1 SRC=$2 DATA=$3 CBRT=$4 RSUB=$5 JPREFIX=$6
+    local NAME=$1 SRC=$2 DATA=$3 CBRT=$4 RSUB=$5 JPREFIX=$6 EXTRA=$7
     local BIN=./${NAME}_e5_N${N_NODES}
     local JDIR=$SLURM_SUBMIT_DIR/data/results/aion/${RSUB}_e5_${SLURM_JOB_ID}_N${N_NODES}
     mkdir -p "$JDIR" "$CBRT"
@@ -104,7 +143,7 @@ run_variant() {
         srun --mpi=pmix -N ${N_NODES} --ntasks=${NRANKS} "$BIN" \
             --all --data "$DATA" \
             --exponent 5 --modulo-suffix _e5 \
-            --method $M $SKIP \
+            --method $M $SKIP $EXTRA \
             --n-challenges $N_CHALLENGES \
             --cbrt-dir "$CBRT" \
             --json $JDIR/${JPREFIX}_${M}_${SLURM_JOB_ID}
@@ -116,13 +155,16 @@ run_variant() {
 
 # ---------------------------------------------------------------------------
 # Five solvers at e=5 (no alg7 — it lacks --modulo-suffix).
-#             NAME       SRC             DATA_DIR               CBRT_DIR                                 RESULT_SUBPATH  JSON_PREFIX
+# $TABLE_FORMAT (delta toggle, above) is applied ONLY to the four table solvers
+# that share the k32 table — k32/k35/alg3/alg4. k16 (26 KB in-RAM table) keeps
+# an empty EXTRA.
+#             NAME       SRC             DATA_DIR               CBRT_DIR                                 RESULT_SUBPATH  JSON_PREFIX   EXTRA
 # ---------------------------------------------------------------------------
-run_variant  alg2_k16   alg2_k16.cpp    data/challenges/k16    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k16_e5  alg2/k16        alg2_k16
-run_variant  alg2_k32   alg2_k32.cpp    data/challenges/k32    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k32_e5  alg2/k32        alg2_k32
-run_variant  alg2_k35   alg2_k35.cpp    data/challenges/k35    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k35_e5  alg2/k35        alg2_k35
-run_variant  alg3       alg3.cpp        data/challenges/alg3   $SLURM_SUBMIT_DIR/data/cbrt/alg3_e5      alg3/alg3       alg3
-run_variant  alg4       alg4.cpp        data/challenges/alg4   $SLURM_SUBMIT_DIR/data/cbrt/alg4_e5      alg4/alg4       alg4
+run_variant  alg2_k16   alg2_k16.cpp    data/challenges/k16    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k16_e5  alg2/k16        alg2_k16      ""
+run_variant  alg2_k32   alg2_k32.cpp    data/challenges/k32    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k32_e5  alg2/k32        alg2_k32      "$TABLE_FORMAT"
+run_variant  alg2_k35   alg2_k35.cpp    data/challenges/k35    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k35_e5  alg2/k35        alg2_k35      "$TABLE_FORMAT"
+run_variant  alg3       alg3.cpp        data/challenges/alg3   $SLURM_SUBMIT_DIR/data/cbrt/alg3_e5      alg3/alg3       alg3          "$TABLE_FORMAT"
+run_variant  alg4       alg4.cpp        data/challenges/alg4   $SLURM_SUBMIT_DIR/data/cbrt/alg4_e5      alg4/alg4       alg4          "$TABLE_FORMAT"
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -137,4 +179,4 @@ echo "Join each timing JSON with its _powm_ sibling for the baseline (results-jo
 echo "Job finished  (Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID)"
 echo "============================================================"
 
-# Edit: 2026-07-17
+# Edit: 2026-07-22

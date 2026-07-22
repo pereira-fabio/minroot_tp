@@ -170,14 +170,13 @@ static benchmark_results_t run_one(
                                         challenge_file, modulo_file, rank))
     {
         mpz_clears(challenge, modulo, result, NULL);
-        return benchmark_results_t{}; // unreachable — ksc_broadcast aborts
+        return benchmark_results_t{};  // unreachable — ksc_broadcast aborts
     }
 
     if (rank == 0)
     {
-        const char *mname = method == METHOD_TABLE  ? "table"
-                            : method == METHOD_POWM ? "powm"
-                                                    : "sieve";
+        const char *mname = method == METHOD_TABLE ? "table"
+                          : method == METHOD_POWM  ? "powm" : "sieve";
         printf("\n=== %s  [%s | %dr×%dt | %zub] ===\n",
                challenge_file, mname, nranks,
 #ifdef _OPENMP
@@ -196,20 +195,48 @@ static benchmark_results_t run_one(
     mpz_init(e_inv);
     ksc_compute_e_inv(e_inv, modulo, exponent);
 
-    // Load prime slice for table method (once, outside bench loop)
+    // Load prime slice for table method (once, outside bench loop).  The table
+    // file may be flat (k32_primes.bin) or delta (k32_primes.dlt) — auto-detect
+    // by magic (same shared k32 table as alg2_k32; see wiki delta-prime-table).
     uint32_t *prime_slice = NULL;
     int64_t slice_count = 0;
+    kf_delta_slice_t delta_slice;
+    memset(&delta_slice, 0, sizeof(delta_slice));
+    bool have_delta = false;
     if (method == METHOD_TABLE)
     {
-        uint64_t sc = 0;
-        prime_slice = kf_load_prime_slice(&sc, primes_file,
-                                          (uint32_t)my_lo, (uint32_t)my_hi);
-        slice_count = (int64_t)sc;
-        if (!prime_slice)
+        bool is_delta = false;
+        FILE *pf = fopen(primes_file, "rb");
+        if (pf)
         {
-            fprintf(stderr, "[rank %d] Failed to load prime slice from %s\n",
-                    rank, primes_file);
-            MPI_Abort(MPI_COMM_WORLD, 1);
+            uint64_t m = 0;
+            if (fread(&m, 8, 1, pf) == 1 &&
+                (m == KF_DELTA_MAGIC_U32 || m == KF_DELTA_MAGIC_U64))
+                is_delta = true;
+            fclose(pf);
+        }
+        if (is_delta)
+        {
+            if (!kf_load_delta_slice(&delta_slice, primes_file, my_lo, my_hi))
+            {
+                fprintf(stderr, "[rank %d] Failed to load delta slice from %s\n",
+                        rank, primes_file);
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            have_delta = true;
+        }
+        else
+        {
+            uint64_t sc = 0;
+            prime_slice = kf_load_prime_slice(&sc, primes_file,
+                                              (uint32_t)my_lo, (uint32_t)my_hi);
+            slice_count = (int64_t)sc;
+            if (!prime_slice)
+            {
+                fprintf(stderr, "[rank %d] Failed to load prime slice from %s\n",
+                        rank, primes_file);
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
         }
     }
 
@@ -218,7 +245,7 @@ static benchmark_results_t run_one(
     // medium-prime cofactor cbrts); fall back to the per-rank build if absent.
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt_alg4", rank); // per-rank fallback
+                             cbrt_dir, modulo_file, ".cbrt_alg4", rank);  // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
@@ -270,7 +297,9 @@ static benchmark_results_t run_one(
     {
         kfactor_list_t pre_factors;
         kfl_init(&pre_factors);
-        if (method == METHOD_TABLE)
+        if (have_delta)
+            kf_trial_divide_delta(challenge, &delta_slice, &pre_factors);
+        else if (method == METHOD_TABLE)
             kf_trial_divide_table(challenge, prime_slice, slice_count, &pre_factors);
         else
             kf_trial_divide_sieve(challenge, my_lo, my_hi, sp_count, sp, &pre_factors);
@@ -349,9 +378,9 @@ static benchmark_results_t run_one(
     // as alg3.  The k_size field in JSON records the sieve upper bound in bits.
     ksc_init_json_results(&json_results, 32, mname,
                           nranks, n_threads_json, challenge, rank);
-    json_results.config.algorithm = "alg4";
-    json_results.config.exponent = exponent;
-    json_results.config.b0 = ALG4_B0;
+    json_results.config.algorithm        = "alg4";
+    json_results.config.exponent         = exponent;
+    json_results.config.b0               = ALG4_B0;
     json_results.config.t_threshold_bits = ALG4_T_THRESHOLD_BITS;
 
     // ---- 2 warmup runs ----
@@ -385,7 +414,9 @@ static benchmark_results_t run_one(
             mpz_import(wu_ch, wu_nb, 1, 1, 0, 0, wu_buf);
             free(wu_buf);
 
-            if (method == METHOD_TABLE)
+            if (have_delta)
+                kf_trial_divide_delta(wu_ch, &delta_slice, &wu_factors);
+            else if (method == METHOD_TABLE)
                 kf_trial_divide_table(wu_ch, prime_slice, slice_count,
                                       &wu_factors, nullptr, nullptr, 0);
             else
@@ -527,7 +558,9 @@ static benchmark_results_t run_one(
             // -- All ranks: full sieve/table on the chosen blinded challenge --
             kfl_free(&local_factors);
             kfl_init(&local_factors);
-            if (method == METHOD_TABLE)
+            if (have_delta)
+                kf_trial_divide_delta(blinded_challenge, &delta_slice, &local_factors);
+            else if (method == METHOD_TABLE)
                 kf_trial_divide_table(blinded_challenge, prime_slice, slice_count,
                                       &local_factors, nullptr, nullptr, 0);
             else
@@ -710,8 +743,7 @@ static benchmark_results_t run_one(
                     if (record_cbrt)
                     {
                         cbrt_miss_ms += std::chrono::duration<double, std::milli>(
-                                            _mt1 - _mt0)
-                                            .count();
+                                            _mt1 - _mt0).count();
                         cbrt_misses++;
                     }
 
@@ -823,12 +855,14 @@ static benchmark_results_t run_one(
 
     // ---- Cleanup ----
     free(prime_slice);
+    if (have_delta)
+        kf_delta_slice_free(&delta_slice);
     mpz_clear(blinded_challenge);
     kfl_free(&medium_factors);
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
 
-    if (!used_shared && cbrt_cache_dirty) // merged cache is read-only
+    if (!used_shared && cbrt_cache_dirty)   // merged cache is read-only
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
     kf_cbrt_cache_clear(&local_cbrt_cache);
 
@@ -858,6 +892,17 @@ static int solve_one(
     return 1;
 }
 
+// Derive the delta table path from the flat path: k32_primes.bin -> k32_primes.dlt
+static void alg4_delta_path(char *dst, size_t n, const char *flat)
+{
+    snprintf(dst, n, "%s", flat);
+    size_t L = strlen(dst);
+    if (L > 4 && strcmp(dst + L - 4, ".bin") == 0)
+        snprintf(dst + L - 4, 5, ".dlt");
+    else if (L + 5 <= n)
+        snprintf(dst + L, 5, ".dlt");
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -885,6 +930,9 @@ int main(int argc, char *argv[])
     const char *cbrt_dir = KSC_CBRT_DIR;
     int run_all = 0;
     int run_all_multi = 0;
+    int do_convert_delta = 0;   // --convert-delta: build k32_primes.dlt and exit
+    bool use_delta = false;     // --table-format delta: use the delta-encoded table
+    bool primes_user_set = false;
     int n_challenges = 1;
     bool skip_powm = false;
     run_method_t method = METHOD_SIEVE;
@@ -930,6 +978,26 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[argi], "--primes") == 0 && argi + 1 < argc)
         {
             primes_file = argv[++argi];
+            primes_user_set = true;
+        }
+        else if (strcmp(argv[argi], "--table-format") == 0 && argi + 1 < argc)
+        {
+            const char *tf = argv[++argi];
+            if (strcmp(tf, "delta") == 0)
+                use_delta = true;
+            else if (strcmp(tf, "flat") == 0)
+                use_delta = false;
+            else
+            {
+                if (rank == 0)
+                    fprintf(stderr, "Unknown --table-format '%s' (use flat or delta)\n", tf);
+                MPI_Finalize();
+                return 1;
+            }
+        }
+        else if (strcmp(argv[argi], "--convert-delta") == 0)
+        {
+            do_convert_delta = 1;
         }
         else if (strcmp(argv[argi], "--json") == 0 && argi + 1 < argc)
         {
@@ -942,8 +1010,7 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[argi], "--n-challenges") == 0 && argi + 1 < argc)
         {
             n_challenges = atoi(argv[++argi]);
-            if (n_challenges < 1)
-                n_challenges = 1;
+            if (n_challenges < 1) n_challenges = 1;
         }
         else if (strcmp(argv[argi], "--cbrt-dir") == 0 && argi + 1 < argc)
         {
@@ -982,14 +1049,16 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (!run_all && !run_all_multi && (!challenge_file || !modulo_file))
+    if (!run_all && !run_all_multi && !do_convert_delta &&
+        (!challenge_file || !modulo_file))
     {
         if (rank == 0)
             fprintf(stderr,
                     "Usage: alg4_mpi <challenge> <modulo> "
-                    "[--method sieve|table|powm]\n"
-                    "       alg4_mpi --all  [--data DIR] [--method sieve|table|powm]\n"
+                    "[--method sieve|table|powm] [--table-format flat|delta]\n"
+                    "       alg4_mpi --all  [--data DIR] [--method sieve|table|powm] [--table-format flat|delta]\n"
                     "       alg4_mpi --multi [--data DIR] [--method sieve|table|powm]\n"
+                    "       alg4_mpi --convert-delta   (build k32_primes.dlt from k32_primes.bin, then exit)\n"
                     "       (--primes FILE defaults to k32_primes.bin; only used with --method table)\n");
         MPI_Finalize();
         return 1;
@@ -1007,6 +1076,9 @@ int main(int argc, char *argv[])
                method == METHOD_SIEVE   ? "sieve"
                : method == METHOD_TABLE ? "table"
                                         : "powm");
+        if (method == METHOD_TABLE)
+            printf("Table format:   %s\n",
+                   use_delta ? "delta (1 byte/prime, ~204 MB)" : "flat (uint32, ~813 MB)");
         printf("Pre-filter:     B0=2^20 threshold-discard, t=2^%d (paper §3.2)\n",
                ALG4_T_THRESHOLD_BITS);
         printf("Blinding table: %d candidates scanned before failure\n",
@@ -1026,8 +1098,54 @@ int main(int argc, char *argv[])
     int sp_count;
     unsigned *sp = kf_generate_small_primes(&sp_count);
 
+    // --convert-delta: rank 0 builds k32_primes.dlt from k32_primes.bin, then exit.
+    if (do_convert_delta)
+    {
+        if (rank == 0)
+        {
+            const char *flat = ksc_ensure_k32_primes(sp_count, sp, rank);
+            char dpath[512];
+            if (primes_user_set)
+                snprintf(dpath, sizeof(dpath), "%s", primes_file);
+            else
+                alg4_delta_path(dpath, sizeof(dpath), flat);
+            if (!kf_convert_prime_table_to_delta(flat, dpath, "[rank 0] "))
+            {
+                free(sp);
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+        }
+        free(sp);
+        MPI_Finalize();
+        return 0;
+    }
+
     if (method == METHOD_TABLE)
-        primes_file = ksc_ensure_k32_primes(sp_count, sp, rank);
+    {
+        const char *flat = ksc_ensure_k32_primes(sp_count, sp, rank);
+        if (use_delta)
+        {
+            // Point at the shared delta table (k32_primes.dlt); rank 0 builds it
+            // from the flat table on first use.  run_one auto-detects it by magic.
+            static char dpath[512];
+            if (primes_user_set)
+                snprintf(dpath, sizeof(dpath), "%s", primes_file);
+            else
+                alg4_delta_path(dpath, sizeof(dpath), flat);
+            if (rank == 0)
+            {
+                FILE *t = fopen(dpath, "rb");
+                if (t)
+                    fclose(t);
+                else if (!kf_convert_prime_table_to_delta(flat, dpath, "[rank 0] "))
+                    MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            MPI_Barrier(MPI_COMM_WORLD); // all ranks wait for the .dlt to exist
+            primes_file = dpath;
+        }
+        else
+            primes_file = flat;
+    }
 
     // Partition sieve range [65537, 2^32] evenly across MPI ranks.
     const uint64_t RANGE_LO = 65537ULL;
@@ -1057,7 +1175,7 @@ int main(int argc, char *argv[])
     {
         // --all:         challenge_<N>_alg4_<bits>.txt       / modulo_alg4_<bits>.txt
         // --all --multi: challenge_<N>_alg4_multi_<bits>.txt / modulo_alg4_multi_<bits>.txt
-        const char *sizes[] = {KSC_CANONICAL_SIZES_LIST};
+        const char *sizes[] = { KSC_CANONICAL_SIZES_LIST };
         const char *pat = run_all_multi ? "alg4_multi" : "alg4";
         for (int s = 0; s < KSC_N_CANONICAL_SIZES; s++)
         {
@@ -1079,6 +1197,9 @@ int main(int argc, char *argv[])
             }
             else
             {
+                // Plan A (2026-07-17): every challenge 0..n_challenges-1 is a timed
+                // warm run — no separate cold run (merged cbrt cache makes
+                // challenge_0 statistically identical; cbrt_misses=0 for all runs).
                 benchmark_results_t combined;
                 bool has_data = false;
                 for (int ci = 0; ci < n_challenges; ci++)
@@ -1090,11 +1211,7 @@ int main(int argc, char *argv[])
                     if (rank == 0)
                     {
                         FILE *fck = fopen(cfi, "r");
-                        if (fck)
-                        {
-                            fclose(fck);
-                            exists = 1;
-                        }
+                        if (fck) { fclose(fck); exists = 1; }
                     }
                     MPI_Bcast(&exists, 1, MPI_INT, 0, MPI_COMM_WORLD);
                     if (!exists)
@@ -1108,15 +1225,8 @@ int main(int argc, char *argv[])
                                                     sp_count, sp, my_lo, my_hi,
                                                     method, primes_file, exponent,
                                                     cbrt_dir, skip_powm);
-                    if (!has_data)
-                    {
-                        combined = std::move(r);
-                        has_data = true;
-                    }
-                    else
-                    {
-                        merge_benchmark_results(combined, r);
-                    }
+                    if (!has_data) { combined = std::move(r); has_data = true; }
+                    else           { merge_benchmark_results(combined, r); }
                 }
                 if (has_data && rank == 0 && jf_ptr)
                     write_benchmark_json(jf_ptr, combined);
@@ -1135,4 +1245,4 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-// Edit: 2026-07-17
+// Edit: 2026-07-22

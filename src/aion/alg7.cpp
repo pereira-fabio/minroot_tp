@@ -64,9 +64,9 @@
 
 // run_method_t defined in k_common.h
 
-#define ALG7_R_DEFAULT (1u << 20) // 2^20 candidates — 4 MB log_sum per rank
-#define ALG7_SLACK 65.0f          // allow cofactor up to 2^65 (alg3-style)
-#define ALG7_MAX_ATTEMPTS 16      // outer blinding retries if no hit found
+#define ALG7_R_DEFAULT   (1u << 20) // 2^20 candidates — 4 MB log_sum per rank
+#define ALG7_SLACK       65.0f      // allow cofactor up to 2^65 (alg3-style)
+#define ALG7_MAX_ATTEMPTS 16        // outer blinding retries if no hit found
 // kprint_stat() defined in k_common.h
 
 // ---------------------------------------------------------------------------
@@ -76,22 +76,15 @@
 
 static uint64_t mod_inv_u64(uint64_t a, uint64_t m)
 {
-    if (a == 0 || m <= 1)
-        return 0;
+    if (a == 0 || m <= 1) return 0;
     int64_t old_r = (int64_t)a, r = (int64_t)m;
-    int64_t old_s = 1, s = 0;
-    while (r != 0)
-    {
+    int64_t old_s = 1,          s = 0;
+    while (r != 0) {
         int64_t q = old_r / r;
-        int64_t tr = r;
-        r = old_r - q * r;
-        old_r = tr;
-        int64_t ts = s;
-        s = old_s - q * s;
-        old_s = ts;
+        int64_t tr = r;  r = old_r - q * r;  old_r = tr;
+        int64_t ts = s;  s = old_s - q * s;  old_s = ts;
     }
-    if (old_r != 1)
-        return 0;
+    if (old_r != 1) return 0;
     return old_s < 0 ? (uint64_t)(old_s + (int64_t)m) : (uint64_t)old_s;
 }
 
@@ -111,8 +104,7 @@ static benchmark_results_t run_one(
     uint32_t R,
     const char *cbrt_dir = KSC_CBRT_DIR)
 {
-    if (rank == 0)
-    {
+    if (rank == 0) {
         printf("\n=== %s ===\n", challenge_file);
         fflush(stdout);
     }
@@ -121,15 +113,13 @@ static benchmark_results_t run_one(
     mpz_inits(challenge, modulo, result, NULL);
 
     if (!ksc_broadcast_challenge_modulo(challenge, modulo,
-                                        challenge_file, modulo_file, rank))
-    {
+                                         challenge_file, modulo_file, rank)) {
         mpz_clears(challenge, modulo, result, NULL);
         return benchmark_results_t{};
     }
 
     ksc_print_challenge_header(challenge, modulo, rank, nranks);
-    if (rank == 0)
-    {
+    if (rank == 0) {
         printf("R (candidates/pass): %u = 2^%.1f  log_sum_size: %.1f MB\n",
                R, log2((double)R), (double)R * sizeof(float) / 1e6);
         fflush(stdout);
@@ -146,7 +136,7 @@ static benchmark_results_t run_one(
     // the per-rank build (below) if it is absent.
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt_alg7", rank); // per-rank fallback
+                             cbrt_dir, modulo_file, ".cbrt_alg7", rank);  // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
@@ -171,14 +161,12 @@ static benchmark_results_t run_one(
         (uint32_t)my_lo,
         (uint32_t)(my_hi > (uint64_t)UINT32_MAX ? UINT32_MAX : my_hi));
 
-    if (!prime_slice)
-    {
+    if (!prime_slice) {
         fprintf(stderr, "[rank %d] Failed to load prime slice [%llu, %llu]\n",
                 rank, (unsigned long long)my_lo, (unsigned long long)my_hi);
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
-    if (rank == 0)
-    {
+    if (rank == 0) {
         printf("Prime slice loaded: %llu primes in [%llu, %llu]\n",
                (unsigned long long)slice_count,
                (unsigned long long)my_lo,
@@ -204,14 +192,12 @@ static benchmark_results_t run_one(
     // (Fix C: hoist the per-prime modular inverse out of the hot loop).
     uint32_t *M_mod_q = (uint32_t *)malloc(slice_count * sizeof(uint32_t));
     uint64_t *M_inv_q = (uint64_t *)malloc(slice_count * sizeof(uint64_t));
-    if ((!M_mod_q || !M_inv_q) && slice_count > 0)
-    {
+    if ((!M_mod_q || !M_inv_q) && slice_count > 0) {
         fprintf(stderr, "[rank %d] OOM for M_mod_q/M_inv_q (%llu entries)\n",
                 rank, (unsigned long long)slice_count);
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
-    if (rank == 0)
-    {
+    if (rank == 0) {
         printf("Precomputing M mod q and (M mod q)^-1 for %llu primes...",
                (unsigned long long)slice_count);
         fflush(stdout);
@@ -220,27 +206,20 @@ static benchmark_results_t run_one(
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-    for (uint64_t i = 0; i < slice_count; i++)
-    {
+    for (uint64_t i = 0; i < slice_count; i++) {
         uint32_t mm = (uint32_t)mpz_tdiv_ui(modulo, (unsigned long)prime_slice[i]);
         M_mod_q[i] = mm;
         M_inv_q[i] = mod_inv_u64((uint64_t)mm, (uint64_t)prime_slice[i]);
     }
-    if (rank == 0)
-    {
-        printf(" done.\n");
-        fflush(stdout);
-    }
+    if (rank == 0) { printf(" done.\n"); fflush(stdout); }
     MPI_Barrier(MPI_COMM_WORLD);
 
     // ---- Blinding table (outer retries if no hit in first R candidates) ----
     const int BLIND_TABLE_SIZE = ALG7_MAX_ATTEMPTS - 1;
     blinding_pair_t *blind_table = NULL;
-    if (rank == 0)
-    {
+    if (rank == 0) {
         blind_table = kf_blinding_table_alloc(BLIND_TABLE_SIZE, modulo, exponent);
-        if (!blind_table)
-        {
+        if (!blind_table) {
             fprintf(stderr, "[rank 0] Failed to allocate blinding table\n");
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
@@ -248,8 +227,7 @@ static benchmark_results_t run_one(
 
     // ---- log_sum array ----
     float *log_sum = (float *)calloc(R, sizeof(float));
-    if (!log_sum)
-    {
+    if (!log_sum) {
         fprintf(stderr, "[rank %d] OOM for log_sum[%u]\n", rank, R);
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
@@ -258,11 +236,11 @@ static benchmark_results_t run_one(
     mpz_init(blinded_challenge);
     mpz_init_set_ui(cofactor, 1);
 
-    bench_accum_t fac_acc = {0, 0};   // inverted sieve + allreduce + candidate scan
-    bench_accum_t loc_acc = {0, 0};   // local cbrt (phase 2)
-    bench_accum_t gat_acc = {0, 0};   // MPI gather (phase 2)
-    bench_accum_t com_acc = {0, 0};   // combine + unblind (phase 2)
-    bench_accum_t recon_acc = {0, 0}; // phase 2 total (fac2 + loc + gat + com)
+    bench_accum_t fac_acc = {0, 0}; // inverted sieve + allreduce + candidate scan
+    bench_accum_t loc_acc    = {0, 0}; // local cbrt (phase 2)
+    bench_accum_t gat_acc    = {0, 0}; // MPI gather (phase 2)
+    bench_accum_t com_acc    = {0, 0}; // combine + unblind (phase 2)
+    bench_accum_t recon_acc  = {0, 0}; // phase 2 total (fac2 + loc + gat + com)
 
     int n_threads_json = 1;
 #ifdef _OPENMP
@@ -276,26 +254,26 @@ static benchmark_results_t run_one(
     ksc_init_json_results(&json_results, 32, mname,
                           nranks, n_threads_json, challenge, rank);
     json_results.config.algorithm = "alg7";
-    json_results.config.exponent = exponent;
+    json_results.config.exponent  = exponent;
 
     // Per-challenge context passed to ksc_reconstruct_y (Phase 2).
     ksc_recon_ctx_t recon_ctx;
-    recon_ctx.modulo = &modulo;
-    recon_ctx.cbrt_bytes = cbrt_bytes;
-    recon_ctx.e_inv = &e_inv;
-    recon_ctx.cache = &local_cbrt_cache;
-    recon_ctx.cache_dirty = &cbrt_cache_dirty;
-    recon_ctx.my_lo = my_lo;
-    recon_ctx.my_hi = my_hi;
-    recon_ctx.sp_count = sp_count;
-    recon_ctx.sp = sp;
-    recon_ctx.blind_table = blind_table;
+    recon_ctx.modulo           = &modulo;
+    recon_ctx.cbrt_bytes       = cbrt_bytes;
+    recon_ctx.e_inv            = &e_inv;
+    recon_ctx.cache            = &local_cbrt_cache;
+    recon_ctx.cache_dirty      = &cbrt_cache_dirty;
+    recon_ctx.my_lo            = my_lo;
+    recon_ctx.my_hi            = my_hi;
+    recon_ctx.sp_count         = sp_count;
+    recon_ctx.sp               = sp;
+    recon_ctx.blind_table      = blind_table;
     recon_ctx.blind_table_size = BLIND_TABLE_SIZE;
-    recon_ctx.rank = rank;
-    recon_ctx.nranks = nranks;
-    recon_ctx.method = method;
-    recon_ctx.prime_slice = prime_slice;
-    recon_ctx.slice_count = (int64_t)slice_count;
+    recon_ctx.rank             = rank;
+    recon_ctx.nranks           = nranks;
+    recon_ctx.method           = method;
+    recon_ctx.prime_slice      = prime_slice;
+    recon_ctx.slice_count      = (int64_t)slice_count;
 
     size_t blinded_nbytes = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
     unsigned char *blinded_buf = (unsigned char *)malloc(blinded_nbytes);
@@ -319,23 +297,16 @@ static benchmark_results_t run_one(
         for (attempt = 0; attempt < ALG7_MAX_ATTEMPTS && found_r < 0; attempt++)
         {
             // -- Rank 0 computes blinded challenge, exports to buffer --
-            if (rank == 0)
-            {
-                if (attempt == 0)
-                {
+            if (rank == 0) {
+                if (attempt == 0) {
                     mpz_set(blinded_challenge, challenge);
-                }
-                else
-                {
+                } else {
                     int idx = attempt - 1;
-                    if (idx < BLIND_TABLE_SIZE)
-                    {
+                    if (idx < BLIND_TABLE_SIZE) {
                         mpz_mul(blinded_challenge, challenge,
                                 blind_table[idx].r_blind);
                         mpz_mod(blinded_challenge, blinded_challenge, modulo);
-                    }
-                    else
-                    {
+                    } else {
                         mpz_set(blinded_challenge, challenge);
                     }
                 }
@@ -343,8 +314,7 @@ static benchmark_results_t run_one(
                 size_t written = 0;
                 unsigned char *tmp = (unsigned char *)mpz_export(
                     NULL, &written, 1, 1, 0, 0, blinded_challenge);
-                if (tmp && written > 0 && written <= blinded_nbytes)
-                {
+                if (tmp && written > 0 && written <= blinded_nbytes) {
                     memcpy(blinded_buf + blinded_nbytes - written, tmp, written);
                     free(tmp);
                 }
@@ -372,35 +342,28 @@ static benchmark_results_t run_one(
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 2048)
 #endif
-            for (uint64_t i = 0; i < slice_count; i++)
-            {
+            for (uint64_t i = 0; i < slice_count; i++) {
                 uint64_t q = (uint64_t)prime_slice[i];
                 uint64_t M_mod = (uint64_t)M_mod_q[i];
-                if (M_mod == 0)
-                    continue; // q | M (can't happen: M is prime, q < M)
+                if (M_mod == 0) continue; // q | M (can't happen: M is prime, q < M)
 
                 uint64_t M_inv = M_inv_q[i]; // precomputed once (Fix C)
-                if (M_inv == 0)
-                    continue;
+                if (M_inv == 0) continue;
 
                 uint64_t x_mod_q = (uint64_t)mpz_tdiv_ui(blinded_challenge, q);
 
                 // r_start = (-(x_mod_q * M_inv) mod q + q) mod q
                 uint64_t r_start;
-                if (x_mod_q == 0)
-                {
+                if (x_mod_q == 0) {
                     r_start = 0;
-                }
-                else
-                {
+                } else {
                     __uint128_t prod = (__uint128_t)x_mod_q * M_inv;
-                    uint64_t pm = (uint64_t)(prod % q);
+                    uint64_t    pm   = (uint64_t)(prod % q);
                     r_start = (pm == 0) ? 0 : (q - pm);
                 }
 
                 float lq = log2f((float)q);
-                for (uint64_t r = r_start; r < (uint64_t)R; r += q)
-                {
+                for (uint64_t r = r_start; r < (uint64_t)R; r += q) {
 #ifdef _OPENMP
 #pragma omp atomic
 #endif
@@ -415,20 +378,17 @@ static benchmark_results_t run_one(
             // -- Scan for smooth candidate --
             // Threshold: log2(y_r) - SLACK where y_r = blinded + r*M
             // blinded < M, so log2(y_r) <= log2_M + log2f(r+1)
-            for (uint32_t r = 0; r < R; r++)
-            {
+            for (uint32_t r = 0; r < R; r++) {
                 float log2_y_r = (r == 0)
-                                     ? log2_M
-                                     : (log2_M + log2f((float)(r + 1)));
-                if (log_sum[r] >= log2_y_r - ALG7_SLACK)
-                {
+                    ? log2_M
+                    : (log2_M + log2f((float)(r + 1)));
+                if (log_sum[r] >= log2_y_r - ALG7_SLACK) {
                     found_r = (int)r;
                     break;
                 }
             }
 
-            if (rank == 0 && bench == 0)
-            {
+            if (rank == 0 && bench == 0) {
                 printf("Phase 1 attempt %d: %s\n", attempt,
                        found_r >= 0 ? "candidate found" : "no candidate");
                 fflush(stdout);
@@ -437,23 +397,19 @@ static benchmark_results_t run_one(
 
         auto t_phase1_end = std::chrono::high_resolution_clock::now();
         double phase1_dt = std::chrono::duration<double, std::milli>(
-                               t_phase1_end - t_phase1_start)
-                               .count();
+            t_phase1_end - t_phase1_start).count();
 
-        if (rank == 0 && bench > 0)
-        {
+        if (rank == 0 && bench > 0) {
             accum_record(&fac_acc, phase1_dt);
             json_results.timing.factor_times.push_back(phase1_dt);
             json_results.timing.blinding_attempts.push_back(attempt);
         }
 
-        if (found_r < 0)
-        {
+        if (found_r < 0) {
             if (rank == 0)
                 fprintf(stderr, "[bench %d] No smooth candidate in %d attempts — skipped\n",
                         bench, ALG7_MAX_ATTEMPTS);
-            if (bench > 0)
-            {
+            if (bench > 0) {
                 json_results.timing.recon_times.push_back(0.0);
                 json_results.timing.total_times.push_back(phase1_dt);
                 json_results.hits.hit_type.push_back(0);
@@ -474,8 +430,7 @@ static benchmark_results_t run_one(
         if (found_r > 0)
             mpz_addmul_ui(y_r, modulo, (unsigned long)found_r);
 
-        if (rank == 0 && bench == 0)
-        {
+        if (rank == 0 && bench == 0) {
             printf("Candidate r=%d  y_r=%zu bits\n",
                    found_r, mpz_sizeinbase(y_r, 2));
             fflush(stdout);
@@ -490,8 +445,7 @@ static benchmark_results_t run_one(
             &json_results, &recon_ctx);
         mpz_clear(y_r);
 
-        if (rank == 0 && bench == 0)
-        {
+        if (rank == 0 && bench == 0) {
             int is_smooth = (complete && mpz_cmp_ui(cofactor, 1) == 0);
             printf("Cofactor: %s\n",
                    complete ? (is_smooth ? "B-smooth" : "almost-smooth")
@@ -499,10 +453,8 @@ static benchmark_results_t run_one(
             fflush(stdout);
         }
 
-        if (!complete)
-        {
-            if (bench > 0)
-            {
+        if (!complete) {
+            if (bench > 0) {
                 json_results.timing.recon_times.push_back(fac2_dt);
                 json_results.timing.total_times.push_back(phase1_dt + fac2_dt);
                 json_results.hits.hit_type.push_back(0);
@@ -512,19 +464,16 @@ static benchmark_results_t run_one(
             continue;
         }
 
-        if (bench > 0 && rank == 0)
-        {
+        if (bench > 0 && rank == 0) {
             json_results.hits.hit_type.push_back(mpz_cmp_ui(cofactor, 1) == 0 ? 1 : 2);
             json_results.hits.cofactor_bits.push_back((int)mpz_sizeinbase(cofactor, 2));
             json_results.hits.medium_factor_count.push_back(
                 mpz_cmp_ui(cofactor, 1) == 0 ? 0 : 1);
         }
 
-        if (rank == 0)
-        {
+        if (rank == 0) {
             accum_record(&recon_acc, recon_dt);
-            if (bench > 0)
-            {
+            if (bench > 0) {
                 json_results.timing.recon_times.push_back(recon_dt);
                 json_results.timing.total_times.push_back(phase1_dt + recon_dt);
             }
@@ -534,8 +483,7 @@ static benchmark_results_t run_one(
     free(blinded_buf);
 
     // ---- Timing report (one timed run per challenge) ----
-    if (rank == 0)
-    {
+    if (rank == 0) {
         printf("\n");
         printf("Phase 1 (inv sieve): %.3f ms\n", fac_acc.sum);
         printf("Phase 2 (recon):     %.3f ms\n", recon_acc.sum);
@@ -561,7 +509,7 @@ static benchmark_results_t run_one(
     mpz_clear(cofactor);
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
-    if (!used_shared && cbrt_cache_dirty) // merged cache is read-only
+    if (!used_shared && cbrt_cache_dirty)   // merged cache is read-only
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
     kf_cbrt_cache_clear(&local_cbrt_cache);
     mpz_clear(e_inv);
@@ -597,8 +545,7 @@ int main(int argc, char *argv[])
 {
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
-    if (provided < MPI_THREAD_FUNNELED)
-    {
+    if (provided < MPI_THREAD_FUNNELED) {
         fprintf(stderr, "Error: MPI_THREAD_FUNNELED not supported\n");
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
@@ -608,105 +555,63 @@ int main(int argc, char *argv[])
     MPI_Comm_size(MPI_COMM_WORLD, &nranks);
 
     const char *challenge_file = NULL;
-    const char *modulo_file = NULL;
-    const char *data_dir = "data/challenges/alg3"; // reuse alg3 challenges
-    const char *json_file = NULL;
-    const char *cbrt_dir = KSC_CBRT_DIR; // per-node isolation via --cbrt-dir
-    int run_all = 0;
-    int n_challenges = 1; // >1 (with --all): all N challenges timed + averaged
+    const char *modulo_file    = NULL;
+    const char *data_dir       = "data/challenges/alg3"; // reuse alg3 challenges
+    const char *json_file      = NULL;
+    const char *cbrt_dir       = KSC_CBRT_DIR; // per-node isolation via --cbrt-dir
+    int run_all        = 0;
+    int n_challenges   = 1;   // >1 (with --all): all N challenges timed + averaged
     run_method_t method = METHOD_SIEVE;
     unsigned long exponent = 3;
     uint32_t R = ALG7_R_DEFAULT;
 
     int positional = 0;
-    for (int argi = 1; argi < argc; argi++)
-    {
-        if (strcmp(argv[argi], "--all") == 0)
-        {
+    for (int argi = 1; argi < argc; argi++) {
+        if (strcmp(argv[argi], "--all") == 0) {
             run_all = 1;
-        }
-        else if (strcmp(argv[argi], "--data") == 0 && argi + 1 < argc)
-        {
+        } else if (strcmp(argv[argi], "--data") == 0 && argi + 1 < argc) {
             data_dir = argv[++argi];
-        }
-        else if (strcmp(argv[argi], "--method") == 0 && argi + 1 < argc)
-        {
+        } else if (strcmp(argv[argi], "--method") == 0 && argi + 1 < argc) {
             const char *m = argv[++argi];
-            if (strcmp(m, "sieve") == 0)
-                method = METHOD_SIEVE;
-            else if (strcmp(m, "table") == 0)
-                method = METHOD_TABLE;
-            else if (strcmp(m, "powm") == 0)
-                method = METHOD_POWM;
-            else
-            {
+            if (strcmp(m, "sieve") == 0)       method = METHOD_SIEVE;
+            else if (strcmp(m, "table") == 0)  method = METHOD_TABLE;
+            else if (strcmp(m, "powm") == 0)   method = METHOD_POWM;
+            else {
                 if (rank == 0)
                     fprintf(stderr, "Unknown --method '%s' (use sieve, table, or powm)\n", m);
-                MPI_Finalize();
-                return 1;
+                MPI_Finalize(); return 1;
             }
-        }
-        else if (strcmp(argv[argi], "--json") == 0 && argi + 1 < argc)
-        {
+        } else if (strcmp(argv[argi], "--json") == 0 && argi + 1 < argc) {
             json_file = argv[++argi];
-        }
-        else if (strcmp(argv[argi], "--cbrt-dir") == 0 && argi + 1 < argc)
-        {
+        } else if (strcmp(argv[argi], "--cbrt-dir") == 0 && argi + 1 < argc) {
             cbrt_dir = argv[++argi];
-        }
-        else if (strcmp(argv[argi], "--n-challenges") == 0 && argi + 1 < argc)
-        {
+        } else if (strcmp(argv[argi], "--n-challenges") == 0 && argi + 1 < argc) {
             n_challenges = atoi(argv[++argi]);
-            if (n_challenges < 1)
-                n_challenges = 1;
-        }
-        else if (strcmp(argv[argi], "--exponent") == 0 && argi + 1 < argc)
-        {
+            if (n_challenges < 1) n_challenges = 1;
+        } else if (strcmp(argv[argi], "--exponent") == 0 && argi + 1 < argc) {
             exponent = (unsigned long)atol(argv[++argi]);
-        }
-        else if (strcmp(argv[argi], "--R") == 0 && argi + 1 < argc)
-        {
+        } else if (strcmp(argv[argi], "--R") == 0 && argi + 1 < argc) {
             long rv = atol(argv[++argi]);
-            if (rv < 1024 || rv > (1 << 24))
-            {
+            if (rv < 1024 || rv > (1 << 24)) {
                 if (rank == 0)
                     fprintf(stderr, "--R must be in [1024, 2^24]\n");
-                MPI_Finalize();
-                return 1;
+                MPI_Finalize(); return 1;
             }
             R = (uint32_t)rv;
-        }
-        else if (argv[argi][0] != '-')
-        {
-            if (positional == 0)
-            {
-                challenge_file = argv[argi];
-                positional++;
+        } else if (argv[argi][0] != '-') {
+            if (positional == 0)      { challenge_file = argv[argi]; positional++; }
+            else if (positional == 1) { modulo_file    = argv[argi]; positional++; }
+            else {
+                if (rank == 0) fprintf(stderr, "Unexpected argument '%s'\n", argv[argi]);
+                MPI_Finalize(); return 1;
             }
-            else if (positional == 1)
-            {
-                modulo_file = argv[argi];
-                positional++;
-            }
-            else
-            {
-                if (rank == 0)
-                    fprintf(stderr, "Unexpected argument '%s'\n", argv[argi]);
-                MPI_Finalize();
-                return 1;
-            }
-        }
-        else
-        {
-            if (rank == 0)
-                fprintf(stderr, "Unknown option '%s'\n", argv[argi]);
-            MPI_Finalize();
-            return 1;
+        } else {
+            if (rank == 0) fprintf(stderr, "Unknown option '%s'\n", argv[argi]);
+            MPI_Finalize(); return 1;
         }
     }
 
-    if (!run_all && (!challenge_file || !modulo_file))
-    {
+    if (!run_all && (!challenge_file || !modulo_file)) {
         if (rank == 0)
             fprintf(stderr,
                     "Usage: alg7_mpi <challenge> <modulo> [--method sieve|table|powm] "
@@ -715,12 +620,10 @@ int main(int argc, char *argv[])
                     "[--R N] [--n-challenges N] [--cbrt-dir DIR] [--json PREFIX]\n"
                     "       (--all writes PREFIX_<size>.json; --n-challenges N: "
                     "all N challenges timed + averaged)\n");
-        MPI_Finalize();
-        return 1;
+        MPI_Finalize(); return 1;
     }
 
-    if (rank == 0)
-    {
+    if (rank == 0) {
         printf("=== alg7_mpi (Algorithm 7 — parallel smoothness test) ===\n");
         printf("MPI ranks:      %d\n", nranks);
 #ifdef _OPENMP
@@ -732,8 +635,7 @@ int main(int argc, char *argv[])
                : method == METHOD_TABLE ? "table"
                                         : "powm");
         printf("R (candidates): %u (2^%.1f)\n", R, log2((double)R));
-        if (run_all)
-            printf("Mode:           --all\n");
+        if (run_all)          printf("Mode:           --all\n");
         fflush(stdout);
     }
 
@@ -741,64 +643,52 @@ int main(int argc, char *argv[])
     unsigned *sp = kf_generate_small_primes(&sp_count);
 
     // Partition sieve range [65537, 2^32] across ranks — same partition as alg3
-    const uint64_t RANGE_LO = 65537ULL;
-    const uint64_t RANGE_HI = (uint64_t)UINT32_MAX;
+    const uint64_t RANGE_LO   = 65537ULL;
+    const uint64_t RANGE_HI   = (uint64_t)UINT32_MAX;
     const uint64_t range_size = RANGE_HI - RANGE_LO + 1;
 
-    uint64_t my_lo = RANGE_LO + (range_size * (uint64_t)rank) / (uint64_t)nranks;
+    uint64_t my_lo = RANGE_LO + (range_size * (uint64_t)rank)       / (uint64_t)nranks;
     uint64_t my_hi = RANGE_LO + (range_size * (uint64_t)(rank + 1)) / (uint64_t)nranks - 1;
-    if (rank == nranks - 1)
-        my_hi = RANGE_HI;
+    if (rank == nranks - 1) my_hi = RANGE_HI;
 
-    if (rank == 0)
-    {
+    if (rank == 0) {
         printf("Prime range/rank: ~%.1fM primes\n\n",
                (double)range_size / nranks / 1e6);
         fflush(stdout);
     }
 
-    if (run_all)
-    {
-        const char *sizes[] = {KSC_CANONICAL_SIZES_LIST};
+    if (run_all) {
+        const char *sizes[] = { KSC_CANONICAL_SIZES_LIST };
         int nsizes = KSC_N_CANONICAL_SIZES;
-        for (int s = 0; s < nsizes; s++)
-        {
+        for (int s = 0; s < nsizes; s++) {
             char cf[512], mf[512], jf[600];
             const char *jf_ptr = NULL;
             snprintf(mf, sizeof(mf), "%s/modulo_alg3_%s.txt", data_dir, sizes[s]);
-            if (json_file)
-            {
+            if (json_file) {
                 snprintf(jf, sizeof(jf), "%s_%s.json", json_file, sizes[s]);
                 jf_ptr = jf;
             }
-            if (n_challenges == 1)
-            {
+            if (n_challenges == 1) {
                 snprintf(cf, sizeof(cf), "%s/challenge_0_alg3_%s.txt", data_dir, sizes[s]);
                 solve_one(rank, nranks, cf, mf,
                           sp_count, sp, my_lo, my_hi, method, exponent, R, cbrt_dir, jf_ptr);
-            }
-            else
-            {
+            } else {
+                // Plan A (2026-07-17): every challenge 0..n_challenges-1 is a timed
+                // warm run — no separate cold run (merged cbrt cache makes
+                // challenge_0 statistically identical; cbrt_misses=0 for all runs).
                 benchmark_results_t combined;
                 bool has_data = false;
-                for (int ci = 0; ci < n_challenges; ci++)
-                {
+                for (int ci = 0; ci < n_challenges; ci++) {
                     char cfi[512];
                     snprintf(cfi, sizeof(cfi), "%s/challenge_%d_alg3_%s.txt",
                              data_dir, ci, sizes[s]);
                     int exists = 0;
-                    if (rank == 0)
-                    {
+                    if (rank == 0) {
                         FILE *fck = fopen(cfi, "r");
-                        if (fck)
-                        {
-                            fclose(fck);
-                            exists = 1;
-                        }
+                        if (fck) { fclose(fck); exists = 1; }
                     }
                     MPI_Bcast(&exists, 1, MPI_INT, 0, MPI_COMM_WORLD);
-                    if (!exists)
-                    {
+                    if (!exists) {
                         if (rank == 0)
                             printf("  [SKIP] challenge_%d not found for size %s\n",
                                    ci, sizes[s]);
@@ -807,25 +697,15 @@ int main(int argc, char *argv[])
                     benchmark_results_t r = run_one(rank, nranks, cfi, mf,
                                                     sp_count, sp, my_lo, my_hi,
                                                     method, exponent, R, cbrt_dir);
-                    if (!has_data)
-                    {
-                        combined = std::move(r);
-                        has_data = true;
-                    }
-                    else
-                    {
-                        merge_benchmark_results(combined, r);
-                    }
+                    if (!has_data) { combined = std::move(r); has_data = true; }
+                    else           { merge_benchmark_results(combined, r); }
                 }
-                if (has_data && rank == 0 && jf_ptr)
-                {
+                if (has_data && rank == 0 && jf_ptr) {
                     write_benchmark_json(jf_ptr, combined);
                 }
             }
         }
-    }
-    else
-    {
+    } else {
         solve_one(rank, nranks, challenge_file, modulo_file,
                   sp_count, sp, my_lo, my_hi, method, exponent, R, cbrt_dir, json_file);
     }
@@ -834,5 +714,6 @@ int main(int argc, char *argv[])
     MPI_Finalize();
     return 0;
 }
+
 
 // Edit: 2026-07-17

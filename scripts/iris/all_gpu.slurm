@@ -30,6 +30,14 @@
 #   rsync -av <aion>:<proj>/data/challenges/  <iris>:<proj>/data/challenges/
 #   rsync <aion>:<proj>/data/k32_primes.bin   <iris>:<proj>/data/k32_primes.bin
 #   rsync <aion>:<proj>/data/k35_upper_primes.bin <iris>:<proj>/data/k35_upper_primes.bin
+#
+# NOTE — the delta-encoded prime table (--table-format delta on the CPU solvers)
+# is CPU-ONLY. The CUDA solvers here always use the flat table; there is no
+# --table-format flag on the GPU side, so nothing to toggle. The GPU delta
+# decode kernel (each thread block decodes its delta block into shared memory,
+# so a 4-way k32 slice ~51 MB lives in the L40's ~96 MB L2) is future work — it
+# is the step that would test the predicted L40 L2-residency win for k32.
+# See wiki/implementation/delta-prime-table.md ("Still to do — GPU").
 # ---------------------------------------------------------------------------
 
 # Canonical sizes matching src/common/sizes.h KSC_CANONICAL_SIZES_LIST
@@ -337,4 +345,4 @@ echo "Results in: $IRIS_BASE/alg{2,3,4,7}/G${N_GPUS}/"
 find "$ALG2_DIR" "$ALG3_DIR" "$ALG4_DIR" "$ALG7_DIR" -name "*_${SLURM_JOB_ID}_*.json" 2>/dev/null | wc -l | xargs -I{} echo "  {} JSON files written"
 echo "Done — check all_gpu_${SLURM_JOB_ID}.out"
 
-# Edit: 2026-07-11
+# Edit: 2026-07-22

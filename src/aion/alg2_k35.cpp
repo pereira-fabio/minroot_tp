@@ -67,6 +67,7 @@
 static const uint64_t RANGE_LO = 65537ULL;
 static const uint64_t RANGE_HI = (1ULL << 35) + 1024ULL;
 
+
 // ---------------------------------------------------------------------------
 // Small prime generator (same as k32.cpp)
 // ---------------------------------------------------------------------------
@@ -107,8 +108,7 @@ static const uint64_t RANGE_HI = (1ULL << 35) + 1024ULL;
 // table (uint32 lower range + uint64 upper range above 2^32).
 // ---------------------------------------------------------------------------
 
-typedef struct
-{
+typedef struct {
     uint64_t my_lo, my_hi;
     int sp_count;
     const unsigned *sp;
@@ -116,7 +116,9 @@ typedef struct
     uint32_t *k32_slice;
     uint64_t k32_slice_count;
     uint64_t *k35u_slice;
-    int64_t k35u_slice_count;
+    int64_t  k35u_slice_count;
+    const kf_delta_slice_t *k32_delta;  // non-null => delta table, lower range
+    const kf_delta_slice_t *k35u_delta; // non-null => delta table, upper range
 } k35_ctx_t;
 
 static void k35_factor_fn(
@@ -151,11 +153,17 @@ static void k35_factor_fn(
 
     if (c->method == METHOD_TABLE)
     {
-        if (c->k32_slice && c->k32_slice_count > 0)
+        // lower range [65537, 2^32]
+        if (c->k32_delta)
+            kf_trial_divide_delta(blinded, c->k32_delta, out);
+        else if (c->k32_slice && c->k32_slice_count > 0)
             kf_trial_divide_table(blinded, c->k32_slice, c->k32_slice_count, out);
-        if (c->k35u_slice && c->k35u_slice_count > 0)
+        // upper range (2^32, 2^35]
+        if (c->k35u_delta)
+            kf_trial_divide_delta(blinded, c->k35u_delta, out);
+        else if (c->k35u_slice && c->k35u_slice_count > 0)
             kf_trial_divide_table_u64(blinded, c->k35u_slice,
-                                      c->k35u_slice_count, out);
+                                       c->k35u_slice_count, out);
     }
     else // METHOD_SIEVE
     {
@@ -165,11 +173,11 @@ static void k35_factor_fn(
 #endif
         bool do_thr = (bench == 1 && rank == 0);
         std::vector<int64_t> thr_tested(do_thr ? nT : 0, 0);
-        std::vector<int> thr_found(do_thr ? nT : 0, 0);
+        std::vector<int>     thr_found (do_thr ? nT : 0, 0);
         kf_trial_divide_sieve(blinded, c->my_lo, c->my_hi,
                               c->sp_count, c->sp, out,
                               do_thr ? thr_tested.data() : nullptr,
-                              do_thr ? thr_found.data() : nullptr,
+                              do_thr ? thr_found.data()  : nullptr,
                               nT);
         if (do_thr)
         {
@@ -186,6 +194,17 @@ static void k35_factor_fn(
 // ---------------------------------------------------------------------------
 // solve_one
 // ---------------------------------------------------------------------------
+
+// Derive a delta table path from a flat path: <name>.bin -> <name>.dlt
+static void k35_delta_path(char *dst, size_t n, const char *flat)
+{
+    snprintf(dst, n, "%s", flat);
+    size_t L = strlen(dst);
+    if (L > 4 && strcmp(dst + L - 4, ".bin") == 0)
+        snprintf(dst + L - 4, 5, ".dlt");
+    else if (L + 5 <= n)
+        snprintf(dst + L, 5, ".dlt");
+}
 
 static benchmark_results_t run_one(
     int rank, int nranks,
@@ -205,14 +224,13 @@ static benchmark_results_t run_one(
                                         challenge_file, modulo_file, rank))
     {
         mpz_clears(challenge, modulo, result, NULL);
-        return benchmark_results_t{}; // unreachable — ksc_broadcast aborts
+        return benchmark_results_t{};  // unreachable — ksc_broadcast aborts
     }
 
     if (rank == 0)
     {
-        const char *mname = method == METHOD_TABLE  ? "table"
-                            : method == METHOD_POWM ? "powm"
-                                                    : "sieve";
+        const char *mname = method == METHOD_TABLE ? "table"
+                          : method == METHOD_POWM  ? "powm" : "sieve";
         printf("\n=== %s  [%s | %dr×%dt | %zub] ===\n",
                challenge_file, mname, nranks,
 #ifdef _OPENMP
@@ -235,7 +253,7 @@ static benchmark_results_t run_one(
     // the per-rank build only if it is absent (a brand-new modulus).
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt35", rank); // per-rank fallback
+                             cbrt_dir, modulo_file, ".cbrt35", rank);  // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
@@ -257,8 +275,8 @@ static benchmark_results_t run_one(
                 &local_cbrt_cache, &cbrt_cache_dirty, cbrt_cache_path,
                 challenge, modulo, e_inv,
                 my_lo, my_hi, sp_count, sp,
-                NULL, 0,     // k35 always uses sieve for precompute pass
-                true, rank); // check sp[] below 65537 on rank 0
+                NULL, 0,      // k35 always uses sieve for precompute pass
+                true, rank);  // check sp[] below 65537 on rank 0
     }
 
     const int BLIND_TABLE_SIZE = 255;
@@ -287,36 +305,85 @@ static benchmark_results_t run_one(
     ksc_init_json_results(&json_results, 35, mname35,
                           nranks, n_threads_json, challenge, rank);
     json_results.config.algorithm = "k35";
-    json_results.config.exponent = exponent;
+    json_results.config.exponent  = exponent;
 
-    // Load k35 prime slices for --method table
+    // Load k35 prime slices for --method table.  The upper file's magic selects
+    // the format for BOTH ranges: main passes either the flat .bin or the delta
+    // .dlt upper path, and the lower range follows suit (its .dlt sibling is
+    // derived here).  This keeps flat and delta from ever mixing.
     uint32_t *k32_slice = nullptr;
-    uint64_t k32_slice_count = 0;
+    uint64_t  k32_slice_count = 0;
     uint64_t *k35u_slice = nullptr;
-    int64_t k35u_slice_count = 0;
+    int64_t   k35u_slice_count = 0;
+    kf_delta_slice_t k32_delta, k35u_delta;
+    memset(&k32_delta, 0, sizeof(k32_delta));
+    memset(&k35u_delta, 0, sizeof(k35u_delta));
+    bool have_k32_delta = false, have_k35u_delta = false;
     if (method == METHOD_TABLE && primes_upper_file)
     {
-        const char *k32_path = ksc_ensure_k32_primes(sp_count, sp, rank);
-        if (my_lo <= (uint64_t)UINT32_MAX)
+        bool is_delta = false;
+        FILE *uf = fopen(primes_upper_file, "rb");
+        if (uf)
         {
-            uint64_t k32_hi = std::min(my_hi, (uint64_t)UINT32_MAX);
-            k32_slice = kf_load_prime_slice(&k32_slice_count, k32_path,
-                                            (uint32_t)my_lo, (uint32_t)k32_hi);
+            uint64_t m = 0;
+            if (fread(&m, 8, 1, uf) == 1 &&
+                (m == KF_DELTA_MAGIC_U32 || m == KF_DELTA_MAGIC_U64))
+                is_delta = true;
+            fclose(uf);
         }
-        if (my_hi > (uint64_t)UINT32_MAX)
+        const char *k32_path = ksc_ensure_k32_primes(sp_count, sp, rank);
+        if (is_delta)
         {
-            uint64_t k35u_lo = std::max(my_lo, (uint64_t)UINT32_MAX + 1);
-            k35u_slice = kf_load_prime_slice_u64(&k35u_slice_count,
-                                                 primes_upper_file,
-                                                 k35u_lo, my_hi);
+            char k32_dlt[512];
+            k35_delta_path(k32_dlt, sizeof(k32_dlt), k32_path);
+            if (my_lo <= (uint64_t)UINT32_MAX)
+            {
+                uint64_t k32_hi = std::min(my_hi, (uint64_t)UINT32_MAX);
+                if (!kf_load_delta_slice(&k32_delta, k32_dlt, my_lo, k32_hi))
+                {
+                    fprintf(stderr, "[rank %d] Failed to load k32 delta slice %s\n",
+                            rank, k32_dlt);
+                    MPI_Abort(MPI_COMM_WORLD, 1);
+                }
+                have_k32_delta = true;
+            }
+            if (my_hi > (uint64_t)UINT32_MAX)
+            {
+                uint64_t k35u_lo = std::max(my_lo, (uint64_t)UINT32_MAX + 1);
+                if (!kf_load_delta_slice(&k35u_delta, primes_upper_file, k35u_lo, my_hi))
+                {
+                    fprintf(stderr, "[rank %d] Failed to load k35u delta slice %s\n",
+                            rank, primes_upper_file);
+                    MPI_Abort(MPI_COMM_WORLD, 1);
+                }
+                have_k35u_delta = true;
+            }
+        }
+        else
+        {
+            if (my_lo <= (uint64_t)UINT32_MAX)
+            {
+                uint64_t k32_hi = std::min(my_hi, (uint64_t)UINT32_MAX);
+                k32_slice = kf_load_prime_slice(&k32_slice_count, k32_path,
+                                                (uint32_t)my_lo, (uint32_t)k32_hi);
+            }
+            if (my_hi > (uint64_t)UINT32_MAX)
+            {
+                uint64_t k35u_lo = std::max(my_lo, (uint64_t)UINT32_MAX + 1);
+                k35u_slice = kf_load_prime_slice_u64(&k35u_slice_count,
+                                                      primes_upper_file,
+                                                      k35u_lo, my_hi);
+            }
         }
     }
 
     // ---- Strategy + shared bench loop ----
-    k35_ctx_t k35_ctx = {my_lo, my_hi, sp_count, sp, method,
-                         k32_slice, k32_slice_count,
-                         k35u_slice, k35u_slice_count};
-    ksc_factor_strategy_t strategy = {k35_factor_fn, NULL, false, &k35_ctx};
+    k35_ctx_t k35_ctx = { my_lo, my_hi, sp_count, sp, method,
+                           k32_slice, k32_slice_count,
+                           k35u_slice, k35u_slice_count,
+                           have_k32_delta ? &k32_delta : nullptr,
+                           have_k35u_delta ? &k35u_delta : nullptr };
+    ksc_factor_strategy_t strategy = { k35_factor_fn, NULL, false, &k35_ctx };
 
     ksc_run_bench_loop(
         result, method,
@@ -368,10 +435,14 @@ static benchmark_results_t run_one(
 
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
-    if (!used_shared && cbrt_cache_dirty) // merged cache is read-only
+    if (!used_shared && cbrt_cache_dirty)   // merged cache is read-only
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
     free(k32_slice);
     free(k35u_slice);
+    if (have_k32_delta)
+        kf_delta_slice_free(&k32_delta);
+    if (have_k35u_delta)
+        kf_delta_slice_free(&k35u_delta);
     kf_cbrt_cache_clear(&local_cbrt_cache);
     mpz_clear(e_inv);
     mpz_clears(challenge, modulo, result, NULL);
@@ -398,6 +469,31 @@ static int solve_one(
     if (rank == 0 && json_output_file && json_output_file[0] != '\0')
         write_benchmark_json(json_output_file, r);
     return 1;
+}
+
+// --table-format delta: ensure both delta tables exist (rank 0 builds them from
+// the flat tables: k32 813 MB -> ~204 MB, k35 upper 9.6 GB -> ~1.2 GB), then
+// return the UPPER delta path.  run_one keys the lower range off the upper
+// file's magic and derives the lower .dlt itself, so the two never mix.
+static const char *k35_ensure_delta(int sp_count, const unsigned *sp, int rank)
+{
+    const char *k32_flat = ksc_ensure_k32_primes(sp_count, sp, rank);
+    const char *k35u_flat = ksc_ensure_k35_primes(sp_count, sp, rank);
+    static char k32_dlt[512], k35u_dlt[512];
+    k35_delta_path(k32_dlt, sizeof(k32_dlt), k32_flat);
+    k35_delta_path(k35u_dlt, sizeof(k35u_dlt), k35u_flat);
+    if (rank == 0)
+    {
+        FILE *t;
+        if ((t = fopen(k32_dlt, "rb"))) fclose(t);
+        else if (!kf_convert_prime_table_to_delta(k32_flat, k32_dlt, "[rank 0] "))
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        if ((t = fopen(k35u_dlt, "rb"))) fclose(t);
+        else if (!kf_convert_prime_table_to_delta_u64(k35u_flat, k35u_dlt, "[rank 0] "))
+            MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    MPI_Barrier(MPI_COMM_WORLD); // all ranks wait for both .dlt files
+    return k35u_dlt;
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +524,8 @@ int main(int argc, char *argv[])
     const char *modulo_suffix = "";
     const char *cbrt_dir = KSC_CBRT_DIR;
     int run_all = 0;
+    int do_convert_delta = 0;   // --convert-delta: build both .dlt tables and exit
+    bool use_delta = false;     // --table-format delta: use delta-encoded tables
     int n_challenges = 1;
     bool skip_powm = false;
     run_method_t method = METHOD_SIEVE;
@@ -465,6 +563,25 @@ int main(int argc, char *argv[])
                 return 1;
             }
         }
+        else if (strcmp(argv[argi], "--table-format") == 0 && argi + 1 < argc)
+        {
+            const char *tf = argv[++argi];
+            if (strcmp(tf, "delta") == 0)
+                use_delta = true;
+            else if (strcmp(tf, "flat") == 0)
+                use_delta = false;
+            else
+            {
+                if (rank == 0)
+                    fprintf(stderr, "Unknown --table-format '%s' (use flat or delta)\n", tf);
+                MPI_Finalize();
+                return 1;
+            }
+        }
+        else if (strcmp(argv[argi], "--convert-delta") == 0)
+        {
+            do_convert_delta = 1;
+        }
         else if (strcmp(argv[argi], "--json") == 0 && argi + 1 < argc)
         {
             json_file = argv[++argi];
@@ -476,8 +593,7 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[argi], "--n-challenges") == 0 && argi + 1 < argc)
         {
             n_challenges = atoi(argv[++argi]);
-            if (n_challenges < 1)
-                n_challenges = 1;
+            if (n_challenges < 1) n_challenges = 1;
         }
         else if (strcmp(argv[argi], "--cbrt-dir") == 0 && argi + 1 < argc)
         {
@@ -516,12 +632,13 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (!run_all && (!challenge_file || !modulo_file))
+    if (!run_all && !do_convert_delta && (!challenge_file || !modulo_file))
     {
         if (rank == 0)
             fprintf(stderr,
-                    "Usage: k35_mpi <challenge> <modulo> [--method sieve|table]\n"
-                    "       k35_mpi --all [--data DIR] [--method sieve|table]\n");
+                    "Usage: k35_mpi <challenge> <modulo> [--method sieve|table] [--table-format flat|delta]\n"
+                    "       k35_mpi --all [--data DIR] [--method sieve|table] [--table-format flat|delta]\n"
+                    "       k35_mpi --convert-delta   (build k32_primes.dlt + k35_upper_primes.dlt, then exit)\n");
         MPI_Finalize();
         return 1;
     }
@@ -538,6 +655,10 @@ int main(int argc, char *argv[])
                method == METHOD_TABLE   ? "table"
                : method == METHOD_SIEVE ? "sieve"
                                         : "powm");
+        if (method == METHOD_TABLE)
+            printf("Table format:   %s\n",
+                   use_delta ? "delta (1 byte/prime: k32 ~204 MB, k35u ~1.2 GB)"
+                             : "flat (k32 ~813 MB, k35u ~9.6 GB)");
         if (run_all)
             printf("Mode:           --all\n");
         if (n_challenges > 1)
@@ -583,12 +704,21 @@ int main(int argc, char *argv[])
         (void)i;
 #endif
 
+    // --convert-delta: rank 0 builds both delta tables from the flat tables, exit.
+    if (do_convert_delta)
+    {
+        k35_ensure_delta(sp_count, sp, rank);
+        free(sp);
+        MPI_Finalize();
+        return 0;
+    }
+
     if (run_all)
     {
-        const char *sizes[] = {KSC_CANONICAL_SIZES_LIST};
-        const char *k35u_p2 = (method == METHOD_TABLE)
-                                  ? ksc_ensure_k35_primes(sp_count, sp, rank)
-                                  : nullptr;
+        const char *sizes[] = { KSC_CANONICAL_SIZES_LIST };
+        const char *k35u_p2 = (method != METHOD_TABLE) ? nullptr
+                              : use_delta ? k35_ensure_delta(sp_count, sp, rank)
+                                          : ksc_ensure_k35_primes(sp_count, sp, rank);
         for (int s = 0; s < KSC_N_CANONICAL_SIZES; s++)
         {
             char cf[512], mf[512], jf[768];
@@ -608,6 +738,9 @@ int main(int argc, char *argv[])
             }
             else
             {
+                // Plan A (2026-07-17): every challenge 0..n_challenges-1 is a timed
+                // warm run — no separate cold run (merged cbrt cache makes
+                // challenge_0 statistically identical; cbrt_misses=0 for all runs).
                 benchmark_results_t combined;
                 bool has_data = false;
                 for (int ci = 0; ci < n_challenges; ci++)
@@ -619,11 +752,7 @@ int main(int argc, char *argv[])
                     if (rank == 0)
                     {
                         FILE *fck = fopen(cfi, "r");
-                        if (fck)
-                        {
-                            fclose(fck);
-                            exists = 1;
-                        }
+                        if (fck) { fclose(fck); exists = 1; }
                     }
                     MPI_Bcast(&exists, 1, MPI_INT, 0, MPI_COMM_WORLD);
                     if (!exists)
@@ -637,15 +766,8 @@ int main(int argc, char *argv[])
                                                     sp_count, sp, my_lo, my_hi,
                                                     method, k35u_p2, exponent,
                                                     cbrt_dir, skip_powm);
-                    if (!has_data)
-                    {
-                        combined = std::move(r);
-                        has_data = true;
-                    }
-                    else
-                    {
-                        merge_benchmark_results(combined, r);
-                    }
+                    if (!has_data) { combined = std::move(r); has_data = true; }
+                    else           { merge_benchmark_results(combined, r); }
                 }
                 if (has_data && rank == 0 && jf_ptr)
                     write_benchmark_json(jf_ptr, combined);
@@ -654,9 +776,9 @@ int main(int argc, char *argv[])
     }
     else
     {
-        const char *k35u_path = (method == METHOD_TABLE)
-                                    ? ksc_ensure_k35_primes(sp_count, sp, rank)
-                                    : nullptr;
+        const char *k35u_path = (method != METHOD_TABLE) ? nullptr
+                                : use_delta ? k35_ensure_delta(sp_count, sp, rank)
+                                            : ksc_ensure_k35_primes(sp_count, sp, rank);
         solve_one(rank, nranks, challenge_file, modulo_file,
                   sp_count, sp, my_lo, my_hi, method, k35u_path, exponent,
                   json_file, cbrt_dir, skip_powm);
@@ -667,4 +789,6 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-// Edit: 2026-07-17
+
+// Edit: 2026-07-22
+

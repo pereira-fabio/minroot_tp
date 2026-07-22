@@ -54,6 +54,48 @@ export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 export OMP_WAIT_POLICY=active
 
+# ===========================================================================
+# OPTIONAL FLAG — delta-encoded prime table  (advisor M2)
+# ---------------------------------------------------------------------------
+# The table-method solvers k32, k35, alg3 and alg4 share the 813 MB k32 prime
+# table (k35 also a 9.6 GB upper table). Delta/gap encoding stores 1 byte per
+# prime instead of 4/8, shrinking them to ~204 MB / ~1.2 GB with byte-identical
+# trial-division results (gate: tests/delta_table_test; docs:
+# wiki/implementation/delta-prime-table.md). Only affects --method table.
+#
+# HOW TO USE: uncomment the "delta" line below (comment the "flat" line). The
+# first table run auto-builds the .dlt on rank 0 — one-time: ~seconds for k32,
+# ~1 min for k35's 9.6 GB read — and later runs reuse it. The flag is applied
+# ONLY to k32/k35/alg3/alg4 below; k16 and alg7 do not accept it.
+#
+#   Example — one delta k32 run by hand (what this sweep does per size):
+#     srun --mpi=pmix -N64 --ntasks=128 ./alg2_k32 \
+#          --all --data data/challenges/k32 --method table --table-format delta \
+#          --n-challenges 50 --cbrt-dir data/cbrt/alg2_k32_e3 --json out/k32
+#
+#   Optional — pre-build the .dlt yourself instead of the auto-build:
+#     mpicxx -O3 -std=c++17 -fopenmp -I src/common src/aion/alg2_k32.cpp \
+#            src/common/*.cpp -lgmp -o alg2_k32
+#     srun -N1 --ntasks=2 ./alg2_k32 --convert-delta     # writes k32_primes.dlt
+#     # (alg2_k35 --convert-delta writes BOTH k32_primes.dlt + k35_upper_primes.dlt)
+#
+# TABLE_FORMAT="--table-format delta"    # <-- UNCOMMENT this for the delta table
+TABLE_FORMAT=""                          #     default: flat (uint32/uint64 table)
+# ===========================================================================
+
+# ===========================================================================
+# NOTE — the pre-filter (paper Algorithm 5) is NOT toggled here (no flag yet).
+# ---------------------------------------------------------------------------
+# It is Phase 0 only: the selection primitive src/common/prefilter.{h,cpp}
+# (prefilter_simple_select), exercised solely by tests/prefilter_test.cpp and
+# gated separately by:   sbatch scripts/aion/prefilter_test.slurm
+# There is no --prefilter solver flag yet — wiring it into the bench loop (a
+# `--prefilter simple` hook that swaps attempt-0 blinding for the parallel
+# argmin) is Phase 1, still pending. Once Phase 1 lands, add a PREFILTER toggle
+# here exactly like TABLE_FORMAT above. The pre-filter raises the smoothness
+# HIT RATE, not speedup_total, so it is measured on its own, not in this sweep.
+# ===========================================================================
+
 # ---------------------------------------------------------------------------
 # Map array index -> node count (DESCENDING) and challenge count.
 # More challenges at the fast large-node tasks; fewer at the slow small-node
@@ -122,13 +164,16 @@ run_variant() {
 
 # ---------------------------------------------------------------------------
 # All six solvers, e=3.  (Algorithm 4 = single-prime path only; no --multi.)
+# $TABLE_FORMAT (delta toggle, above) is applied ONLY to the four table solvers
+# that share the k32 table — k32/k35/alg3/alg4. k16 (26 KB in-RAM table) and
+# alg7 (no --table-format flag) keep an empty / their own EXTRA.
 #             NAME       SRC             DATA_DIR               CBRT_DIR                                 RESULT_SUBPATH  JSON_PREFIX   EXTRA
 # ---------------------------------------------------------------------------
 run_variant  alg2_k16   alg2_k16.cpp    data/challenges/k16    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k16_e3  alg2/k16        alg2_k16      ""
-run_variant  alg2_k32   alg2_k32.cpp    data/challenges/k32    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k32_e3  alg2/k32        alg2_k32      ""
-run_variant  alg2_k35   alg2_k35.cpp    data/challenges/k35    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k35_e3  alg2/k35        alg2_k35      ""
-run_variant  alg3       alg3.cpp        data/challenges/alg3   $SLURM_SUBMIT_DIR/data/cbrt/alg3_e3      alg3/alg3       alg3          ""
-run_variant  alg4       alg4.cpp        data/challenges/alg4   $SLURM_SUBMIT_DIR/data/cbrt/alg4_e3      alg4/alg4       alg4          ""
+run_variant  alg2_k32   alg2_k32.cpp    data/challenges/k32    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k32_e3  alg2/k32        alg2_k32      "$TABLE_FORMAT"
+run_variant  alg2_k35   alg2_k35.cpp    data/challenges/k35    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k35_e3  alg2/k35        alg2_k35      "$TABLE_FORMAT"
+run_variant  alg3       alg3.cpp        data/challenges/alg3   $SLURM_SUBMIT_DIR/data/cbrt/alg3_e3      alg3/alg3       alg3          "$TABLE_FORMAT"
+run_variant  alg4       alg4.cpp        data/challenges/alg4   $SLURM_SUBMIT_DIR/data/cbrt/alg4_e3      alg4/alg4       alg4          "$TABLE_FORMAT"
 run_variant  alg7       alg7.cpp        data/challenges/alg3   $SLURM_SUBMIT_DIR/data/cbrt/alg7_e3      alg7/alg7       alg7_mpi      "--R 1048576"
 
 # ---------------------------------------------------------------------------
@@ -144,4 +189,4 @@ echo "Join each timing JSON with its _powm_ sibling for the baseline (results-jo
 echo "Job finished  (Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID)"
 echo "============================================================"
 
-# Edit: 2026-07-17
+# Edit: 2026-07-22
