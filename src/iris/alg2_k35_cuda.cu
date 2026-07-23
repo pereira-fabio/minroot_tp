@@ -14,10 +14,13 @@
 // MULTI-GPU PRIME-RANGE SPLITTING
 // --------------------------------
 // The full k35 upper prime table (9.6 GB) is loaded into CPU RAM once at startup.
-// It is then split into N_GPUS disjoint slices: GPU g holds upper_primes[g*N..(g+1)*N).
+// It is then split into N_GPUS disjoint, WORK-BALANCED slices: GPU 0 also runs
+// Phase 1 (the k32 primes), so it gets a proportionally smaller upper slice
+// (nprimes32 + up_count[0] == up_count[g>0]) — see the per-GPU setup for the split.
 // Phase 1 (k32) runs on GPU 0 only to avoid duplicate factor reports; all GPUs run
 // Phase 2 on their slice.  Kernels on all GPUs launch in parallel; factor_ms =
-// max(elapsed_per_device).  For G4 this gives ~4× speedup over single-GPU k35.
+// max(elapsed_per_device).  The balanced split gives ~N_GPUS speedup (an even
+// split would leave GPU 0 the bottleneck at ~2.8x for G4).
 //
 // GPU memory per device: 813 MB (k32, GPU 0 only) + ~2.4 GB (upper slice for G4).
 // CPU RAM needed: ~9.6 GB for the full upper table (HPC nodes have ample headroom).
@@ -342,7 +345,32 @@ int main(int argc, char **argv) {
 
     // ---- Per-GPU setup ----
     std::vector<K35Dev> devs((size_t)n_gpus);
-    int64_t base_up = n_upper / n_gpus;
+
+    // Work-balanced upper-slice split. GPU 0 ALSO runs Phase 1 (the nprimes32 k32
+    // primes), so an even upper split would overload it and pin factor_ms
+    // (= max over devices) to GPU 0. Instead give GPU 0 a proportionally smaller
+    // upper slice so that nprimes32 + up_count[0] == up_count[g>0]; with
+    // sum(up_count) = n_upper this is a per-GPU target of (n_upper+nprimes32)/n_gpus,
+    // making every device do ~equal total trial-division work → genuine ~n_gpus
+    // scaling (was ~2.8x at G4). Each forward trial-division test costs the same
+    // regardless of prime magnitude, so equal counts == equal work.
+    std::vector<int64_t> up_start((size_t)n_gpus), up_count((size_t)n_gpus);
+    if (n_gpus == 1) {
+        up_start[0] = 0;
+        up_count[0] = n_upper;
+    } else {
+        int64_t W  = (n_upper + nprimes32) / n_gpus;   // per-GPU target work
+        int64_t s0 = W - nprimes32;                    // GPU 0's upper slice
+        if (s0 < 0)        s0 = 0;                      // Phase 1 alone >= target
+        if (s0 > n_upper)  s0 = n_upper;
+        up_count[0] = s0;
+        int64_t rem = n_upper - s0;                    // spread over GPUs 1..n_gpus-1
+        int64_t per = rem / (n_gpus - 1);
+        for (int g = 1; g < n_gpus; g++) up_count[g] = per;
+        up_count[n_gpus - 1] += rem - per * (n_gpus - 1);  // last absorbs remainder
+        up_start[0] = 0;
+        for (int g = 1; g < n_gpus; g++) up_start[g] = up_start[g - 1] + up_count[g - 1];
+    }
 
     for (int g = 0; g < n_gpus; g++) {
         CUDA_CHECK(cudaSetDevice(g));
@@ -358,13 +386,17 @@ int main(int argc, char **argv) {
             devs[g].n_primes32 = 0;
         }
 
-        // Phase 2: disjoint upper prime slice
-        int64_t start = (int64_t)g * base_up;
-        int64_t count = (g == n_gpus - 1) ? (n_upper - start) : base_up;
+        // Phase 2: work-balanced disjoint upper prime slice
+        int64_t start = up_start[g];
+        int64_t count = up_count[g];
         devs[g].n_upper = count;
-        CUDA_CHECK(cudaMalloc(&devs[g].d_upper, (size_t)count * sizeof(uint64_t)));
-        CUDA_CHECK(cudaMemcpy(devs[g].d_upper, upper_primes + start,
-                              (size_t)count * sizeof(uint64_t), cudaMemcpyHostToDevice));
+        if (count > 0) {
+            CUDA_CHECK(cudaMalloc(&devs[g].d_upper, (size_t)count * sizeof(uint64_t)));
+            CUDA_CHECK(cudaMemcpy(devs[g].d_upper, upper_primes + start,
+                                  (size_t)count * sizeof(uint64_t), cudaMemcpyHostToDevice));
+        } else {
+            devs[g].d_upper = nullptr;
+        }
 
         CUDA_CHECK(cudaMalloc(&devs[g].d_out_factors, MAX_GPU_FACTORS * sizeof(uint64_t)));
         CUDA_CHECK(cudaMalloc(&devs[g].d_out_count,   sizeof(int)));
@@ -373,6 +405,8 @@ int main(int argc, char **argv) {
 
         // Per-device constant memory
         CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
+        printf("  GPU %d: %ld k32 + %ld upper primes\n",
+               g, (long)devs[g].n_primes32, (long)count);
     }
 
     // CPU RAM no longer needed after upload
@@ -445,7 +479,13 @@ int main(int argc, char **argv) {
             CUDA_CHECK(cudaSetDevice(g));
             int h_count = 0;
             CUDA_CHECK(cudaMemcpy(&h_count, devs[g].d_out_count, sizeof(int), cudaMemcpyDeviceToHost));
-            if (h_count <= 0 || h_count > MAX_GPU_FACTORS) continue;
+            if (h_count <= 0) continue;
+            if (h_count > MAX_GPU_FACTORS) {
+                fprintf(stderr, "Warning: factor overflow on GPU %d (%d > %d) — "
+                        "processing first %d; increase MAX_GPU_FACTORS\n",
+                        g, h_count, MAX_GPU_FACTORS, MAX_GPU_FACTORS);
+                h_count = MAX_GPU_FACTORS;
+            }
             CUDA_CHECK(cudaMemcpy(h_out_factors, devs[g].d_out_factors,
                                   (size_t)h_count * sizeof(uint64_t), cudaMemcpyDeviceToHost));
             for (int j = 0; j < h_count; j++) {
@@ -594,4 +634,4 @@ cleanup:
     return solved_attempt >= 0 ? 0 : 2;
 }
 
-// Edit: 2026-07-11
+// Edit: 2026-07-23

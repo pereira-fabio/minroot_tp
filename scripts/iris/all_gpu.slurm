@@ -31,13 +31,15 @@
 #   rsync <aion>:<proj>/data/k32_primes.bin   <iris>:<proj>/data/k32_primes.bin
 #   rsync <aion>:<proj>/data/k35_upper_primes.bin <iris>:<proj>/data/k35_upper_primes.bin
 #
-# NOTE — the delta-encoded prime table (--table-format delta on the CPU solvers)
-# is CPU-ONLY. The CUDA solvers here always use the flat table; there is no
-# --table-format flag on the GPU side, so nothing to toggle. The GPU delta
-# decode kernel (each thread block decodes its delta block into shared memory,
-# so a 4-way k32 slice ~51 MB lives in the L40's ~96 MB L2) is future work — it
-# is the step that would test the predicted L40 L2-residency win for k32.
-# See wiki/implementation/delta-prime-table.md ("Still to do — GPU").
+# NOTE — delta-encoded prime table on the GPU (advisor M2 / L2-residency test).
+# k32 NOW has a GPU delta-decode kernel (alg2_k32_cuda --table-format delta): each
+# CUDA block decodes its 1024-prime delta block into 4 KB shared, then the usual
+# trial division. 1 byte/prime → a 4-way slice is ~51 MB, which fits the L40's
+# ~96 MB L2 (flat 203 MB/GPU does not) — the predicted memory-bound→L2-resident
+# flip for k32. This script runs BOTH flat and delta k32 table passes (delta only
+# if data/k32_primes.dlt exists) so the two can be compared directly; the V100 run
+# is the control (6 MB L2 → no residency expected). k35/alg3/alg4/k16 remain
+# flat-only on the GPU. See wiki/implementation/gpu-delta-decode-kernel-plan.md.
 # ---------------------------------------------------------------------------
 
 # Canonical sizes matching src/common/sizes.h KSC_CANONICAL_SIZES_LIST
@@ -209,12 +211,23 @@ if [ -x "$BINDIR/alg2_k32_cuda" ] && [ -f data/k32_primes.bin ]; then
           --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
           --json "$ALG2_DIR"/alg2_k32_sieve_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
 
-      echo "--- k32 e=${EXP} size=${SIZE}: table ---"
+      echo "--- k32 e=${EXP} size=${SIZE}: table (flat) ---"
       "$BINDIR/alg2_k32_cuda" \
           --data data/challenges/k32 --size $SIZE \
           --method table --exponent $EXP --primes data/k32_primes.bin \
           --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
           --json "$ALG2_DIR"/alg2_k32_table_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
+
+      # Delta table (L2-residency experiment) — only if the .dlt has been built
+      # (on AION: ./alg2_k32 --convert-delta) and rsync'd here alongside the .bin.
+      if [ -f data/k32_primes.dlt ]; then
+        echo "--- k32 e=${EXP} size=${SIZE}: table (delta) ---"
+        "$BINDIR/alg2_k32_cuda" \
+            --data data/challenges/k32 --size $SIZE \
+            --method table --exponent $EXP --primes data/k32_primes.dlt --table-format delta \
+            --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
+            --json "$ALG2_DIR"/alg2_k32_tabledelta_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
+      fi
       echo ""
     done
   done
@@ -345,4 +358,4 @@ echo "Results in: $IRIS_BASE/alg{2,3,4,7}/G${N_GPUS}/"
 find "$ALG2_DIR" "$ALG3_DIR" "$ALG4_DIR" "$ALG7_DIR" -name "*_${SLURM_JOB_ID}_*.json" 2>/dev/null | wc -l | xargs -I{} echo "  {} JSON files written"
 echo "Done — check all_gpu_${SLURM_JOB_ID}.out"
 
-# Edit: 2026-07-22
+# Edit: 2026-07-23

@@ -344,7 +344,12 @@ int main(int argc, char **argv) {
 
     for (int b = 0; b < batch_size && solved_b < 0; b++) {
         int gpu_count = h_out_counts[b];
-        if (gpu_count <= 0 || gpu_count > MAX_GPU_FACTORS) continue;
+        if (gpu_count <= 0) continue;
+        if (gpu_count > MAX_GPU_FACTORS) {
+            fprintf(stderr, "Warning: k16 factor overflow slot %d (%d > %d) — "
+                    "processing first %d\n", b, gpu_count, MAX_GPU_FACTORS, MAX_GPU_FACTORS);
+            gpu_count = MAX_GPU_FACTORS;
+        }
 
         mpz_import(y_mpz, MAX_LIMBS, -1, sizeof(uint64_t), 0, 0,
                    h_y_batch + (size_t)b * MAX_LIMBS);
@@ -427,8 +432,13 @@ int main(int argc, char **argv) {
             // already gathered device 0's slot-0 output into h_out_*.
             auto t_d2h0 = std::chrono::high_resolution_clock::now();
             int gpu_count_w = h_out_counts[0];
+            if (gpu_count_w > MAX_GPU_FACTORS) {
+                fprintf(stderr, "Warning: k16 warm factor overflow (%d > %d) — "
+                        "processing first %d\n", gpu_count_w, MAX_GPU_FACTORS, MAX_GPU_FACTORS);
+                gpu_count_w = MAX_GPU_FACTORS;
+            }
             kfactor_list_t fl_w; kfl_init(&fl_w);
-            if (gpu_count_w > 0 && gpu_count_w <= MAX_GPU_FACTORS) {
+            if (gpu_count_w > 0) {
                 mpz_t cof_w; mpz_init_set(cof_w, y_w);
                 for (int j = 0; j < gpu_count_w; j++) {
                     unsigned long p = (unsigned long)h_out_factors[j];
@@ -490,4 +500,4 @@ cleanup:
     return solved_b >= 0 ? 0 : 2;
 }
 
-// Edit: 2026-07-11
+// Edit: 2026-07-23

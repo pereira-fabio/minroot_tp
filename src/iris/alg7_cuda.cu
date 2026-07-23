@@ -400,29 +400,42 @@ int main(int argc, char **argv) {
     int threads_per_block = 256;
 
     // ---- Per-device setup: split the prime range across n_gpus devices ----
+    // INTERLEAVED (strided) assignment: device g owns primes[g], primes[g+n_gpus],
+    // primes[g+2*n_gpus], ...  The inverted-sieve marking cost per prime q is
+    // O(R/q) — dominated by the SMALL primes (q near 65537 make ~R/65537 marks;
+    // q near 2^32 make 0-1). A contiguous count-split would hand the entire
+    // small-prime band to GPU 0 and leave the other devices nearly idle, so
+    // factor_ms = max(device) would stay pinned to GPU 0 and Phase 1 would barely
+    // scale. Striding gives every device an equal share of every magnitude band →
+    // Phase 1 scales ~n_gpus. The union is still all primes, disjoint; Phase-1
+    // log_sums are summed on the host and Phase-2 factor reports are
+    // order-independent, so the reordering does not affect correctness.
     std::vector<Alg7Dev> devs((size_t)n_gpus);
     {
-        int64_t base = nprimes / n_gpus;
         for (int g = 0; g < n_gpus; g++) {
             CUDA_CHECK(cudaSetDevice(g));
-            int64_t p_lo    = (int64_t)g * base;
-            int64_t p_count = (g == n_gpus - 1) ? (nprimes - p_lo) : base;
-            devs[g].p_lo    = p_lo;
+            int64_t p_count = ((int64_t)g < nprimes)
+                              ? ((nprimes - g + n_gpus - 1) / n_gpus) : 0;
+            devs[g].p_lo    = g;              // stride start index (informational)
             devs[g].p_count = p_count;
+            // Gather this device's strided prime subset into a contiguous host buffer.
+            std::vector<uint32_t> h_slice((size_t)p_count);
+            for (int64_t k = 0; k < p_count; k++)
+                h_slice[(size_t)k] = primes[g + k * n_gpus];
             // Constant memory (challenge x, modulus M, nlimbs) on THIS device.
             CUDA_CHECK(cudaMemcpyToSymbol(d_x_limbs, x_limbs, sizeof(uint64_t) * MAX_LIMBS));
             CUDA_CHECK(cudaMemcpyToSymbol(d_m_limbs, m_limbs, sizeof(uint64_t) * MAX_LIMBS));
             CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
             CUDA_CHECK(cudaMalloc(&devs[g].d_primes, sizeof(uint32_t) * p_count));
-            CUDA_CHECK(cudaMemcpy(devs[g].d_primes, primes + p_lo,
+            CUDA_CHECK(cudaMemcpy(devs[g].d_primes, h_slice.data(),
                                   sizeof(uint32_t) * p_count, cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMalloc(&devs[g].d_log_sum, sizeof(float) * R));
             CUDA_CHECK(cudaMalloc(&devs[g].d_out_primes, sizeof(uint32_t) * MAX_OUT_FACTORS));
             CUDA_CHECK(cudaMalloc(&devs[g].d_out_count, sizeof(int)));
             CUDA_CHECK(cudaEventCreate(&devs[g].ev0));
             CUDA_CHECK(cudaEventCreate(&devs[g].ev1));
-            printf("  GPU %d: primes [%ld, %ld) (%ld of %ld)\n",
-                   g, (long)p_lo, (long)(p_lo + p_count), (long)p_count, (long)nprimes);
+            printf("  GPU %d: %ld primes (interleaved: stride %d from index %d, of %ld)\n",
+                   g, (long)p_count, n_gpus, g, (long)nprimes);
         }
     }
 
@@ -654,4 +667,4 @@ int main(int argc, char **argv) {
 
     return solved ? 0 : 2;
 }
-// Edit: 2026-07-11
+// Edit: 2026-07-23

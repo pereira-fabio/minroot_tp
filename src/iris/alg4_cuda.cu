@@ -318,7 +318,13 @@ int main(int argc, char **argv) {
             int h_count = 0;
             CUDA_CHECK(cudaMemcpy(&h_count, devs[g].d_out_count,
                                   sizeof(int), cudaMemcpyDeviceToHost));
-            if (h_count <= 0 || h_count > MAX_GPU_FACTORS) continue;
+            if (h_count <= 0) continue;
+            if (h_count > MAX_GPU_FACTORS) {
+                fprintf(stderr, "Warning: factor overflow on GPU %d (%d > %d) — "
+                        "processing first %d; increase MAX_GPU_FACTORS\n",
+                        g, h_count, MAX_GPU_FACTORS, MAX_GPU_FACTORS);
+                h_count = MAX_GPU_FACTORS;
+            }
             CUDA_CHECK(cudaMemcpy(h_out_factors, devs[g].d_out_factors,
                                   (size_t)h_count * sizeof(uint64_t), cudaMemcpyDeviceToHost));
             for (int j = 0; j < h_count; j++) {
@@ -517,4 +523,4 @@ cleanup:
 
     return solved_attempt >= 0 ? 0 : 2;
 }
-// Edit: 2026-07-11
+// Edit: 2026-07-23
