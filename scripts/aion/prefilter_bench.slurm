@@ -44,7 +44,7 @@ set -e
 cd "$SLURM_SUBMIT_DIR"
 
 echo "=== building prefilter_bench (direct mpicxx, no make) ==="
-mpicxx -O2 -std=c++17 -I src/common \
+mpicxx -O3 -std=c++17 -fopenmp -Wall -I src/common \
        tests/prefilter_bench.cpp \
        src/common/prefilter.cpp \
        src/common/factorization.cpp \

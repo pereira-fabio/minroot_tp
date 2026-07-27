@@ -29,7 +29,7 @@
 // only.  No solver is rebuilt and no benchmark result can change.
 //
 // Build:
-//   mpicxx -O2 -std=c++17 -I src/common tests/prefilter_bench.cpp \
+//   mpicxx -O3 -std=c++17 -fopenmp -Wall -I src/common tests/prefilter_bench.cpp \
 //          src/common/prefilter.cpp src/common/factorization.cpp \
 //          src/common/common.cpp -lgmp -o prefilter_bench
 // Run:
