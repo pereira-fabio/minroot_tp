@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=1
-#SBATCH --time=00:30:00
+#SBATCH --time=02:00:00
 
 # SLURM does not create --output directories; make it before the job writes anything.
 mkdir -p results/prefilter/aion
@@ -13,27 +13,39 @@ mkdir -p results/prefilter/aion
 # ===========================================================================
 # Is the simple pre-filter PROFITABLE?  (thesis sub4:prefilter)
 #
-# prefilter_test.slurm answers "is the parallel selection CORRECT?".  This
-# answers the separate question the thesis actually needs: does one selection
-# round cost less than the sieving it saves?
+# prefilter_test answers "is the parallel selection CORRECT?".  This answers
+# the question the thesis needs: does one selection round cost less than the
+# sieving it saves?
 #
 #   pre-filtering pays  iff  C_pf < (2^b - 1) * C_sieve
 #
 # where C_pf is one selection round (measured here), C_sieve is one full
-# B-smooth sieve, and b is the bits of SEARCH saved.  For N=512, B=2^35 the
-# standard estimate is b ~ 2, so the threshold is C_pf < 3 * C_sieve.
+# B-smooth sieve, and b is the bits of SEARCH saved (~2 for N=512, B=2^35).
 #
-# It also turns the single 13-bit data point from prefilter_test into a curve:
-# the saving is measured over --trials independent draws at each |Re|, so the
-# log2|Re| prediction is tested across three orders of magnitude rather than at
-# one point.
+# ---------------------------------------------------------------------------
+# TWO PHASES, because the two quantities have different sampling needs.
 #
-# SAFETY: this builds a STANDALONE binary linked only against prefilter.cpp /
-# factorization.cpp / common.cpp.  No solver is rebuilt, so no benchmark result
-# under results/{aion,iris} can change.
+#   Phase 1 (statistics).  The bit saving is a property of |Re| ALONE -- it does
+#   not depend on the modulus size or on the rank partitioning.  Run 1 proved the
+#   np-invariance exactly (identical savings at np=1/2/4).  So measure it ONCE,
+#   at a cheap modulus, with MANY trials to get tight error bars.  100 trials at
+#   256 bits costs seconds.
 #
-# C_sieve default (790 ms) is the measured k32 single-rank factor_ms at 24576
-# bits.  Override for other regimes, e.g. --sieve-ms 8 for the 2048-bit N64 case.
+#   Phase 2 (profitability).  C_pf DOES grow with modulus size, and so does
+#   C_sieve, so the ratio must be taken at MATCHED sizes -- run 1 compared a
+#   256-bit C_pf against a 24576-bit C_sieve, which is not a fair ratio.  Here
+#   each size is paired with the measured k32 sieve cost at that same size.
+#   Only a few trials are needed: C_pf is a timing, not a distribution.
+#
+# C_sieve references below are k32 *table*-method factor_ms at N1 (= 2 MPI
+# ranks), from results/aion/alg2/k32_*_N1/.  The table method is the FASTER of
+# the two, so using it is the conservative choice: it makes the pre-filter's
+# margin look smaller than the sieve method would.  Phase 2 therefore runs at
+# np=2, to match the 2-rank reference.
+#
+# SAFETY: builds a STANDALONE binary linked only against prefilter.cpp /
+# factorization.cpp / common.cpp.  No solver is rebuilt, so nothing under
+# results/{aion,iris} can change.
 # ===========================================================================
 
 module load compiler/GCC/13.2.0
@@ -53,20 +65,53 @@ mpicxx -O3 -std=c++17 -fopenmp -Wall -I src/common \
 echo "Compilation successful"
 echo ""
 
-# Sweep rank counts as well: the selection is an MPI argmin, so C_pf should fall
-# with ranks while the reported bit saving stays put (it is a property of |Re|,
-# not of the partitioning).  If the saving MOVES with np, the partitioning is wrong.
+# ---------------------------------------------------------------------------
+# PHASE 1 — bit-saving curve + np-invariance check (cheap modulus, many trials)
+# ---------------------------------------------------------------------------
+echo "############################################################"
+echo "# PHASE 1: bit saving vs |Re|   (256-bit modulus, 100 trials)"
+echo "#   Expect saving ~ log2|Re| + 1.33:  +0.83 from E[-log2 U],"
+echo "#   U ~ Beta(1,|Re|), plus ~0.5 from mpz_sizeinbase rounding."
+echo "#   The saving columns MUST be identical across np."
+echo "############################################################"
+echo ""
 for np in 1 2 4; do
   echo "------------------------------------------------------------"
-  echo "  prefilter_bench  np=${np}"
+  echo "  PHASE 1  np=${np}"
   echo "------------------------------------------------------------"
-  srun -n $np ./prefilter_bench --bits 256 --trials 20 --sieve-ms 790
+  srun -n $np ./prefilter_bench --bits 256 --trials 100 --sieve-ms 74.838
+  echo ""
+done
+
+# ---------------------------------------------------------------------------
+# PHASE 2 — C_pf at MATCHED sizes, against the k32 sieve cost at that size
+# ---------------------------------------------------------------------------
+echo "############################################################"
+echo "# PHASE 2: matched-size profitability   (np=2, 5 trials)"
+echo "#   C_sieve = k32 table-method factor_ms at N1 (2 ranks),"
+echo "#   same modulus size. Read the C_pf/C_s column: pre-filtering"
+echo "#   pays while it stays below (2^b - 1) ~ 3."
+echo "############################################################"
+echo ""
+
+# size:C_sieve(ms)  — k32 table factor_ms at N1, measured
+PAIRS="256:74.838 512:99.629 1024:131.454 2048:180.008 4096:235.546 8192:364.115 16384:585.180 24576:789.647"
+
+for pair in $PAIRS; do
+  BITS="${pair%%:*}"
+  CSIEVE="${pair##*:}"
+  echo "------------------------------------------------------------"
+  echo "  PHASE 2  |M|=${BITS} bits   C_sieve=${CSIEVE} ms   np=2"
+  echo "------------------------------------------------------------"
+  srun -n 2 ./prefilter_bench --bits "$BITS" --trials 5 --sieve-ms "$CSIEVE"
   echo ""
 done
 
 echo "============================================================"
-echo "Read the C_pf/C_s column against the break-even threshold."
-echo "The bit-saving columns must NOT change with np."
+echo "PHASE 1: saving must track log2|Re| + ~1.33 and must NOT"
+echo "         change with np."
+echo "PHASE 2: C_pf/C_s is now a MATCHED ratio. Pre-filtering is"
+echo "         profitable wherever that column stays below ~3."
 echo "============================================================"
 
 # Edit: 2026-07-27
