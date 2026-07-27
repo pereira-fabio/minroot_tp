@@ -102,7 +102,8 @@ static benchmark_results_t run_one(
     run_method_t method,
     unsigned long exponent,
     uint32_t R,
-    const char *cbrt_dir = KSC_CBRT_DIR)
+    const char *cbrt_dir = KSC_CBRT_DIR,
+    bool skip_powm = false)
 {
     if (rank == 0) {
         printf("\n=== %s ===\n", challenge_file);
@@ -489,9 +490,10 @@ static benchmark_results_t run_one(
         printf("Phase 2 (recon):     %.3f ms\n", recon_acc.sum);
         printf("Total:               %.3f ms\n", fac_acc.sum + recon_acc.sum);
 
-        ksc_run_and_report_powm_baseline(&json_results, challenge, modulo,
-                                         &recon_acc, &fac_acc,
-                                         rank, exponent);
+        if (!skip_powm)
+            ksc_run_and_report_powm_baseline(&json_results, challenge, modulo,
+                                             &recon_acc, &fac_acc,
+                                             rank, exponent);
         mpz_t challenge_mod;
         mpz_init(challenge_mod);
         mpz_mod(challenge_mod, challenge, modulo);
@@ -528,10 +530,12 @@ static int solve_one(
     unsigned long exponent,
     uint32_t R,
     const char *cbrt_dir = KSC_CBRT_DIR,
-    const char *json_output_file = nullptr)
+    const char *json_output_file = nullptr,
+    bool skip_powm = false)
 {
     benchmark_results_t r = run_one(rank, nranks, challenge_file, modulo_file,
-                                    sp_count, sp, my_lo, my_hi, method, exponent, R, cbrt_dir);
+                                    sp_count, sp, my_lo, my_hi, method, exponent, R, cbrt_dir,
+                                    skip_powm);
     if (rank == 0 && json_output_file && json_output_file[0] != '\0')
         write_benchmark_json(json_output_file, r);
     return 1;
@@ -565,6 +569,7 @@ int main(int argc, char *argv[])
     unsigned long exponent = 3;
     uint32_t R = ALG7_R_DEFAULT;
 
+    bool skip_powm = false;
     int positional = 0;
     for (int argi = 1; argi < argc; argi++) {
         if (strcmp(argv[argi], "--all") == 0) {
@@ -598,6 +603,8 @@ int main(int argc, char *argv[])
                 MPI_Finalize(); return 1;
             }
             R = (uint32_t)rv;
+        } else if (strcmp(argv[argi], "--skip-powm-baseline") == 0) {
+            skip_powm = true;
         } else if (argv[argi][0] != '-') {
             if (positional == 0)      { challenge_file = argv[argi]; positional++; }
             else if (positional == 1) { modulo_file    = argv[argi]; positional++; }
@@ -671,7 +678,8 @@ int main(int argc, char *argv[])
             if (n_challenges == 1) {
                 snprintf(cf, sizeof(cf), "%s/challenge_0_alg3_%s.txt", data_dir, sizes[s]);
                 solve_one(rank, nranks, cf, mf,
-                          sp_count, sp, my_lo, my_hi, method, exponent, R, cbrt_dir, jf_ptr);
+                          sp_count, sp, my_lo, my_hi, method, exponent, R, cbrt_dir, jf_ptr,
+                          skip_powm);
             } else {
                 // Plan A (2026-07-17): every challenge 0..n_challenges-1 is a timed
                 // warm run — no separate cold run (merged cbrt cache makes
@@ -696,7 +704,8 @@ int main(int argc, char *argv[])
                     }
                     benchmark_results_t r = run_one(rank, nranks, cfi, mf,
                                                     sp_count, sp, my_lo, my_hi,
-                                                    method, exponent, R, cbrt_dir);
+                                                    method, exponent, R, cbrt_dir,
+                                                    skip_powm);
                     if (!has_data) { combined = std::move(r); has_data = true; }
                     else           { merge_benchmark_results(combined, r); }
                 }
@@ -707,7 +716,8 @@ int main(int argc, char *argv[])
         }
     } else {
         solve_one(rank, nranks, challenge_file, modulo_file,
-                  sp_count, sp, my_lo, my_hi, method, exponent, R, cbrt_dir, json_file);
+                  sp_count, sp, my_lo, my_hi, method, exponent, R, cbrt_dir, json_file,
+                  skip_powm);
     }
 
     free(sp);
@@ -716,4 +726,4 @@ int main(int argc, char *argv[])
 }
 
 
-// Edit: 2026-07-17
+// Edit: 2026-07-23

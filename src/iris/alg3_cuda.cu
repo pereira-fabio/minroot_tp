@@ -17,7 +17,8 @@
 //   ./alg3_cuda <challenge_file> <modulo_file> [options]
 //     --method {powm|sieve|table}  benchmark method (default: table)
 //     --exponent E            root exponent (default: 3)
-//     --primes FILE           k32 prime table (default: data/k32_primes.bin)
+//     --primes FILE           k32 prime table (flat .bin or delta .dlt)
+//     --table-format {auto|flat|delta}  default auto = detect by file magic
 //     --n-runs N              warm runs (default: 10)
 //     --n-gpus N              split prime range across N CUDA devices (default: 1)
 //     --json FILE             write JSON output
@@ -111,6 +112,58 @@ __global__ void k32_trial_divide_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// k32 DELTA trial-division kernel (identical to alg2_k32_cuda's delta kernel;
+// Algorithm 3 shares the same k32 table, so the byte layout is the same).
+// One CUDA block per 1024-prime delta block, grid-stride over blocks. Thread 0
+// decodes the block (anchor + running gap-half sum) into shared memory, then
+// all threads trial-divide with the SAME mod_big_by_u32 as the flat kernel.
+// Block layout (width=4): [uint32 anchor][uint8 gaphalf[len-1]];
+//   p[0]=anchor, p[k]=p[k-1]+2*gaphalf[k-1].
+// d_delta points at THIS device's contiguous block range; local block j is at
+// byte j*FULL. first_block_index is the GLOBAL index of local block 0 (needed
+// only to size the last, possibly-short block of the whole file).
+// ---------------------------------------------------------------------------
+#define K32_DELTA_FULL ((size_t)4 + (KF_DELTA_BLOCK - 1))   // 1027 bytes / full block
+
+__global__ void k32_trial_divide_delta_kernel(
+        const uint8_t * __restrict__ d_delta, uint32_t n_blocks,
+        uint64_t first_block_index, uint64_t total_count,
+        uint64_t *out_factors, int *out_count)
+{
+    __shared__ uint32_t s_primes[KF_DELTA_BLOCK];   // 4 KB
+    const int nlimbs = d_nlimbs;
+
+    for (uint32_t j = blockIdx.x; j < n_blocks; j += gridDim.x) {
+        uint64_t g    = first_block_index + j;
+        uint64_t base = g * (uint64_t)KF_DELTA_BLOCK;
+        uint32_t len  = (base + KF_DELTA_BLOCK <= total_count)
+                        ? (uint32_t)KF_DELTA_BLOCK : (uint32_t)(total_count - base);
+        const uint8_t *r = d_delta + (size_t)j * K32_DELTA_FULL;
+
+        if (threadIdx.x == 0) {
+            uint32_t cur = (uint32_t)r[0]         | ((uint32_t)r[1] << 8)
+                         | ((uint32_t)r[2] << 16) | ((uint32_t)r[3] << 24);
+            s_primes[0] = cur;
+            const uint8_t *gh = r + 4;
+            for (uint32_t k = 1; k < len; k++) {
+                cur += (uint32_t)gh[k - 1] << 1;
+                s_primes[k] = cur;
+            }
+        }
+        __syncthreads();
+
+        for (uint32_t k = threadIdx.x; k < len; k += blockDim.x) {
+            uint64_t p = s_primes[k];
+            if (mod_big_by_u32(d_y_limbs, nlimbs, p) == 0) {
+                int slot = atomicAdd(out_count, 1);
+                if (slot < MAX_GPU_FACTORS) out_factors[slot] = p;
+            }
+        }
+        __syncthreads();                     // reuse s_primes next iteration
+    }
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char **argv) {
@@ -120,6 +173,7 @@ int main(int argc, char **argv) {
     int size_bits              = 0;
     unsigned long exponent     = 3;
     const char *primes_path    = "data/k32_primes.bin";
+    const char *table_format   = "auto";   // auto | flat | delta (auto = detect by file magic)
     const char *json_path      = nullptr;
     gpu_method_t method        = GPU_METHOD_TABLE;
     int n_challenges           = 10;
@@ -133,6 +187,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--n-gpus")       && i+1<argc) n_gpus       = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--exponent")     && i+1<argc) exponent     = (unsigned long)atol(argv[++i]);
         else if (!strcmp(argv[i], "--primes")       && i+1<argc) primes_path  = argv[++i];
+        else if (!strcmp(argv[i], "--table-format") && i+1<argc) table_format = argv[++i];
         else if (!strcmp(argv[i], "--json")         && i+1<argc) json_path    = argv[++i];
         else if (!strcmp(argv[i], "--method")       && i+1<argc) method       = gpu_parse_method(argv[++i]);
         else if (argv[i][0] != '-') {
@@ -191,17 +246,81 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    // ---- Load or generate k32 prime table ----
+    // ---- Load or generate k32 prime table (flat or delta) ----
+    // Same shared k32 table as alg2_k32: --table-format auto detects by magic,
+    // {flat|delta} force/assert. Delta = 1 byte/prime, decoded on-GPU per block.
+    // The sieve method is always flat/in-memory.
     int64_t nprimes_i64 = 0;
     uint32_t *h_primes = nullptr;
+    bool     use_delta         = false;
+    uint8_t *all_blocks        = nullptr;   // whole delta file's block bytes (host)
+    uint64_t n_blocks_total    = 0;
+    size_t   block_bytes_total = 0;
+    std::vector<uint8_t *> d_delta((size_t)n_gpus, nullptr);
+    std::vector<uint32_t>  dev_nblocks((size_t)n_gpus, 0);
+    std::vector<uint64_t>  dev_firstblk((size_t)n_gpus, 0);
+
     if (method == GPU_METHOD_TABLE) {
-        uint64_t nprimes_u64 = 0;
-        h_primes = kf_load_prime_table(&nprimes_u64, primes_path);
-        if (!h_primes) {
-            fprintf(stderr, "Failed to load prime table from %s\n", primes_path); return 1;
+        FILE *pf = fopen(primes_path, "rb");
+        if (!pf) {
+            fprintf(stderr, "Failed to open prime table %s\n", primes_path); return 1;
         }
-        nprimes_i64 = (int64_t)nprimes_u64;
-        printf("Prime table: %ld primes from %s\n", (long)nprimes_i64, primes_path);
+        uint64_t magic = 0;
+        bool have_magic = (fread(&magic, 8, 1, pf) == 1);
+        bool file_is_delta = have_magic && (magic == KF_DELTA_MAGIC_U32);
+
+        if (!strcmp(table_format, "delta") && !file_is_delta) {
+            fprintf(stderr, "Error: --table-format delta but %s is not a K32DLTA1 file "
+                            "(build it with `alg3_mpi --convert-delta`)\n", primes_path);
+            fclose(pf); return 1;
+        }
+        if (!strcmp(table_format, "flat") && file_is_delta) {
+            fprintf(stderr, "Error: --table-format flat but %s is a delta table\n", primes_path);
+            fclose(pf); return 1;
+        }
+        use_delta = file_is_delta;
+
+        if (use_delta) {
+            // Header: [u64 magic][u64 count][u32 block_size][u32 width]
+            uint64_t count = 0; uint32_t bsz = 0, width = 0;
+            if (fread(&count, 8, 1, pf) != 1 || fread(&bsz, 4, 1, pf) != 1 ||
+                fread(&width, 4, 1, pf) != 1) {
+                fprintf(stderr, "Error: truncated delta header in %s\n", primes_path);
+                fclose(pf); return 1;
+            }
+            if (bsz != KF_DELTA_BLOCK || width != 4) {
+                fprintf(stderr, "Error: unsupported delta table (B=%u width=%u; expected B=%d width=4)\n",
+                        bsz, width, KF_DELTA_BLOCK);
+                fclose(pf); return 1;
+            }
+            nprimes_i64       = (int64_t)count;
+            n_blocks_total    = (count + KF_DELTA_BLOCK - 1) / KF_DELTA_BLOCK;
+            block_bytes_total = (size_t)n_blocks_total * K32_DELTA_FULL;
+            all_blocks = (uint8_t *)malloc(block_bytes_total);
+            if (!all_blocks) {
+                fprintf(stderr, "Error: OOM allocating %zu delta bytes\n", block_bytes_total);
+                fclose(pf); return 1;
+            }
+            if (fseek(pf, KF_DELTA_HDR, SEEK_SET) != 0 ||
+                fread(all_blocks, 1, block_bytes_total, pf) != block_bytes_total) {
+                fprintf(stderr, "Error: cannot read delta blocks from %s\n", primes_path);
+                free(all_blocks); fclose(pf); return 1;
+            }
+            printf("Loaded delta k32 table: %ld primes, %ld blocks, %.0f MB (%s)\n",
+                   (long)nprimes_i64, (long)n_blocks_total,
+                   block_bytes_total / 1e6, primes_path);
+        }
+        fclose(pf);
+
+        if (!use_delta) {
+            uint64_t nprimes_u64 = 0;
+            h_primes = kf_load_prime_table(&nprimes_u64, primes_path);
+            if (!h_primes) {
+                fprintf(stderr, "Failed to load prime table from %s\n", primes_path); return 1;
+            }
+            nprimes_i64 = (int64_t)nprimes_u64;
+            printf("Prime table: %ld primes from %s\n", (long)nprimes_i64, primes_path);
+        }
     } else {
         printf("Sieving k32 primes (65537, 2^32] (slow; prefer --method table)...\n");
         h_primes = sieve_primes_u32(65537, 0xFFFFFFFFULL, &nprimes_i64);
@@ -218,21 +337,47 @@ int main(int argc, char **argv) {
     printf("Setting up %d GPU(s), %" PRIu64 " primes total...\n", n_gpus, nprimes);
     std::vector<GpuDev> devs((size_t)n_gpus);
     int64_t base_slice = (int64_t)nprimes / n_gpus;
+    int64_t base_blk   = use_delta ? (int64_t)(n_blocks_total / n_gpus) : 0;
     for (int g = 0; g < n_gpus; g++) {
         CUDA_CHECK(cudaSetDevice(g));
-        int64_t start = (int64_t)g * base_slice;
-        int64_t count = (g == n_gpus - 1) ? ((int64_t)nprimes - start) : base_slice;
-        devs[g].n_slice = count;
-        CUDA_CHECK(cudaMalloc(&devs[g].d_primes, (size_t)count * sizeof(uint32_t)));
-        CUDA_CHECK(cudaMemcpy(devs[g].d_primes, h_primes + start,
-                              (size_t)count * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        int64_t start = 0, count = 0;
+        if (use_delta) {
+            // Split by whole 1024-prime blocks so each device decodes independently.
+            int64_t blk_start = (int64_t)g * base_blk;
+            int64_t blk_count = (g == n_gpus - 1)
+                                ? ((int64_t)n_blocks_total - blk_start) : base_blk;
+            dev_firstblk[g] = (uint64_t)blk_start;
+            dev_nblocks[g]  = (uint32_t)blk_count;
+            size_t byte_start = (size_t)blk_start * K32_DELTA_FULL;
+            size_t dev_bytes  = (size_t)blk_count * K32_DELTA_FULL;
+            CUDA_CHECK(cudaMalloc(&d_delta[g], dev_bytes));
+            CUDA_CHECK(cudaMemcpy(d_delta[g], all_blocks + byte_start, dev_bytes,
+                                  cudaMemcpyHostToDevice));
+            devs[g].d_primes = nullptr;
+            start = blk_start * KF_DELTA_BLOCK;
+            count = blk_count * KF_DELTA_BLOCK;
+            if (start + count > (int64_t)nprimes) count = (int64_t)nprimes - start;
+            devs[g].n_slice = count;
+        } else {
+            start = (int64_t)g * base_slice;
+            count = (g == n_gpus - 1) ? ((int64_t)nprimes - start) : base_slice;
+            devs[g].n_slice = count;
+            CUDA_CHECK(cudaMalloc(&devs[g].d_primes, (size_t)count * sizeof(uint32_t)));
+            CUDA_CHECK(cudaMemcpy(devs[g].d_primes, h_primes + start,
+                                  (size_t)count * sizeof(uint32_t), cudaMemcpyHostToDevice));
+        }
         CUDA_CHECK(cudaMalloc(&devs[g].d_out_factors, MAX_GPU_FACTORS * sizeof(uint64_t)));
         CUDA_CHECK(cudaMalloc(&devs[g].d_out_count,   sizeof(int)));
         CUDA_CHECK(cudaEventCreate(&devs[g].ev0));
         CUDA_CHECK(cudaEventCreate(&devs[g].ev1));
         CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
-        printf("  GPU %d: %ld primes (offset %ld)\n", g, (long)count, (long)start);
+        if (use_delta)
+            printf("  GPU %d: %u delta blocks (first %llu, ~%ld primes)\n",
+                   g, dev_nblocks[g], (unsigned long long)dev_firstblk[g], (long)count);
+        else
+            printf("  GPU %d: %ld primes (offset %ld)\n", g, (long)count, (long)start);
     }
+    if (all_blocks) { free(all_blocks); all_blocks = nullptr; }
 
     // ---- Blinding table (255 entries, matching CPU BLIND_TABLE_SIZE) ----
     const int BLIND_TABLE_SIZE = 255;
@@ -263,8 +408,13 @@ int main(int argc, char **argv) {
             CUDA_CHECK(cudaMemset(devs[g].d_out_count, 0, sizeof(int)));
             CUDA_CHECK(cudaMemset(devs[g].d_out_factors, 0, MAX_GPU_FACTORS * sizeof(uint64_t)));
             CUDA_CHECK(cudaEventRecord(devs[g].ev0));
-            k32_trial_divide_kernel<<<NBLOCKS, 256>>>(devs[g].d_primes, devs[g].n_slice,
-                                                      devs[g].d_out_factors, devs[g].d_out_count);
+            if (use_delta)
+                k32_trial_divide_delta_kernel<<<NBLOCKS, 256>>>(
+                        d_delta[g], dev_nblocks[g], dev_firstblk[g], (uint64_t)nprimes,
+                        devs[g].d_out_factors, devs[g].d_out_count);
+            else
+                k32_trial_divide_kernel<<<NBLOCKS, 256>>>(devs[g].d_primes, devs[g].n_slice,
+                                                          devs[g].d_out_factors, devs[g].d_out_count);
             CUDA_CHECK(cudaGetLastError());
             CUDA_CHECK(cudaEventRecord(devs[g].ev1));
         }
@@ -286,7 +436,13 @@ int main(int argc, char **argv) {
             int h_count = 0;
             CUDA_CHECK(cudaMemcpy(&h_count, devs[g].d_out_count,
                                   sizeof(int), cudaMemcpyDeviceToHost));
-            if (h_count <= 0 || h_count > MAX_GPU_FACTORS) continue;
+            if (h_count <= 0) continue;
+            if (h_count > MAX_GPU_FACTORS) {
+                fprintf(stderr, "Warning: factor overflow on GPU %d (%d > %d) — "
+                        "processing first %d; increase MAX_GPU_FACTORS\n",
+                        g, h_count, MAX_GPU_FACTORS, MAX_GPU_FACTORS);
+                h_count = MAX_GPU_FACTORS;
+            }
             CUDA_CHECK(cudaMemcpy(h_out_factors, devs[g].d_out_factors,
                                   (size_t)h_count * sizeof(uint64_t), cudaMemcpyDeviceToHost));
             for (int j = 0; j < h_count; j++) {
@@ -379,7 +535,8 @@ int main(int argc, char **argv) {
         recon_ms_v.reserve(n_challenges - 1);
         GpuHitStats hit_stats;
         GpuTransferStats xfer;
-        xfer.table_mb = (double)nprimes * 4.0 / (1024.0 * 1024.0);
+        xfer.table_mb = use_delta ? (double)block_bytes_total / (1024.0 * 1024.0)
+                                  : (double)nprimes * 4.0 / (1024.0 * 1024.0);
 
         for (int ci = 1; ci < n_challenges; ci++) {
             mpz_t y_w; mpz_init(y_w);
@@ -471,4 +628,5 @@ cleanup:
 
     return solved_attempt >= 0 ? 0 : 2;
 }
-// Edit: 2026-07-11
+
+// Edit: 2026-07-27

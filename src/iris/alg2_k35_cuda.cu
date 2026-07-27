@@ -14,10 +14,13 @@
 // MULTI-GPU PRIME-RANGE SPLITTING
 // --------------------------------
 // The full k35 upper prime table (9.6 GB) is loaded into CPU RAM once at startup.
-// It is then split into N_GPUS disjoint slices: GPU g holds upper_primes[g*N..(g+1)*N).
+// It is then split into N_GPUS disjoint, WORK-BALANCED slices: GPU 0 also runs
+// Phase 1 (the k32 primes), so it gets a proportionally smaller upper slice
+// (nprimes32 + up_count[0] == up_count[g>0]) — see the per-GPU setup for the split.
 // Phase 1 (k32) runs on GPU 0 only to avoid duplicate factor reports; all GPUs run
 // Phase 2 on their slice.  Kernels on all GPUs launch in parallel; factor_ms =
-// max(elapsed_per_device).  For G4 this gives ~4× speedup over single-GPU k35.
+// max(elapsed_per_device).  The balanced split gives ~N_GPUS speedup (an even
+// split would leave GPU 0 the bottleneck at ~2.8x for G4).
 //
 // GPU memory per device: 813 MB (k32, GPU 0 only) + ~2.4 GB (upper slice for G4).
 // CPU RAM needed: ~9.6 GB for the full upper table (HPC nodes have ample headroom).
@@ -34,6 +37,7 @@
 //     --exponent E               root exponent (default 3)
 //     --primes32 FILE            k32 prime table (default: data/k32_primes.bin) [table only]
 //     --primes35 FILE            k35 upper prime table (default: data/k35_upper_primes.bin) [table only]
+//     --table-format {auto|flat|delta}  default auto; delta needs BOTH .dlt tables
 //     --n-challenges N           challenge files to run (default: 10)
 //     --n-gpus N                 number of GPUs to use (default: 1)
 //     --json FILE                write JSON output
@@ -99,6 +103,91 @@ __global__ void k35_upper_trial_divide_kernel(
             int slot = atomicAdd(out_count, 1);
             if (slot < MAX_GPU_FACTORS) out_factors[slot] = q;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DELTA trial-division kernels (the L2/DRAM-traffic experiment for k35).
+//
+// k35 carries TWO tables, so it gets two delta kernels:
+//   * lower range (65537, 2^32]  — width 4, uint32 anchors  -> 813 MB -> ~204 MB (4x)
+//   * upper range (2^32,  2^35]  — width 8, uint64 anchors  -> 9.6 GB -> ~1.2 GB (8x)
+// The upper table is where the interesting case lives: it compresses 8x, not 4x,
+// because a full 64-bit prime is replaced by a single gap-half byte, and k35 is
+// by far the most memory-bound variant (its per-GPU slice exceeds every level of
+// cache in both encodings). See wiki delta-prime-table / delta-results.
+//
+// Block layout: [anchor : width bytes][uint8 gaphalf[len-1]];
+//   p[0]=anchor, p[k]=p[k-1]+2*gaphalf[k-1].
+// One CUDA block per 1024-prime delta block, grid-stride over blocks; thread 0
+// decodes into shared memory, then all threads trial-divide. Decode is ~1024
+// adds against a ~384-limb mod per prime, so the overhead is well under 1%.
+// ---------------------------------------------------------------------------
+#define K32_DELTA_FULL     ((size_t)4 + (KF_DELTA_BLOCK - 1))   // 1027 B / full block
+#define K35U_DELTA_FULL    ((size_t)8 + (KF_DELTA_BLOCK - 1))   // 1031 B / full block
+
+__global__ void k32_trial_divide_delta_kernel(
+        const uint8_t * __restrict__ d_delta, uint32_t n_blocks,
+        uint64_t first_block_index, uint64_t total_count,
+        uint64_t *out_factors, int *out_count)
+{
+    __shared__ uint32_t s_primes[KF_DELTA_BLOCK];   // 4 KB
+    const int nlimbs = d_nlimbs;
+    for (uint32_t j = blockIdx.x; j < n_blocks; j += gridDim.x) {
+        uint64_t g    = first_block_index + j;
+        uint64_t base = g * (uint64_t)KF_DELTA_BLOCK;
+        uint32_t len  = (base + KF_DELTA_BLOCK <= total_count)
+                        ? (uint32_t)KF_DELTA_BLOCK : (uint32_t)(total_count - base);
+        const uint8_t *r = d_delta + (size_t)j * K32_DELTA_FULL;
+        if (threadIdx.x == 0) {
+            uint32_t cur = (uint32_t)r[0]         | ((uint32_t)r[1] << 8)
+                         | ((uint32_t)r[2] << 16) | ((uint32_t)r[3] << 24);
+            s_primes[0] = cur;
+            const uint8_t *gh = r + 4;
+            for (uint32_t k = 1; k < len; k++) { cur += (uint32_t)gh[k-1] << 1; s_primes[k] = cur; }
+        }
+        __syncthreads();
+        for (uint32_t k = threadIdx.x; k < len; k += blockDim.x) {
+            uint64_t q = s_primes[k];
+            if (mod_big_by_u32(d_y_limbs, nlimbs, q) == 0) {
+                int slot = atomicAdd(out_count, 1);
+                if (slot < MAX_GPU_FACTORS) out_factors[slot] = q;
+            }
+        }
+        __syncthreads();
+    }
+}
+
+__global__ void k35_upper_trial_divide_delta_kernel(
+        const uint8_t * __restrict__ d_delta, uint32_t n_blocks,
+        uint64_t first_block_index, uint64_t total_count,
+        uint64_t *out_factors, int *out_count)
+{
+    __shared__ uint64_t s_primes[KF_DELTA_BLOCK];   // 8 KB
+    const int nlimbs = d_nlimbs;
+    for (uint32_t j = blockIdx.x; j < n_blocks; j += gridDim.x) {
+        uint64_t g    = first_block_index + j;
+        uint64_t base = g * (uint64_t)KF_DELTA_BLOCK;
+        uint32_t len  = (base + KF_DELTA_BLOCK <= total_count)
+                        ? (uint32_t)KF_DELTA_BLOCK : (uint32_t)(total_count - base);
+        const uint8_t *r = d_delta + (size_t)j * K35U_DELTA_FULL;
+        if (threadIdx.x == 0) {
+            // 8-byte little-endian anchor, read byte-wise (blocks are not 8-aligned).
+            uint64_t cur = 0;
+            for (int b = 0; b < 8; b++) cur |= ((uint64_t)r[b]) << (8 * b);
+            s_primes[0] = cur;
+            const uint8_t *gh = r + 8;
+            for (uint32_t k = 1; k < len; k++) { cur += (uint64_t)gh[k-1] << 1; s_primes[k] = cur; }
+        }
+        __syncthreads();
+        for (uint32_t k = threadIdx.x; k < len; k += blockDim.x) {
+            uint64_t q = s_primes[k];
+            if (mod_big_by_u64(d_y_limbs, nlimbs, q) == 0) {
+                int slot = atomicAdd(out_count, 1);
+                if (slot < MAX_GPU_FACTORS) out_factors[slot] = q;
+            }
+        }
+        __syncthreads();
     }
 }
 
@@ -220,6 +309,7 @@ int main(int argc, char **argv) {
     unsigned long exponent     = 3;
     const char *primes32_path  = "data/k32_primes.bin";
     const char *primes35_path  = "data/k35_upper_primes.bin";
+    const char *table_format   = "auto";   // auto | flat | delta (auto = detect by magic)
     const char *json_path      = nullptr;
     gpu_method_t method        = GPU_METHOD_TABLE;
     int n_challenges           = 10;
@@ -233,6 +323,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--exponent")     && i+1<argc) exponent     = strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--primes32")     && i+1<argc) primes32_path = argv[++i];
         else if (!strcmp(argv[i], "--primes35")     && i+1<argc) primes35_path = argv[++i];
+        else if (!strcmp(argv[i], "--table-format") && i+1<argc) table_format  = argv[++i];
         else if (!strcmp(argv[i], "--json")         && i+1<argc) json_path    = argv[++i];
         else if (!strcmp(argv[i], "--method")       && i+1<argc) method       = gpu_parse_method(argv[++i]);
         else if (!strcmp(argv[i], "--n-gpus")       && i+1<argc) n_gpus       = atoi(argv[++i]);
@@ -298,6 +389,65 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    // ---- Delta-table state (both ranges) ----
+    // --table-format auto|flat|delta.  Delta tables are built by `k35_mpi --convert-delta`
+    // (k32_primes.dlt, width 4 + k35_upper_primes.dlt, width 8).  Both ranges must agree:
+    // mixing a flat and a delta table is rejected rather than silently half-applied.
+    bool     use_delta      = false;
+    uint8_t *lo_blocks      = nullptr;  size_t lo_block_bytes = 0;  uint64_t lo_nblocks = 0;
+    uint8_t *up_blocks      = nullptr;  size_t up_block_bytes = 0;  uint64_t up_nblocks = 0;
+    std::vector<uint8_t *> d_lo_delta((size_t)n_gpus, nullptr), d_up_delta((size_t)n_gpus, nullptr);
+    std::vector<uint32_t>  lo_nblk((size_t)n_gpus, 0),  up_nblk((size_t)n_gpus, 0);
+    std::vector<uint64_t>  lo_first((size_t)n_gpus, 0), up_first((size_t)n_gpus, 0);
+
+    auto peek_magic = [](const char *path, uint64_t *m) -> bool {
+        FILE *f = fopen(path, "rb"); if (!f) return false;
+        bool ok = (fread(m, 8, 1, f) == 1); fclose(f); return ok;
+    };
+    // Reads a .dlt file: [u64 magic][u64 count][u32 B][u32 width] then blocks.
+    auto load_delta = [](const char *path, uint32_t want_width, uint64_t want_magic,
+                         uint8_t **out, size_t *out_bytes,
+                         uint64_t *out_nblocks, int64_t *out_count) -> bool {
+        FILE *f = fopen(path, "rb"); if (!f) return false;
+        uint64_t magic = 0, count = 0; uint32_t bsz = 0, width = 0;
+        if (fread(&magic,8,1,f)!=1 || fread(&count,8,1,f)!=1 ||
+            fread(&bsz,4,1,f)!=1   || fread(&width,4,1,f)!=1) { fclose(f); return false; }
+        if (magic != want_magic || bsz != KF_DELTA_BLOCK || width != want_width) {
+            fprintf(stderr, "Error: %s is not a B=%d width=%u delta table\n",
+                    path, KF_DELTA_BLOCK, want_width);
+            fclose(f); return false;
+        }
+        size_t full = (size_t)width + (KF_DELTA_BLOCK - 1);
+        uint64_t nb = (count + KF_DELTA_BLOCK - 1) / KF_DELTA_BLOCK;
+        size_t bytes = (size_t)nb * full;
+        uint8_t *buf = (uint8_t *)malloc(bytes);
+        if (!buf) { fclose(f); return false; }
+        if (fseek(f, KF_DELTA_HDR, SEEK_SET) != 0 || fread(buf, 1, bytes, f) != bytes) {
+            free(buf); fclose(f); return false;
+        }
+        fclose(f);
+        *out = buf; *out_bytes = bytes; *out_nblocks = nb; *out_count = (int64_t)count;
+        return true;
+    };
+
+    if (method == GPU_METHOD_TABLE && strcmp(table_format, "flat") != 0) {
+        uint64_t m32 = 0, m35 = 0;
+        bool lo_is_delta = peek_magic(primes32_path, &m32) && m32 == KF_DELTA_MAGIC_U32;
+        bool up_is_delta = peek_magic(primes35_path, &m35) && m35 == KF_DELTA_MAGIC_U64;
+        if (lo_is_delta != up_is_delta) {
+            fprintf(stderr, "Error: mixed table formats (%s=%s, %s=%s) — convert both.\n",
+                    primes32_path, lo_is_delta ? "delta" : "flat",
+                    primes35_path, up_is_delta ? "delta" : "flat");
+            return 1;
+        }
+        if (!strcmp(table_format, "delta") && !lo_is_delta) {
+            fprintf(stderr, "Error: --table-format delta but the tables are flat "
+                            "(build them with `k35_mpi --convert-delta`)\n");
+            return 1;
+        }
+        use_delta = lo_is_delta;
+    }
+
     // ---- Load or generate prime tables ----
     uint32_t *primes32   = nullptr;
     int64_t   nprimes32  = 0;
@@ -306,7 +456,21 @@ int main(int argc, char **argv) {
     const uint64_t upper_lo = ((uint64_t)1 << 32) + 1;
     const uint64_t upper_hi = (uint64_t)1 << 35;
 
-    if (method == GPU_METHOD_TABLE) {
+    if (method == GPU_METHOD_TABLE && use_delta) {
+        if (!load_delta(primes32_path, 4, KF_DELTA_MAGIC_U32,
+                        &lo_blocks, &lo_block_bytes, &lo_nblocks, &nprimes32)) {
+            fprintf(stderr, "Error: failed to load delta table %s\n", primes32_path); return 1;
+        }
+        printf("Loaded delta k32 table: %ld primes, %llu blocks, %.0f MB (%s)\n",
+               (long)nprimes32, (unsigned long long)lo_nblocks, lo_block_bytes / 1e6, primes32_path);
+        if (!load_delta(primes35_path, 8, KF_DELTA_MAGIC_U64,
+                        &up_blocks, &up_block_bytes, &up_nblocks, &n_upper)) {
+            fprintf(stderr, "Error: failed to load delta table %s\n", primes35_path);
+            free(lo_blocks); return 1;
+        }
+        printf("Loaded delta k35 upper table: %ld primes, %llu blocks, %.1f GB (%s)\n",
+               (long)n_upper, (unsigned long long)up_nblocks, up_block_bytes / 1e9, primes35_path);
+    } else if (method == GPU_METHOD_TABLE) {
         printf("Loading k32 prime table from %s...\n", primes32_path);
         uint64_t nprimes32_u64 = 0;
         primes32 = kf_load_prime_table(&nprimes32_u64, primes32_path);
@@ -342,10 +506,84 @@ int main(int argc, char **argv) {
 
     // ---- Per-GPU setup ----
     std::vector<K35Dev> devs((size_t)n_gpus);
-    int64_t base_up = n_upper / n_gpus;
+
+    // Work-balanced upper-slice split. GPU 0 ALSO runs Phase 1 (the nprimes32 k32
+    // primes), so an even upper split would overload it and pin factor_ms
+    // (= max over devices) to GPU 0. Instead give GPU 0 a proportionally smaller
+    // upper slice so that nprimes32 + up_count[0] == up_count[g>0]; with
+    // sum(up_count) = n_upper this is a per-GPU target of (n_upper+nprimes32)/n_gpus,
+    // making every device do ~equal total trial-division work → genuine ~n_gpus
+    // scaling (was ~2.8x at G4). Each forward trial-division test costs the same
+    // regardless of prime magnitude, so equal counts == equal work.
+    std::vector<int64_t> up_start((size_t)n_gpus), up_count((size_t)n_gpus);
+    if (n_gpus == 1) {
+        up_start[0] = 0;
+        up_count[0] = n_upper;
+    } else {
+        int64_t W  = (n_upper + nprimes32) / n_gpus;   // per-GPU target work
+        int64_t s0 = W - nprimes32;                    // GPU 0's upper slice
+        if (s0 < 0)        s0 = 0;                      // Phase 1 alone >= target
+        if (s0 > n_upper)  s0 = n_upper;
+        up_count[0] = s0;
+        int64_t rem = n_upper - s0;                    // spread over GPUs 1..n_gpus-1
+        int64_t per = rem / (n_gpus - 1);
+        for (int g = 1; g < n_gpus; g++) up_count[g] = per;
+        up_count[n_gpus - 1] += rem - per * (n_gpus - 1);  // last absorbs remainder
+        up_start[0] = 0;
+        for (int g = 1; g < n_gpus; g++) up_start[g] = up_start[g - 1] + up_count[g - 1];
+    }
+
+    // Delta mode: same balance, but in units of whole 1024-prime blocks. GPU 0 also
+    // carries the entire lower range (Phase 1), so it gets a correspondingly smaller
+    // upper slice; sum(up_nblk) == up_nblocks keeps coverage exact and disjoint.
+    if (use_delta) {
+        if (n_gpus == 1) { up_first[0] = 0; up_nblk[0] = (uint32_t)up_nblocks; }
+        else {
+            int64_t W  = ((int64_t)up_nblocks + (int64_t)lo_nblocks) / n_gpus;
+            int64_t s0 = W - (int64_t)lo_nblocks;
+            if (s0 < 0) s0 = 0;
+            if (s0 > (int64_t)up_nblocks) s0 = (int64_t)up_nblocks;
+            up_nblk[0] = (uint32_t)s0;
+            int64_t rem = (int64_t)up_nblocks - s0;
+            int64_t per = rem / (n_gpus - 1);
+            for (int g = 1; g < n_gpus; g++) up_nblk[g] = (uint32_t)per;
+            up_nblk[n_gpus - 1] += (uint32_t)(rem - per * (n_gpus - 1));
+            up_first[0] = 0;
+            for (int g = 1; g < n_gpus; g++) up_first[g] = up_first[g-1] + up_nblk[g-1];
+        }
+    }
 
     for (int g = 0; g < n_gpus; g++) {
         CUDA_CHECK(cudaSetDevice(g));
+
+        if (use_delta) {
+            // Phase 1 (lower range) lives entirely on GPU 0, as in flat mode.
+            if (g == 0 && lo_nblocks > 0) {
+                CUDA_CHECK(cudaMalloc(&d_lo_delta[g], lo_block_bytes));
+                CUDA_CHECK(cudaMemcpy(d_lo_delta[g], lo_blocks, lo_block_bytes,
+                                      cudaMemcpyHostToDevice));
+                lo_nblk[g]  = (uint32_t)lo_nblocks;
+                lo_first[g] = 0;
+            }
+            // Phase 2: this device's disjoint upper block range.
+            if (up_nblk[g] > 0) {
+                size_t off   = (size_t)up_first[g] * K35U_DELTA_FULL;
+                size_t bytes = (size_t)up_nblk[g]  * K35U_DELTA_FULL;
+                CUDA_CHECK(cudaMalloc(&d_up_delta[g], bytes));
+                CUDA_CHECK(cudaMemcpy(d_up_delta[g], up_blocks + off, bytes,
+                                      cudaMemcpyHostToDevice));
+            }
+            devs[g].d_primes32 = nullptr;  devs[g].n_primes32 = (g == 0) ? nprimes32 : 0;
+            devs[g].d_upper    = nullptr;  devs[g].n_upper    = (int64_t)up_nblk[g] * KF_DELTA_BLOCK;
+            CUDA_CHECK(cudaMalloc(&devs[g].d_out_factors, MAX_GPU_FACTORS * sizeof(uint64_t)));
+            CUDA_CHECK(cudaMalloc(&devs[g].d_out_count,   sizeof(int)));
+            CUDA_CHECK(cudaEventCreate(&devs[g].ev0));
+            CUDA_CHECK(cudaEventCreate(&devs[g].ev1));
+            CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
+            printf("  GPU %d: %u lower + %u upper delta blocks (upper first %llu)\n",
+                   g, lo_nblk[g], up_nblk[g], (unsigned long long)up_first[g]);
+            continue;
+        }
 
         // Phase 1: k32 primes on GPU 0 only (avoids duplicate factor reports on collect)
         if (g == 0) {
@@ -358,13 +596,17 @@ int main(int argc, char **argv) {
             devs[g].n_primes32 = 0;
         }
 
-        // Phase 2: disjoint upper prime slice
-        int64_t start = (int64_t)g * base_up;
-        int64_t count = (g == n_gpus - 1) ? (n_upper - start) : base_up;
+        // Phase 2: work-balanced disjoint upper prime slice
+        int64_t start = up_start[g];
+        int64_t count = up_count[g];
         devs[g].n_upper = count;
-        CUDA_CHECK(cudaMalloc(&devs[g].d_upper, (size_t)count * sizeof(uint64_t)));
-        CUDA_CHECK(cudaMemcpy(devs[g].d_upper, upper_primes + start,
-                              (size_t)count * sizeof(uint64_t), cudaMemcpyHostToDevice));
+        if (count > 0) {
+            CUDA_CHECK(cudaMalloc(&devs[g].d_upper, (size_t)count * sizeof(uint64_t)));
+            CUDA_CHECK(cudaMemcpy(devs[g].d_upper, upper_primes + start,
+                                  (size_t)count * sizeof(uint64_t), cudaMemcpyHostToDevice));
+        } else {
+            devs[g].d_upper = nullptr;
+        }
 
         CUDA_CHECK(cudaMalloc(&devs[g].d_out_factors, MAX_GPU_FACTORS * sizeof(uint64_t)));
         CUDA_CHECK(cudaMalloc(&devs[g].d_out_count,   sizeof(int)));
@@ -373,11 +615,15 @@ int main(int argc, char **argv) {
 
         // Per-device constant memory
         CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
+        printf("  GPU %d: %ld k32 + %ld upper primes\n",
+               g, (long)devs[g].n_primes32, (long)count);
     }
 
     // CPU RAM no longer needed after upload
     free(primes32);
     free(upper_primes);
+    if (lo_blocks) { free(lo_blocks); lo_blocks = nullptr; }
+    if (up_blocks) { free(up_blocks); up_blocks = nullptr; }
 
     uint64_t *h_out_factors = (uint64_t *)malloc(MAX_GPU_FACTORS * sizeof(uint64_t));
 
@@ -410,7 +656,21 @@ int main(int argc, char **argv) {
             CUDA_CHECK(cudaMemset(devs[g].d_out_count, 0, sizeof(int)));
             CUDA_CHECK(cudaEventRecord(devs[g].ev0));
 
-            // Phase 1: k32 primes on GPU 0 only
+            // Phase 1: lower range on GPU 0 only
+            if (use_delta) {
+                if (lo_nblk[g] > 0) {
+                    k32_trial_divide_delta_kernel<<<BLOCKS, THREADS>>>(
+                        d_lo_delta[g], lo_nblk[g], lo_first[g], (uint64_t)nprimes32,
+                        devs[g].d_out_factors, devs[g].d_out_count);
+                    CUDA_CHECK(cudaGetLastError());
+                }
+                if (up_nblk[g] > 0) {
+                    k35_upper_trial_divide_delta_kernel<<<BLOCKS, THREADS>>>(
+                        d_up_delta[g], up_nblk[g], up_first[g], (uint64_t)n_upper,
+                        devs[g].d_out_factors, devs[g].d_out_count);
+                    CUDA_CHECK(cudaGetLastError());
+                }
+            } else {
             if (devs[g].d_primes32) {
                 k32_trial_divide_kernel<<<BLOCKS, THREADS>>>(
                     devs[g].d_primes32, devs[g].n_primes32,
@@ -423,6 +683,7 @@ int main(int argc, char **argv) {
                     devs[g].d_upper, devs[g].n_upper,
                     devs[g].d_out_factors, devs[g].d_out_count);
                 CUDA_CHECK(cudaGetLastError());
+            }
             }
             CUDA_CHECK(cudaEventRecord(devs[g].ev1));
         }
@@ -445,7 +706,13 @@ int main(int argc, char **argv) {
             CUDA_CHECK(cudaSetDevice(g));
             int h_count = 0;
             CUDA_CHECK(cudaMemcpy(&h_count, devs[g].d_out_count, sizeof(int), cudaMemcpyDeviceToHost));
-            if (h_count <= 0 || h_count > MAX_GPU_FACTORS) continue;
+            if (h_count <= 0) continue;
+            if (h_count > MAX_GPU_FACTORS) {
+                fprintf(stderr, "Warning: factor overflow on GPU %d (%d > %d) — "
+                        "processing first %d; increase MAX_GPU_FACTORS\n",
+                        g, h_count, MAX_GPU_FACTORS, MAX_GPU_FACTORS);
+                h_count = MAX_GPU_FACTORS;
+            }
             CUDA_CHECK(cudaMemcpy(h_out_factors, devs[g].d_out_factors,
                                   (size_t)h_count * sizeof(uint64_t), cudaMemcpyDeviceToHost));
             for (int j = 0; j < h_count; j++) {
@@ -519,7 +786,9 @@ int main(int argc, char **argv) {
         GpuHitStats hit_stats;
         GpuTransferStats xfer;
         // Upper table (uint64_t per prime) dominates; k32 slice (uint32_t) is secondary.
-        xfer.table_mb = ((double)n_upper * 8.0 + (double)nprimes32 * 4.0) / (1024.0 * 1024.0);
+        xfer.table_mb = use_delta
+            ? (double)(lo_block_bytes + up_block_bytes) / (1024.0 * 1024.0)
+            : ((double)n_upper * 8.0 + (double)nprimes32 * 4.0) / (1024.0 * 1024.0);
 
         for (int ci = 1; ci < n_challenges; ci++) {
             mpz_t y_w; mpz_init(y_w);
@@ -594,4 +863,5 @@ cleanup:
     return solved_attempt >= 0 ? 0 : 2;
 }
 
-// Edit: 2026-07-11
+
+// Edit: 2026-07-27
