@@ -68,6 +68,23 @@ int main(int argc, char **argv)
     // --- blinding table, replicated on every rank (r_blind agreed via bcast) ---
     blinding_pair_t *table = kf_blinding_table_alloc(R, M, e);
     if (!table) { fprintf(stderr, "[rank %d] table alloc failed\n", rank); MPI_Abort(MPI_COMM_WORLD, 1); }
+
+    // kf_blinding_table_alloc seeds from time(NULL) ^ address, so a fresh table is
+    // drawn on every invocation. That is right for the solvers but wrong here: the
+    // gate above requires the winning index j to be IDENTICAL at nranks in {1,2,4},
+    // and those are three SEPARATE mpirun invocations. With a time-seeded table each
+    // run searches a different candidate set, so j legitimately differs and the
+    // cross-nranks comparison becomes untestable. Re-draw rank 0's multipliers from a
+    // FIXED seed and broadcast them, so the whole table is reproducible run to run.
+    if (rank == 0) {
+        gmp_randstate_t st; gmp_randinit_mt(st); gmp_randseed_ui(st, 987654321UL);
+        mpz_t r;  mpz_init(r);
+        for (int i = 0; i < R; i++) {
+            do { mpz_urandomm(r, st, M); } while (mpz_sgn(r) == 0);
+            mpz_powm_ui(table[i].r_blind, r, e, M);   // r_blind holds r^e mod M
+        }
+        mpz_clear(r); gmp_randclear(st);
+    }
     for (int i = 0; i < R; i++) bcast_mpz(table[i].r_blind, nbytes, rank);
 
     // --- partition [0, R) across ranks (same scheme as the solvers) ---

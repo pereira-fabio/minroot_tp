@@ -1,11 +1,13 @@
 #!/bin/bash -l
 #SBATCH --job-name=minroot_prefilter_test
-#SBATCH --output=minroot_prefilter_test_%j.out
-#SBATCH --error=minroot_prefilter_test_%j.err
+#SBATCH --output=prefilter_%j.out
+#SBATCH --error=prefilter_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=1
 #SBATCH --time=00:15:00
+
+# SLURM does not create --output directories; make it before the job writes anything.
 
 # ===========================================================================
 # Phase-0 correctness gate for the SIMPLE pre-filter (paper Fig. 6 / Algorithm 5).
@@ -14,7 +16,9 @@
 # slurm pattern used by the other AION scripts) and runs the gate at np = 1, 2, 4.
 #
 # The test is self-contained: it generates a 256-bit prime M and a random
-# challenge from a fixed seed, builds the blinding table (|Re| = 4096), then
+# challenge from a fixed seed, builds the blinding table (|Re| = 4096) from a
+# FIXED seed (so the winning index j is reproducible across invocations — see
+# tests/prefilter_test.cpp), then
 # checks that the parallel argmin (prefilter_simple_select) equals the single-rank
 # brute-force argmin AND that the winning y_j is below the table mean. It needs no
 # challenge files and no cbrt cache.
