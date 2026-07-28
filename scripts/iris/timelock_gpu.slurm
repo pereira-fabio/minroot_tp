@@ -7,6 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --partition=l40s
+#SBATCH --qos=besteffort
 #SBATCH --gres=gpu:1
 
 # ---------------------------------------------------------------------------
