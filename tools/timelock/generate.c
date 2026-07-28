@@ -48,39 +48,53 @@ int cmd_generate(int bits, unsigned long e, unsigned long T,
     gen_prime(pz.p, e, bits, rng);
     gmp_printf("  p  = %Zx\n", pz.p);
 
-    /* 2. Random starting value x0 in [1, p-1] */
-    do {
-        mpz_urandomm(pz.x0, rng, pz.p);
-    } while (mpz_cmp_ui(pz.x0, 0) == 0);
-
-    /* 3. Compute x_T using the setter's shortcut:
-     *      x_T = x0 ^ (e^{-T} mod (p-1))  mod p
-     *    This is one powm instead of T powms.
-     *    Derivation: x_k = x_{k-1}^(e^{-1}) mod p, so x_T = x0^(e^{-T}) mod p.
-     *    e^{-T} mod phi = (e^T mod phi)^{-1} mod phi.
+    /* 2. Pick the FINAL MinRoot state (x_T, y_T) at random.
+     *
+     *    MinRoot is trapdoor-free by design. There is no setup secret that
+     *    lets the setter skip ahead (unlike an RSA time-lock), and the rounds
+     *    do NOT collapse into a single exponentiation the way a plain iterated
+     *    e-th root does -- the +y_i and +i feed-forward destroys that. So the
+     *    setter genuinely cannot walk the chain forward cheaply.
+     *
+     *    It does not have to. The MinRoot round inverts cheaply: walking
+     *    BACKWARDS costs one e-th POWER per step instead of one e-th ROOT.
+     *    So choose the end state and walk back to the start.
      */
-    mpz_t phi, e_mpz, e_T, e_T_inv, x_T;
-    mpz_init(phi);
-    mpz_init_set_ui(e_mpz, e);
-    mpz_init(e_T);
-    mpz_init(e_T_inv);
-    mpz_init(x_T);
+    mpz_t x_T, y_T, xc, yc, x_prev, y_prev;
+    mpz_init(x_T); mpz_init(y_T);
+    mpz_init(xc);  mpz_init(yc);
+    mpz_init(x_prev); mpz_init(y_prev);
 
-    mpz_sub_ui(phi, pz.p, 1);                    /* phi = p - 1         */
-    mpz_powm_ui(e_T, e_mpz, T, phi);             /* e_T = e^T mod phi   */
+    do {
+        mpz_urandomm(x_T, rng, pz.p);
+    } while (mpz_cmp_ui(x_T, 0) == 0);
+    mpz_urandomm(y_T, rng, pz.p);
 
-    if (mpz_invert(e_T_inv, e_T, phi) == 0) {
-        fprintf(stderr, "Error: e^T not invertible mod p-1. "
-                        "Choose a different prime or exponent.\n");
-        mpz_clear(phi); mpz_clear(e_mpz); mpz_clear(e_T);
-        mpz_clear(e_T_inv); mpz_clear(x_T);
-        puzzle_free(&pz);
-        gmp_randclear(rng);
-        return 1;
+    /* 3. Walk backwards T rounds to recover (x_0, y_0).
+     *
+     *    Forward round i:  x_{i+1} = (x_i + y_i)^{1/e} mod p
+     *                      y_{i+1} = x_i + i           mod p
+     *
+     *    Inverting round i:  x_i = y_{i+1} - i
+     *                        y_i = x_{i+1}^e - x_i
+     *
+     *    (Check: x_i + y_i = x_{i+1}^e, so (x_i+y_i)^{1/e} = x_{i+1}; and
+     *     x_i + i = y_{i+1}. Both forward relations hold.)
+     */
+    printf("Walking %lu MinRoot rounds backwards (e-th powers, cheap) ...\n", T);
+    mpz_set(xc, x_T);
+    mpz_set(yc, y_T);
+    for (unsigned long i = T; i-- > 0; ) {
+        mpz_sub_ui(x_prev, yc, i);              /* x_i = y_{i+1} - i        */
+        mpz_mod(x_prev, x_prev, pz.p);
+        mpz_powm_ui(y_prev, xc, e, pz.p);       /* y_i = x_{i+1}^e - x_i    */
+        mpz_sub(y_prev, y_prev, x_prev);
+        mpz_mod(y_prev, y_prev, pz.p);
+        mpz_set(xc, x_prev);
+        mpz_set(yc, y_prev);
     }
-
-    printf("Computing x_T via shortcut (1 powm instead of %lu) ...\n", T);
-    mpz_powm(x_T, pz.x0, e_T_inv, pz.p);        /* x_T = x0^(e_T_inv) mod p */
+    mpz_set(pz.x0, xc);
+    mpz_set(pz.y0, yc);
 
     /* 4. AES-256 key = SHA-256(x_T) */
     unsigned char key[32];
@@ -114,9 +128,11 @@ int cmd_generate(int bits, unsigned long e, unsigned long T,
     printf("\nSolve sequentially : minroot-timelock solve %s\n",  outpath);
     printf("Solve via attack   : minroot-timelock attack %s\n", outpath);
 
-    mpz_clear(phi); mpz_clear(e_mpz); mpz_clear(e_T);
-    mpz_clear(e_T_inv); mpz_clear(x_T);
+    mpz_clear(x_T); mpz_clear(y_T); mpz_clear(xc); mpz_clear(yc);
+    mpz_clear(x_prev); mpz_clear(y_prev);
     puzzle_free(&pz);
     gmp_randclear(rng);
     return 0;
 }
+
+// Edit: 2026-07-28

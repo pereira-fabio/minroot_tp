@@ -18,11 +18,14 @@ int cmd_solve(const char *puzzle_path) {
     printf("  T = %lu iterations, e = %lu\n", pz.T, pz.e);
     printf("  |p| = %zu bits\n\n", mpz_sizeinbase(pz.p, 2));
 
-    mpz_t phi, e_mpz, e_inv, x;
+    mpz_t phi, e_mpz, e_inv, x, y, s, x_old;
     mpz_init(phi);
     mpz_init_set_ui(e_mpz, pz.e);
     mpz_init(e_inv);
     mpz_init_set(x, pz.x0);
+    mpz_init_set(y, pz.y0);
+    mpz_init(s);
+    mpz_init(x_old);
 
     mpz_sub_ui(phi, pz.p, 1);
     if (mpz_invert(e_inv, e_mpz, phi) == 0) {
@@ -37,8 +40,18 @@ int cmd_solve(const char *puzzle_path) {
     unsigned long report = pz.T / 20;
     if (report < 1) report = 1;
 
+    /* MinRoot forward round -- the honest, inherently sequential direction:
+     *   x_{i+1} = (x_i + y_i)^{1/e} mod p     <- the ONLY expensive operation
+     *   y_{i+1} = x_i + i           mod p
+     * The two additions are free; the root is what the delay rests on. There
+     * is no shortcut here, which is the whole point of the construction. */
     for (unsigned long i = 0; i < pz.T; i++) {
-        mpz_powm(x, x, e_inv, pz.p);
+        mpz_add(s, x, y);
+        mpz_mod(s, s, pz.p);
+        mpz_set(x_old, x);
+        mpz_powm(x, s, e_inv, pz.p);   /* x_{i+1} = (x_i + y_i)^{1/e} */
+        mpz_add_ui(y, x_old, i);       /* y_{i+1} = x_i + i           */
+        mpz_mod(y, y, pz.p);
 
         if ((i + 1) % report == 0 || i + 1 == pz.T) {
             clock_gettime(CLOCK_MONOTONIC, &tnow);
@@ -66,7 +79,8 @@ int cmd_solve(const char *puzzle_path) {
     if (!plaintext) {
         fprintf(stderr, "\nDecryption failed — wrong key. "
                         "The solve is incorrect.\n");
-        mpz_clear(phi); mpz_clear(e_mpz); mpz_clear(e_inv); mpz_clear(x);
+        mpz_clear(phi); mpz_clear(e_mpz); mpz_clear(e_inv);
+        mpz_clear(x); mpz_clear(y); mpz_clear(s); mpz_clear(x_old);
         puzzle_free(&pz);
         return 1;
     }
@@ -75,7 +89,10 @@ int cmd_solve(const char *puzzle_path) {
     printf("Message: %s\n", (char *)plaintext);
 
     free(plaintext);
-    mpz_clear(phi); mpz_clear(e_mpz); mpz_clear(e_inv); mpz_clear(x);
+    mpz_clear(phi); mpz_clear(e_mpz); mpz_clear(e_inv);
+    mpz_clear(x); mpz_clear(y); mpz_clear(s); mpz_clear(x_old);
     puzzle_free(&pz);
     return 0;
 }
+
+// Edit: 2026-07-28

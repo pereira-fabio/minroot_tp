@@ -107,9 +107,17 @@ static void export_fixed(unsigned char *buf, size_t nbytes, const mpz_t x)
 // crt_step: c_inout <- c_inout^alpha mod M
 // ---------------------------------------------------------------------------
 void crt_step(mpz_t c_inout, const crt_ctx_t *ctx, const mpz_t modulo,
-              int lo, int hi, int rank, int nranks)
+              int lo, int hi, int rank, int nranks, crt_profile_t *prof)
 {
+    // Timing is off the critical path (one MPI_Wtime per phase per step, against
+    // thousands of big-integer ops), so instrumenting costs nothing measurable.
+    const bool P = (prof != NULL);
+    double t0 = P ? MPI_Wtime() : 0.0;
+
     // -- local partial reconstruction sum over this rank's prime slice --
+    // THIS is the only parallel work in the method. Each iteration does one
+    // |M|-bit division (mpz_tdiv_ui) and one |prod|-bit multiply-accumulate
+    // (mpz_addmul_ui, K_i is alpha*|M| bits) -- the latter dominates.
     mpz_t local;
     mpz_init_set_ui(local, 0);
     for (int i = lo; i < hi; i++) {
@@ -118,7 +126,10 @@ void crt_step(mpz_t c_inout, const crt_ctx_t *ctx, const mpz_t modulo,
         uint64_t ri = powmod_u64(ci, ctx->alpha, pi);                    // c_i^alpha mod p_i
         if (ri) mpz_addmul_ui(local, ctx->K[i], (unsigned long)ri);      // += r_i * K_i
     }
+    if (P) { double t = MPI_Wtime(); prof->local_ms += (t - t0) * 1e3; t0 = t; }
+
     mpz_mod(local, local, ctx->prod); // keep partial < prod (sum mod prod later)
+    if (P) { double t = MPI_Wtime(); prof->localmod_ms += (t - t0) * 1e3; t0 = t; }
 
     // -- gather partials to rank 0, sum, reconstruct, reduce mod M --
     size_t nbytes = (mpz_sizeinbase(ctx->prod, 2) + 7) / 8 + 1;
@@ -131,13 +142,16 @@ void crt_step(mpz_t c_inout, const crt_ctx_t *ctx, const mpz_t modulo,
         recvbuf = (unsigned char *)malloc(nbytes * (size_t)nranks);
         if (!recvbuf) MPI_Abort(MPI_COMM_WORLD, 1);
     }
-    MPI_Gather(sendbuf, (int)nbytes, MPI_UNSIGNED_CHAR,
-               recvbuf, (int)nbytes, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
-
-    // Result of the step, packed big-endian into a |M|-sized buffer for bcast.
     size_t mbytes = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
     unsigned char *resbuf = (unsigned char *)malloc(mbytes);
     if (!resbuf) MPI_Abort(MPI_COMM_WORLD, 1);
+    if (P) { double t = MPI_Wtime(); prof->pack_ms += (t - t0) * 1e3; t0 = t; }
+
+    // O(nranks) in both volume and rank-0 work -- the term that makes adding
+    // ranks eventually slow the solve down.
+    MPI_Gather(sendbuf, (int)nbytes, MPI_UNSIGNED_CHAR,
+               recvbuf, (int)nbytes, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
+    if (P) { double t = MPI_Wtime(); prof->gather_ms += (t - t0) * 1e3; t0 = t; }
 
     if (rank == 0) {
         mpz_t total, part;
@@ -152,9 +166,11 @@ void crt_step(mpz_t c_inout, const crt_ctx_t *ctx, const mpz_t modulo,
         export_fixed(resbuf, mbytes, total);
         mpz_clears(total, part, NULL);
     }
+    if (P) { double t = MPI_Wtime(); prof->combine_ms += (t - t0) * 1e3; t0 = t; }
 
     MPI_Bcast(resbuf, (int)mbytes, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
     mpz_import(c_inout, mbytes, 1, 1, 0, 0, resbuf);
+    if (P) { prof->bcast_ms += (MPI_Wtime() - t0) * 1e3; prof->steps++; }
 
     if (rank == 0) free(recvbuf);
     free(sendbuf);
@@ -162,4 +178,5 @@ void crt_step(mpz_t c_inout, const crt_ctx_t *ctx, const mpz_t modulo,
     mpz_clear(local);
 }
 
-// Edit: 2026-07-12
+
+// Edit: 2026-07-28

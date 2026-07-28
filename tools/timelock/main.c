@@ -36,8 +36,14 @@ static void usage(void) {
 "  Security note: use -b 256 or larger for a real puzzle.\n"
 "                 -b 64 is for demonstration only.\n"
 "\n"
+"MINROOT ROUND FUNCTION\n"
+"  x_{i+1} = (x_i + y_i)^(1/e) mod p,   y_{i+1} = x_i + i mod p\n"
+"  The state is a PAIR. Generation walks the chain BACKWARDS (one e-th power\n"
+"  per round, cheap); solving must walk it forwards (one e-th root per round).\n"
+"  There is no setter trapdoor -- that is the point of the construction.\n"
+"\n"
 "FILE FORMAT\n"
-"  Plain-text .mrt file with labeled hex fields (MINROOT-TIMELOCK-V1).\n"
+"  Plain-text .mrt file with labeled hex fields (MINROOT-TIMELOCK-V2).\n"
     );
 }
 
@@ -94,3 +100,5 @@ int main(int argc, char **argv) {
     usage();
     return 1;
 }
+
+// Edit: 2026-07-28

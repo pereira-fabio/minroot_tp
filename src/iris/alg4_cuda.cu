@@ -334,14 +334,33 @@ int main(int argc, char **argv) {
             }
             nprimes_i64       = (int64_t)count;
             n_blocks_total    = (count + KF_DELTA_BLOCK - 1) / KF_DELTA_BLOCK;
+            // The writer does NOT pad the final block: it holds
+            // width + (last_len - 1) bytes, not a full K32_DELTA_FULL. Allocate
+            // the uniform stride the kernel indexes with (j * K32_DELTA_FULL)
+            // and zero it, but read only the bytes actually on disk -- reading
+            // n_blocks * FULL over-runs a VALID file by up to FULL-width bytes
+            // and was why every delta pass failed with "cannot read delta blocks".
             block_bytes_total = (size_t)n_blocks_total * K32_DELTA_FULL;
-            all_blocks = (uint8_t *)malloc(block_bytes_total);
+            const uint64_t last_len =
+                count - (uint64_t)(n_blocks_total - 1) * KF_DELTA_BLOCK;
+            const size_t on_disk =
+                (size_t)(n_blocks_total - 1) * K32_DELTA_FULL + 4 + (size_t)(last_len - 1);
+            fseek(pf, 0, SEEK_END);
+            const long fsz = ftell(pf);
+            if (fsz < 0 || (size_t)fsz != KF_DELTA_HDR + on_disk) {
+                fprintf(stderr, "Error: %s is %ld bytes, expected %zu for %llu primes "
+                        "(truncated or wrong table)\n",
+                        primes_path, fsz, KF_DELTA_HDR + on_disk,
+                        (unsigned long long)count);
+                fclose(pf); return 1;
+            }
+            all_blocks = (uint8_t *)calloc(1, block_bytes_total);
             if (!all_blocks) {
                 fprintf(stderr, "Error: OOM allocating %zu delta bytes\n", block_bytes_total);
                 fclose(pf); return 1;
             }
             if (fseek(pf, KF_DELTA_HDR, SEEK_SET) != 0 ||
-                fread(all_blocks, 1, block_bytes_total, pf) != block_bytes_total) {
+                fread(all_blocks, 1, on_disk, pf) != on_disk) {
                 fprintf(stderr, "Error: cannot read delta blocks from %s\n", primes_path);
                 free(all_blocks); fclose(pf); return 1;
             }
@@ -678,4 +697,5 @@ cleanup:
     return solved_attempt >= 0 ? 0 : 2;
 }
 
-// Edit: 2026-07-27
+
+// Edit: 2026-07-28

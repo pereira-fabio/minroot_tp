@@ -2,8 +2,13 @@
  * attack_cuda.cu — GPU batched-search variant of the time-lock attack
  *
  * WHAT THIS IS
- *   tools/timelock/attack.c walks the T-step chain one blinding attempt at
- *   a time: pick r, form y = x*r^e mod p, trial-divide, retry if not
+ *   The puzzle is a real MinRoot chain:
+ *       x_{i+1} = (x_i + y_i)^{1/e} mod p,   y_{i+1} = x_i + i mod p
+ *   so every step must invert s_i = x_i + y_i. The additions are free; the
+ *   e-th root is the entire cost and the only part the attack touches.
+ *
+ *   tools/timelock/attack.c walks that chain one blinding attempt at a time:
+ *   pick r, form y = s*r^e mod p, trial-divide, retry if not
  *   smooth. That inner retry loop is PHASE 1 of the attack (the smoothness
  *   search, thesis sub4:twophases) — the one phase the rest of this project
  *   never measures, because the challenge generator hands the solvers a
@@ -16,7 +21,7 @@
  *
  * WHY 64-BIT ONLY
  *   The demo puzzle is generated with -b 64 (scripts/aion/timelock_demo.slurm),
- *   so p, x and every candidate y fit in uint64_t, and every product fits in
+ *   so p, the state and every candidate fit in uint64_t, and every product in
  *   __uint128_t. That keeps the device code to plain machine words: no
  *   multi-limb mulmod, no CGBN, no GMP on the device. A wider modulus needs a
  *   192-bit device mulmod for the blinding step; that is deliberately left as
@@ -24,7 +29,7 @@
  *   truncating it.
  *
  * DIVISION OF LABOUR
- *   device : blinding (y = x*r^e mod p) + trial division + "is it smooth?"
+ *   device : blinding (y = s*r^e mod p) + trial division + "is it smooth?"
  *   host   : re-derive the factorisation of the winning candidate ONCE per
  *            step, reconstruct, unblind, verify, derive the key, decrypt.
  *
@@ -38,7 +43,7 @@
  *   1. cbrt table   : cbrt[j]^e == primes[j] (mod p) for every j
  *   2. kernel       : every r the device reports smooth must factor completely
  *                     on the host — a device-only "hit" is a kernel bug
- *   3. per step     : result^e == x (mod p), same gate as attack.c
+ *   3. per step     : result^e == x_i + y_i (mod p), same gate as attack.c
  *   final           : the decrypted plaintext must come back readable
  *
  * BUILD / RUN: see scripts/iris/timelock_gpu.slurm (no Makefile).
@@ -270,7 +275,11 @@ int main(int argc, char **argv) {
     const uint64_t p  = (uint64_t)mpz_get_ui(pz.p);
     const uint64_t e  = (uint64_t)pz.e;
     uint64_t       x  = (uint64_t)mpz_get_ui(pz.x0);
+    uint64_t       st_y = (uint64_t)mpz_get_ui(pz.y0);   /* MinRoot 2nd state */
     const unsigned long T = pz.T;
+
+    /* x + y and x + i can both reach 2^65, so reduce through 128 bits. */
+    #define ADDMOD(a, b) ((uint64_t)(((unsigned __int128)(a) + (b)) % p))
 
     /* ---------------- device ---------------- */
     int dev = 0;
@@ -372,12 +381,21 @@ int main(int argc, char **argv) {
     for (unsigned long step = 0; step < T; step++) {
         unsigned long long cand_this_step = 0;
 
+        /* MinRoot round: the challenge is s = x_i + y_i, not x_i. The kernel
+         * is unchanged -- it blinds whatever value it is handed. */
+        const uint64_t s = ADDMOD(x, st_y);
+        uint64_t result;
+
+        if (s == 0) {
+            /* Unique e-th root of 0 is 0; the search would never terminate. */
+            result = 0;
+        } else
         while (1) {
             const int zero = 0;
             CUDA_CHECK(cudaMemcpy(d_flag, &zero, sizeof(int),
                                   cudaMemcpyHostToDevice));
 
-            search_kernel<<<grid, BLOCKDIM>>>(p, x, e, d_primes,
+            search_kernel<<<grid, BLOCKDIM>>>(p, s, e, d_primes,
                                               (int)primes.count, (uint64_t)B,
                                               seed, counter, batch,
                                               d_hit_r, d_flag, d_hits);
@@ -400,7 +418,7 @@ int main(int argc, char **argv) {
             const uint64_t r = (uint64_t)hit;
 
             /* GATE 2 — independently re-derive the device's verdict. */
-            const uint64_t y = mulmod64(x, powmod64(r, e, p), p);
+            const uint64_t y = mulmod64(s, powmod64(r, e, p), p);
             if (!host_factor(y, &primes, exponents)) {
                 fprintf(stderr,
                     "\n  [GATE 2 FAIL] step %lu: device reported r=%llu smooth,\n"
@@ -411,7 +429,7 @@ int main(int argc, char **argv) {
             }
 
             /* Reconstruct y^(1/e) = prod cbrt[j]^exp[j], unblind, verify. */
-            uint64_t result = 1;
+            result = 1;
             for (size_t j = 0; j < primes.count; j++) {
                 if (exponents[j] == 0) continue;
                 result = mulmod64(result,
@@ -420,15 +438,20 @@ int main(int argc, char **argv) {
             result = mulmod64(result, powmod64(r, p - 2, p), p);  /* r^-1, p prime */
 
             /* GATE 3 — same per-step gate as attack.c. */
-            if (powmod64(result, e, p) != x) {
+            if (powmod64(result, e, p) != s) {
                 fprintf(stderr,
-                    "\n  [GATE 3 FAIL] step %lu: result^e != x (mod p). Aborting.\n",
-                    step);
+                    "\n  [GATE 3 FAIL] step %lu: result^e != x_i + y_i (mod p). "
+                    "Aborting.\n", step);
                 return 1;
             }
-
-            x = result;
             break;
+        }
+
+        /* Advance the MinRoot state: y_{i+1} = x_i + i, then x_{i+1} = root. */
+        {
+            const uint64_t x_old = x;
+            x    = result;
+            st_y = ADDMOD(x_old, (uint64_t)step);
         }
 
         if ((step + 1) % report == 0 || step + 1 == T) {

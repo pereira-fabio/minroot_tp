@@ -136,7 +136,11 @@ int cmd_attack(const char *puzzle_path, unsigned long B) {
     unsigned long *exponents = malloc(primes.count * sizeof(unsigned long));
 
     mpz_t x, r, r_e, r_inv, y, y_work, result, check;
+    mpz_t st_y, s, x_old;                 /* MinRoot second state, round challenge */
     mpz_init_set(x, pz.x0);
+    mpz_init_set(st_y, pz.y0);
+    mpz_init(s);
+    mpz_init(x_old);
     mpz_init(r);
     mpz_init(r_e);
     mpz_init(r_inv);
@@ -155,6 +159,17 @@ int cmd_attack(const char *puzzle_path, unsigned long B) {
     for (unsigned long step = 0; step < pz.T; step++) {
         unsigned long attempts_this_step = 0;
 
+        /* MinRoot round: this step must invert s = x_i + y_i, not x_i. The
+         * feed-forward is additive and free; the e-th root is the whole cost,
+         * and it is the only part the smoothness attack touches. */
+        mpz_add(s, x, st_y);
+        mpz_mod(s, s, pz.p);
+
+        if (mpz_cmp_ui(s, 0) == 0) {
+            /* s = 0 has the unique e-th root 0. The blinding loop would spin
+             * forever on it (0 is never B-smooth). Probability ~1/p. */
+            mpz_set_ui(result, 0);
+        } else
         while (1) {
             attempts_this_step++;
             total_attempts++;
@@ -164,9 +179,9 @@ int cmd_attack(const char *puzzle_path, unsigned long B) {
                 mpz_urandomm(r, rng, pz.p);
             } while (mpz_cmp_ui(r, 1) <= 0);
 
-            /* Blinded challenge: y = x * r^e mod p */
+            /* Blinded challenge: y = s * r^e mod p */
             mpz_powm(r_e, r, e_mpz, pz.p);
-            mpz_mul(y, x, r_e);
+            mpz_mul(y, s, r_e);
             mpz_mod(y, y, pz.p);
 
             /* Trial division on a working copy */
@@ -188,17 +203,22 @@ int cmd_attack(const char *puzzle_path, unsigned long B) {
             mpz_mul(result, result, r_inv);
             mpz_mod(result, result, pz.p);
 
-            /* Correctness gate: result^e mod p must equal x */
+            /* Correctness gate: result^e mod p must equal s = x_i + y_i */
             mpz_powm(check, result, e_mpz, pz.p);
-            if (mpz_cmp(check, x) != 0) {
+            if (mpz_cmp(check, s) != 0) {
                 /* Should never happen if the cbrt table is correct. */
                 fprintf(stderr, "  [BUG] step %lu: verify failed — retrying\n", step);
                 continue;
             }
 
-            mpz_set(x, result);
             break;
         }
+
+        /* Advance the MinRoot state: y_{i+1} = x_i + i, then x_{i+1} = root. */
+        mpz_set(x_old, x);
+        mpz_set(x, result);
+        mpz_add_ui(st_y, x_old, step);
+        mpz_mod(st_y, st_y, pz.p);
 
         if ((step + 1) % report == 0 || step + 1 == pz.T) {
             clock_gettime(CLOCK_MONOTONIC, &tnow);
@@ -237,7 +257,8 @@ int cmd_attack(const char *puzzle_path, unsigned long B) {
     for (size_t j = 0; j < primes.count; j++) mpz_clear(cbrt_table[j]);
     free(cbrt_table);
     mpz_clear(phi); mpz_clear(e_mpz); mpz_clear(e_inv);
-    mpz_clear(x); mpz_clear(r); mpz_clear(r_e); mpz_clear(r_inv);
+    mpz_clear(x); mpz_clear(st_y); mpz_clear(s); mpz_clear(x_old);
+    mpz_clear(r); mpz_clear(r_e); mpz_clear(r_inv);
     mpz_clear(y); mpz_clear(y_work); mpz_clear(result); mpz_clear(check);
     prime_table_free(&primes);
     gmp_randclear(rng);
@@ -245,4 +266,5 @@ int cmd_attack(const char *puzzle_path, unsigned long B) {
     return 0;
 }
 
-// Edit: 2026-06-13
+
+// Edit: 2026-07-28

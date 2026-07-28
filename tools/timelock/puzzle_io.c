@@ -6,6 +6,7 @@
 void puzzle_init(puzzle_t *pz) {
     mpz_init(pz->p);
     mpz_init(pz->x0);
+    mpz_init(pz->y0);
     pz->e = 5;
     pz->T = 0;
     memset(pz->iv, 0, 16);
@@ -16,6 +17,7 @@ void puzzle_init(puzzle_t *pz) {
 void puzzle_free(puzzle_t *pz) {
     mpz_clear(pz->p);
     mpz_clear(pz->x0);
+    mpz_clear(pz->y0);
     free(pz->ciphertext);
     pz->ciphertext     = NULL;
     pz->ciphertext_len = 0;
@@ -47,11 +49,13 @@ int puzzle_write(const puzzle_t *pz, const char *path) {
 
     char *p_hex  = mpz_get_str(NULL, 16, pz->p);
     char *x0_hex = mpz_get_str(NULL, 16, pz->x0);
+    char *y0_hex = mpz_get_str(NULL, 16, pz->y0);
 
-    fprintf(f, "MINROOT-TIMELOCK-V1\n");
+    fprintf(f, "MINROOT-TIMELOCK-V2\n");
     fprintf(f, "p: %s\n",   p_hex);
     fprintf(f, "e: %lu\n",  pz->e);
     fprintf(f, "x0: %s\n",  x0_hex);
+    fprintf(f, "y0: %s\n",  y0_hex);
     fprintf(f, "T: %lu\n",  pz->T);
 
     char iv_hex[33];
@@ -64,6 +68,7 @@ int puzzle_write(const puzzle_t *pz, const char *path) {
 
     free(p_hex);
     free(x0_hex);
+    free(y0_hex);
     free(ct_hex);
     fclose(f);
     return 0;
@@ -77,7 +82,7 @@ int puzzle_read(puzzle_t *pz, const char *path) {
 
     /* header */
     if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
-    if (strncmp(line, "MINROOT-TIMELOCK-V1", 19) != 0) { fclose(f); return -1; }
+    if (strncmp(line, "MINROOT-TIMELOCK-V2", 19) != 0) { fclose(f); return -1; }
 
     char val[131072];
     while (fgets(line, sizeof(line), f)) {
@@ -87,6 +92,7 @@ int puzzle_read(puzzle_t *pz, const char *path) {
         if (sscanf(line, "p: %s",  val) == 1) { mpz_set_str(pz->p,  val, 16); }
         else if (sscanf(line, "e: %lu",  &pz->e) == 1) { /* done */ }
         else if (sscanf(line, "x0: %s", val) == 1) { mpz_set_str(pz->x0, val, 16); }
+        else if (sscanf(line, "y0: %s", val) == 1) { mpz_set_str(pz->y0, val, 16); }
         else if (sscanf(line, "T: %lu",  &pz->T) == 1) { /* done */ }
         else if (sscanf(line, "iv: %s",  val) == 1) {
             hex_to_bytes(val, pz->iv);
@@ -101,3 +107,5 @@ int puzzle_read(puzzle_t *pz, const char *path) {
     fclose(f);
     return 0;
 }
+
+// Edit: 2026-07-28

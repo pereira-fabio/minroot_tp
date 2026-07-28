@@ -52,9 +52,13 @@ static benchmark_results_t run_one(
     mpz_t b; mpz_init(b);
     ksc_compute_e_inv(b, modulo, exponent);
 
-    // CRT context (deterministic; every rank builds it independently). Untimed setup.
+    // CRT context (deterministic; every rank builds it independently). Not part
+    // of the timed solve, but measured and reported: it builds k ~ alpha*|M|/30
+    // CRT basis elements K_i of alpha*|M| bits each, so it is not free.
     crt_ctx_t ctx;
+    double setup_ms = MPI_Wtime();
     crt_ctx_init(&ctx, modulo, alpha);
+    setup_ms = (MPI_Wtime() - setup_ms) * 1e3;
     int lo = (int)((long)ctx.k * rank       / nranks);
     int hi = (int)((long)ctx.k * (rank + 1) / nranks);
     if (rank == 0) {
@@ -94,18 +98,72 @@ static benchmark_results_t run_one(
     json_results.config.exponent  = exponent;
 
     // ---- timed alpha-ary exponentiation: result = c^b mod M ----
+    crt_profile_t prof;
+    crt_profile_reset(&prof);
+    double digitmul_ms = 0.0;
+
     MPI_Barrier(MPI_COMM_WORLD);
     auto t0 = std::chrono::high_resolution_clock::now();
 
     mpz_set(result, g[digits.back()]);              // c^(most-significant digit)
     for (int j = (int)digits.size() - 2; j >= 0; j--) {
-        crt_step(result, &ctx, modulo, lo, hi, rank, nranks); // result <- result^alpha mod M
+        crt_step(result, &ctx, modulo, lo, hi, rank, nranks, &prof); // result <- result^alpha
+        double dm = MPI_Wtime();
         mpz_mul(result, result, g[digits[j]]);                // * c^(digit_j)
         mpz_mod(result, result, modulo);
+        digitmul_ms += (MPI_Wtime() - dm) * 1e3;
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();
     double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    // ---- phase profile: reduce across ranks (max = critical path, mean = share) ----
+    // Reported for BOTH because the two differ diagnostically: `combine` is
+    // rank-0-only work, so max >> mean; `gather` on non-root ranks absorbs load
+    // imbalance as wait time, so a large gather max with a small local spread
+    // means ranks are arriving at the collective at different times.
+    {
+        const char *names[8] = { "local", "localmod", "pack", "gather",
+                                 "combine", "bcast", "digit_mul", "setup" };
+        double mine[8] = { prof.local_ms, prof.localmod_ms, prof.pack_ms,
+                           prof.gather_ms, prof.combine_ms, prof.bcast_ms,
+                           digitmul_ms, setup_ms };
+        double mx[8], sm[8];
+        MPI_Reduce(mine, mx, 8, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+        MPI_Reduce(mine, sm, 8, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
+        if (rank == 0) {
+            size_t mbits = mpz_sizeinbase(modulo, 2);
+            double acc = 0.0;
+            for (int i = 0; i < 7; i++) acc += mx[i];   // setup excluded from solve
+            printf("\n--- CRT phase profile  (|M|=%zu bits, alpha=%lu, %d ranks, "
+                   "%ld steps, k=%d primes, |prod|=%zu bits) ---\n",
+                   mbits, alpha, nranks, prof.steps, ctx.k,
+                   mpz_sizeinbase(ctx.prod, 2));
+            printf("  %-10s %12s %12s %9s %14s\n",
+                   "phase", "max_ms", "mean_ms", "%crit", "us/step");
+            for (int i = 0; i < 7; i++)
+                printf("  %-10s %12.1f %12.1f %8.1f%% %14.2f\n",
+                       names[i], mx[i], sm[i] / nranks,
+                       acc > 0 ? mx[i] / acc * 100.0 : 0.0,
+                       prof.steps ? mx[i] * 1e3 / (double)prof.steps : 0.0);
+            printf("  %-10s %12.1f %12.1f %8s %14s   (untimed, excluded above)\n",
+                   names[7], mx[7], sm[7] / nranks, "-", "-");
+            printf("  %-10s %12.1f  (wall %.1f ms; %.1f%% accounted)\n",
+                   "SUM", acc, dt, dt > 0 ? acc / dt * 100.0 : 0.0);
+
+            // Machine-parseable, one line per phase, for the analysis pipeline.
+            for (int i = 0; i < 8; i++)
+                printf("CRTPROF|%zu|%lu|%d|%s|%.4f|%.4f\n",
+                       mbits, alpha, nranks, names[i], mx[i], sm[i] / nranks);
+            fflush(stdout);
+
+            // Feed the three phases the shared JSON schema already carries.
+            json_results.timing.local_cbrt_times.push_back(mx[0]);
+            json_results.timing.gather_times.push_back(mx[3]);
+            json_results.timing.combine_times.push_back(mx[4]);
+        }
+    }
 
     if (rank == 0) {
         accum_record(&fac_acc, dt);
@@ -252,4 +310,5 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-// Edit: 2026-07-17
+
+// Edit: 2026-07-28

@@ -417,12 +417,26 @@ int main(int argc, char **argv) {
                     path, KF_DELTA_BLOCK, want_width);
             fclose(f); return false;
         }
+        // The writer leaves the FINAL block short (width + last_len - 1 bytes),
+        // so a valid file is SMALLER than nb*full. Allocate the uniform stride the
+        // kernel indexes with, zeroed, but read only what is on disk. Reading
+        // nb*full over-runs a good file and was why every delta pass aborted.
         size_t full = (size_t)width + (KF_DELTA_BLOCK - 1);
         uint64_t nb = (count + KF_DELTA_BLOCK - 1) / KF_DELTA_BLOCK;
         size_t bytes = (size_t)nb * full;
-        uint8_t *buf = (uint8_t *)malloc(bytes);
+        uint64_t last_len = count - (nb - 1) * KF_DELTA_BLOCK;
+        size_t on_disk = (size_t)(nb - 1) * full + (size_t)width + (size_t)(last_len - 1);
+        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return false; }
+        long fsz = ftell(f);
+        if (fsz < 0 || (size_t)fsz != KF_DELTA_HDR + on_disk) {
+            fprintf(stderr, "Error: %s is %ld bytes, expected %zu for %llu primes "
+                    "(truncated or wrong table)\n",
+                    path, fsz, KF_DELTA_HDR + on_disk, (unsigned long long)count);
+            fclose(f); return false;
+        }
+        uint8_t *buf = (uint8_t *)calloc(1, bytes);
         if (!buf) { fclose(f); return false; }
-        if (fseek(f, KF_DELTA_HDR, SEEK_SET) != 0 || fread(buf, 1, bytes, f) != bytes) {
+        if (fseek(f, KF_DELTA_HDR, SEEK_SET) != 0 || fread(buf, 1, on_disk, f) != on_disk) {
             free(buf); fclose(f); return false;
         }
         fclose(f);
@@ -864,4 +878,5 @@ cleanup:
 }
 
 
-// Edit: 2026-07-27
+
+// Edit: 2026-07-28
