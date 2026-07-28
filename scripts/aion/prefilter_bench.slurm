@@ -94,8 +94,19 @@ echo "#   pays while it stays below (2^b - 1) ~ 3."
 echo "############################################################"
 echo ""
 
-# size:C_sieve(ms)  — k32 table factor_ms at N1, measured
-PAIRS="256:74.838 512:99.629 1024:131.454 2048:180.008 4096:235.546 8192:364.115 16384:585.180 24576:789.647"
+# size:C_sieve(ms) — k32 table factor_ms at N1, measured.
+# ALL TEN canonical sizes, so the paper-scale set {256,384,512,768,1024,2048} is
+# complete: that is the regime where pre-filtering is cheapest relative to the
+# sieve, so it is the half of the curve that actually matters for this technique.
+PAIRS="256:74.838 384:88.441 512:99.629 768:123.871 1024:131.454 2048:180.008 \
+       4096:235.546 8192:364.115 16384:585.180 24576:789.647"
+
+# k35 pairing (see thesis tab:prefilter-coupling): C_pf does NOT depend on which
+# algorithm you would attach the pre-filter to -- only the divisor changes. So the
+# k35 ratio is obtainable from the same run as C_pf / C_sieve(k35), no re-run
+# needed. k35 table factor_ms at N1, same sizes:
+#   256:337.5  384:417.9  512:507.1   768:697.3   1024:961.2
+#   2048:1310.3 4096:1723.4 8192:2712.9 16384:4663.0 24576:6748.1
 
 for pair in $PAIRS; do
   BITS="${pair%%:*}"
