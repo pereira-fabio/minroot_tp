@@ -272,6 +272,17 @@ if [ -x "$BINDIR/alg2_k35_cuda" ]; then
             --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
             --json "$ALG2_DIR"/alg2_k35_table_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
       fi
+
+      # 9.6 GB -> ~1.2 GB (8x) on the upper range — the largest compression in the study.
+      if [ -f data/k32_primes.dlt ] && [ -f data/k35_upper_primes.dlt ]; then
+        echo "--- k35 e=${EXP} size=${SIZE}: table (delta) ---"
+        "$BINDIR/alg2_k35_cuda" \
+            --data data/challenges/k35 --size $SIZE \
+            --method table --exponent $EXP --table-format delta \
+            --primes32 data/k32_primes.dlt --primes35 data/k35_upper_primes.dlt \
+            --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
+            --json "$ALG2_DIR"/alg2_k35_tabledelta_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
+      fi
       echo ""
     done
   done
@@ -309,6 +320,16 @@ if [ -x "$BINDIR/alg3_cuda" ]; then
             --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
             --json "$ALG3_DIR"/alg3_table_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
       fi
+
+      # alg3 delta — same shared k32 table as alg2_k32, so expect the same ~1.1x.
+      if [ -f data/k32_primes.dlt ]; then
+        echo "--- alg3 e=${EXP} size=${SIZE}: table (delta) ---"
+        "$BINDIR/alg3_cuda" \
+            --data data/challenges/alg3 --size $SIZE \
+            --method table --exponent $EXP --primes data/k32_primes.dlt --table-format delta \
+            --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
+            --json "$ALG3_DIR"/alg3_tabledelta_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
+      fi
       echo ""
     done
   done
@@ -345,6 +366,16 @@ if [ -x "$BINDIR/alg4_cuda" ]; then
             --method table --exponent $EXP --primes data/k32_primes.bin \
             --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
             --json "$ALG4_DIR"/alg4_table_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
+      fi
+
+      # alg4 delta — same shared k32 table as alg2_k32.
+      if [ -f data/k32_primes.dlt ]; then
+        echo "--- alg4 e=${EXP} size=${SIZE}: table (delta) ---"
+        "$BINDIR/alg4_cuda" \
+            --data data/challenges/alg4 --size $SIZE \
+            --method table --exponent $EXP --primes data/k32_primes.dlt --table-format delta \
+            --n-challenges $N_CHALLENGES --n-gpus $N_GPUS \
+            --json "$ALG4_DIR"/alg4_tabledelta_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
       fi
       echo ""
     done
