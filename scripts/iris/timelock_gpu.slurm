@@ -37,6 +37,7 @@
 # Output lands in: data/timelock/gpu_<jobid>/
 # ---------------------------------------------------------------------------
 
+module use /opt/apps/easybuild/systems/iris/rhel810-20250803/2023b/gpu/modules/all
 module load system/CUDA
 if module load math/GMP/6.2.1-GCCcore-13.2.0 2>/dev/null; then
     echo "GMP 6.2.1 loaded"
