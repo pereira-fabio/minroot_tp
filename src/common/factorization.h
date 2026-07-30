@@ -239,6 +239,60 @@ bool kf_cbrt_cache_load(cbrt_cache_t *cache, const char *path);
 bool kf_cbrt_cache_save(const cbrt_cache_t *cache, const char *path);
 
 // ---------------------------------------------------------------------------
+// cbrt cache instrumentation (advisor request 2026-07-29: "how often is the
+// cached cbrt read, per core?").
+//
+// Every lookup goes through kf_cbrt_cache_find, which is a LINEAR scan, so a
+// lookup costs O(cache->count) comparisons. Counting probes as well as hits
+// exposes that cost: a challenge with n distinct prime factors performs ~n
+// lookups against an n-entry cache, i.e. O(n^2) comparisons per reconstruction.
+//
+// Counters are per-thread, indexed by omp_get_thread_num, and each block is
+// padded to 64 bytes so the OpenMP reconstruction loop does not false-share.
+// Accounting is one increment per LOOKUP (not per comparison), so the counters
+// do not perturb the scan they measure.
+// ---------------------------------------------------------------------------
+
+#define KF_CBRT_MAX_THREADS 256
+
+typedef struct
+{
+    long hits;    // lookups that found the prime already cached
+    long misses;  // lookups that fell through to a full mpz_powm
+    long probes;  // cache entries compared (the linear-scan cost)
+    long _pad[5]; // pad to 64 B — one counter block per cache line
+} kf_cbrt_stat_t;
+
+void kf_cbrt_stats_reset(void);
+// Aggregate across all thread slots. Any pointer may be NULL.
+void kf_cbrt_stats_total(long *hits, long *misses, long *probes);
+// Number of thread slots that recorded at least one lookup.
+int kf_cbrt_stats_threads_used(void);
+const kf_cbrt_stat_t *kf_cbrt_stats_raw(void);
+// Per-thread table + summary, plus greppable "CBRTSTAT|" lines for the
+// analysis pipeline. `tag` labels the run (e.g. "k32 24576b e3").
+void kf_cbrt_stats_report(const char *tag);
+
+// ---------------------------------------------------------------------------
+// Reconstruction phase profile. kf_compute_cbrt_from_factors_omp splits into a
+// parallel phase (per-factor cube root: cache lookup, or mpz_powm on a miss)
+// and a strictly serial phase (product mod M + cache append). Separating them
+// shows whether reconstruction is bound by exponentiation or by the serial
+// accumulation — the question that decides whether a device port could help.
+// ---------------------------------------------------------------------------
+
+typedef struct
+{
+    double parallel_ms; // phase 1: per-factor cbrt across threads
+    double serial_ms;   // phase 2: serial product mod M + cache append
+    long   factors;     // total factors processed
+    long   calls;       // number of reconstruction calls accumulated
+} kf_recon_prof_t;
+
+void kf_recon_prof_reset(void);
+const kf_recon_prof_t *kf_recon_prof_get(void);
+
+// ---------------------------------------------------------------------------
 // k32 — reconstruction from found factors
 //
 //   result = ∏ cbrt(p_i)^e_i  mod M
@@ -342,4 +396,4 @@ bool kf_load_cbrt_table_k16(mpz_t *cbrt_table, int prime_count, const char *file
 void kf_compute_cube_root_from_factors_k16(mpz_t result, const int *exponents,
                                            const mpz_t *cbrt_table, int prime_count,
                                            const mpz_t modulo);
-// Edit: 2026-07-22
+// Edit: 2026-07-30

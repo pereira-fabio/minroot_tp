@@ -30,7 +30,7 @@
 //   k32_mpi [challenge] [modulo] [--method sieve|table] [--primes FILE]
 //           [--precompute]
 //   k32_mpi --all [--data DIR] [--method sieve|table] [--primes FILE]
-//          
+//
 //
 // Prime table generation (rank 0 only, one-time, ~10 s):
 //   srun ... k32_mpi --precompute [--primes k32_primes.bin]
@@ -102,7 +102,8 @@
 // k32 factoring strategy
 // ---------------------------------------------------------------------------
 
-typedef struct {
+typedef struct
+{
     uint64_t my_lo, my_hi;
     int sp_count;
     const unsigned *sp;
@@ -131,16 +132,16 @@ static void k32_factor_fn(
 #endif
         bool do_thr = (bench == 1 && rank == 0);
         std::vector<int64_t> thr_tested(do_thr ? nT : 0, 0);
-        std::vector<int>     thr_found (do_thr ? nT : 0, 0);
+        std::vector<int> thr_found(do_thr ? nT : 0, 0);
         if (c->delta_slice)
             kf_trial_divide_delta(blinded, c->delta_slice, out,
                                   do_thr ? thr_tested.data() : nullptr,
-                                  do_thr ? thr_found.data()  : nullptr,
+                                  do_thr ? thr_found.data() : nullptr,
                                   do_thr ? nT : 0);
         else
             kf_trial_divide_table(blinded, c->prime_slice, c->slice_count, out,
                                   do_thr ? thr_tested.data() : nullptr,
-                                  do_thr ? thr_found.data()  : nullptr,
+                                  do_thr ? thr_found.data() : nullptr,
                                   do_thr ? nT : 0);
         if (do_thr)
         {
@@ -175,13 +176,14 @@ static benchmark_results_t run_one(
                                         challenge_file, modulo_file, rank))
     {
         mpz_clears(challenge, modulo, result, NULL);
-        return benchmark_results_t{};  // unreachable — ksc_broadcast aborts
+        return benchmark_results_t{}; // unreachable — ksc_broadcast aborts
     }
 
     if (rank == 0)
     {
-        const char *mname = method == METHOD_TABLE ? "table"
-                          : method == METHOD_POWM  ? "powm" : "sieve";
+        const char *mname = method == METHOD_TABLE  ? "table"
+                            : method == METHOD_POWM ? "powm"
+                                                    : "sieve";
         printf("\n=== %s  [%s | %dr×%dt | %zub] ===\n",
                challenge_file, mname, nranks,
 #ifdef _OPENMP
@@ -251,7 +253,7 @@ static benchmark_results_t run_one(
     // analysis/merge_cbrt_cache.py later consolidates.
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt", rank);  // per-rank fallback
+                             cbrt_dir, modulo_file, ".cbrt", rank); // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
@@ -302,13 +304,18 @@ static benchmark_results_t run_one(
     ksc_init_json_results(&json_results, 32, mname32,
                           nranks, n_threads_json, challenge, rank);
     json_results.config.algorithm = "k32";
-    json_results.config.exponent  = exponent;
+    json_results.config.exponent = exponent;
 
     // ---- Strategy + shared bench loop ----
-    k32_ctx_t k32_ctx = { my_lo, my_hi, sp_count, sp, method,
-                           prime_slice, slice_count,
-                           have_delta ? &delta_slice : NULL };
-    ksc_factor_strategy_t strategy = { k32_factor_fn, NULL, false, &k32_ctx };
+    k32_ctx_t k32_ctx = {my_lo, my_hi, sp_count, sp, method,
+                         prime_slice, slice_count,
+                         have_delta ? &delta_slice : NULL};
+    ksc_factor_strategy_t strategy = {k32_factor_fn, NULL, false, &k32_ctx};
+
+    // Reset AFTER cache setup (ksc_ensure_cbrt_cache does its own lookups) so the
+    // counters describe the benchmark loop only — advisor request 2026-07-29.
+    kf_cbrt_stats_reset();
+    kf_recon_prof_reset();
 
     ksc_run_bench_loop(
         result, method,
@@ -318,6 +325,49 @@ static benchmark_results_t run_one(
         my_lo, my_hi,
         &fac_acc, &loc_acc, &gat_acc, &com_acc, &recon_acc,
         &json_results, &strategy, rank, nranks);
+
+    // ---- cbrt cache reads per core, reduced across ranks ----
+    // Each rank owns a private cache slice, so lookups are rank-local; SUM gives
+    // the cluster-wide read count and MAX exposes imbalance between ranks. The
+    // per-thread split within a rank is printed by rank 0 only, as a sample.
+    {
+        long my_h = 0, my_m = 0, my_p = 0;
+        kf_cbrt_stats_total(&my_h, &my_m, &my_p);
+        int my_threads = kf_cbrt_stats_threads_used();
+
+        long mine[4] = {my_h, my_m, my_p, (long)my_threads};
+        long sum[4], mx[4];
+        MPI_Reduce(mine, sum, 4, MPI_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(mine, mx, 4, MPI_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+
+        if (rank == 0)
+        {
+            long lookups = sum[0] + sum[1];
+            long cores = sum[3];
+            printf("\n--- cbrt cache reads (%d ranks, %ld cores active, "
+                   "|M|=%zu bits) ---\n",
+                   nranks, cores, mpz_sizeinbase(modulo, 2));
+            printf("  %-22s %14s %14s\n", "", "sum(all ranks)", "max(one rank)");
+            printf("  %-22s %14ld %14ld\n", "lookups", lookups, mx[0] + mx[1]);
+            printf("  %-22s %14ld %14ld\n", "hits", sum[0], mx[0]);
+            printf("  %-22s %14ld %14ld\n", "misses", sum[1], mx[1]);
+            printf("  %-22s %14ld %14ld\n", "probes", sum[2], mx[2]);
+            if (lookups > 0)
+                printf("  hit rate %.2f%%   probes/lookup %.1f   lookups/core %.1f\n",
+                       100.0 * (double)sum[0] / (double)lookups,
+                       (double)sum[2] / (double)lookups,
+                       cores > 0 ? (double)lookups / (double)cores : 0.0);
+            printf("CBRTSTAT|%zu|%d|ALL|%ld|%ld|%ld|%ld\n",
+                   mpz_sizeinbase(modulo, 2), nranks, sum[0], sum[1], sum[2], cores);
+
+            const kf_recon_prof_t *rp = kf_recon_prof_get();
+            if (rp->calls > 0)
+                printf("RECONPROF|%zu|%d|%.4f|%.4f|%ld|%ld\n",
+                       mpz_sizeinbase(modulo, 2), nranks,
+                       rp->parallel_ms, rp->serial_ms, rp->factors, rp->calls);
+            fflush(stdout);
+        }
+    }
 
     // ---- Timing report + baseline + verify ----
     if (rank == 0)
@@ -413,8 +463,8 @@ int main(int argc, char *argv[])
     const char *cbrt_dir = KSC_CBRT_DIR;
     int run_all = 0;
     int do_precompute = 0;
-    int do_convert_delta = 0;   // --convert-delta: build k32_primes.dlt and exit
-    bool use_delta = false;     // --table-format delta: use the delta-encoded table
+    int do_convert_delta = 0; // --convert-delta: build k32_primes.dlt and exit
+    bool use_delta = false;   // --table-format delta: use the delta-encoded table
     bool primes_user_set = false;
     int n_challenges = 1;
     bool skip_powm = false;
@@ -492,7 +542,8 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[argi], "--n-challenges") == 0 && argi + 1 < argc)
         {
             n_challenges = atoi(argv[++argi]);
-            if (n_challenges < 1) n_challenges = 1;
+            if (n_challenges < 1)
+                n_challenges = 1;
         }
         else if (strcmp(argv[argi], "--cbrt-dir") == 0 && argi + 1 < argc)
         {
@@ -667,7 +718,7 @@ int main(int argc, char *argv[])
     {
         // Run all 11 canonical challenge sizes in one MPI execution.
         // Avoids multiple srun calls in the SLURM script (causes reinit hangs).
-        const char *sizes[] = { KSC_CANONICAL_SIZES_LIST };
+        const char *sizes[] = {KSC_CANONICAL_SIZES_LIST};
         for (int s = 0; s < KSC_N_CANONICAL_SIZES; s++)
         {
             char cf[512], mf[512], jf[768];
@@ -702,7 +753,11 @@ int main(int argc, char *argv[])
                     if (rank == 0)
                     {
                         FILE *fck = fopen(cfi, "r");
-                        if (fck) { fclose(fck); exists = 1; }
+                        if (fck)
+                        {
+                            fclose(fck);
+                            exists = 1;
+                        }
                     }
                     MPI_Bcast(&exists, 1, MPI_INT, 0, MPI_COMM_WORLD);
                     if (!exists)
@@ -716,8 +771,15 @@ int main(int argc, char *argv[])
                                                     sp_count, sp, my_lo, my_hi,
                                                     method, primes_file, exponent,
                                                     cbrt_dir, skip_powm);
-                    if (!has_data) { combined = std::move(r); has_data = true; }
-                    else           { merge_benchmark_results(combined, r); }
+                    if (!has_data)
+                    {
+                        combined = std::move(r);
+                        has_data = true;
+                    }
+                    else
+                    {
+                        merge_benchmark_results(combined, r);
+                    }
                 }
                 if (has_data && rank == 0 && jf_ptr)
                     write_benchmark_json(jf_ptr, combined);
@@ -735,5 +797,4 @@ int main(int argc, char *argv[])
     MPI_Finalize();
     return 0;
 }
-// Edit: 2026-07-22
-
+// Edit: 2026-07-30

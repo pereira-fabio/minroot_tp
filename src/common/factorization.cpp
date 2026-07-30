@@ -778,11 +778,117 @@ void kf_cbrt_cache_clear(cbrt_cache_t *cache)
     cache->capacity = 0;
 }
 
+// ---------------------------------------------------------------------------
+// Per-thread lookup counters. See kf_cbrt_stat_t in factorization.h.
+// ---------------------------------------------------------------------------
+static kf_cbrt_stat_t g_cbrt_stats[KF_CBRT_MAX_THREADS];
+static kf_recon_prof_t g_recon_prof;
+
+static inline kf_cbrt_stat_t *kf_cbrt_slot(void)
+{
+#ifdef _OPENMP
+    int t = omp_get_thread_num();
+    if (t < 0 || t >= KF_CBRT_MAX_THREADS) t = 0;
+    return &g_cbrt_stats[t];
+#else
+    return &g_cbrt_stats[0];
+#endif
+}
+
+void kf_cbrt_stats_reset(void)
+{
+    memset(g_cbrt_stats, 0, sizeof(g_cbrt_stats));
+}
+
+void kf_cbrt_stats_total(long *hits, long *misses, long *probes)
+{
+    long h = 0, m = 0, p = 0;
+    for (int i = 0; i < KF_CBRT_MAX_THREADS; i++)
+    {
+        h += g_cbrt_stats[i].hits;
+        m += g_cbrt_stats[i].misses;
+        p += g_cbrt_stats[i].probes;
+    }
+    if (hits)   *hits   = h;
+    if (misses) *misses = m;
+    if (probes) *probes = p;
+}
+
+int kf_cbrt_stats_threads_used(void)
+{
+    int n = 0;
+    for (int i = 0; i < KF_CBRT_MAX_THREADS; i++)
+        if (g_cbrt_stats[i].hits || g_cbrt_stats[i].misses) n++;
+    return n;
+}
+
+const kf_cbrt_stat_t *kf_cbrt_stats_raw(void) { return g_cbrt_stats; }
+
+void kf_cbrt_stats_report(const char *tag)
+{
+    long h = 0, m = 0, p = 0;
+    kf_cbrt_stats_total(&h, &m, &p);
+    long total = h + m;
+    if (total == 0)
+    {
+        printf("\n--- cbrt cache stats (%s): no lookups recorded ---\n",
+               tag ? tag : "");
+        return;
+    }
+
+    printf("\n--- cbrt cache reads per core  (%s) ---\n", tag ? tag : "");
+    printf("  %-8s %12s %12s %12s %10s %12s\n",
+           "thread", "lookups", "hits", "misses", "hit%", "probes");
+    for (int i = 0; i < KF_CBRT_MAX_THREADS; i++)
+    {
+        long th = g_cbrt_stats[i].hits, tm = g_cbrt_stats[i].misses;
+        if (th == 0 && tm == 0) continue;
+        long tt = th + tm;
+        printf("  %-8d %12ld %12ld %12ld %9.2f%% %12ld\n",
+               i, tt, th, tm, 100.0 * (double)th / (double)tt,
+               g_cbrt_stats[i].probes);
+    }
+    printf("  %-8s %12ld %12ld %12ld %9.2f%% %12ld\n",
+           "TOTAL", total, h, m, 100.0 * (double)h / (double)total, p);
+    printf("  cores used: %d   mean probes/lookup: %.1f\n",
+           kf_cbrt_stats_threads_used(), (double)p / (double)total);
+
+    // Machine-parseable: one line per thread, then the aggregate.
+    for (int i = 0; i < KF_CBRT_MAX_THREADS; i++)
+    {
+        long th = g_cbrt_stats[i].hits, tm = g_cbrt_stats[i].misses;
+        if (th == 0 && tm == 0) continue;
+        printf("CBRTSTAT|%s|%d|%ld|%ld|%ld\n",
+               tag ? tag : "", i, th, tm, g_cbrt_stats[i].probes);
+    }
+    printf("CBRTSTAT|%s|ALL|%ld|%ld|%ld\n", tag ? tag : "", h, m, p);
+    fflush(stdout);
+}
+
+void kf_recon_prof_reset(void)
+{
+    g_recon_prof.parallel_ms = 0.0;
+    g_recon_prof.serial_ms   = 0.0;
+    g_recon_prof.factors     = 0;
+    g_recon_prof.calls       = 0;
+}
+
+const kf_recon_prof_t *kf_recon_prof_get(void) { return &g_recon_prof; }
+
 int kf_cbrt_cache_find(const cbrt_cache_t *cache, unsigned long prime)
 {
+    // One counter update per LOOKUP, not per comparison, so the instrumentation
+    // does not perturb the scan it measures.
+    kf_cbrt_stat_t *st = kf_cbrt_slot();
     for (int i = 0; i < cache->count; i++)
         if (cache->items[i].prime == prime)
+        {
+            st->probes += (long)i + 1;
+            st->hits++;
             return i;
+        }
+    st->probes += (long)cache->count;
+    st->misses++;
     return -1;
 }
 
@@ -1001,6 +1107,10 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
     int nthreads = ksc_available_cpus();
     if (nthreads > n) nthreads = n;
 
+    // Phase boundaries are timed for the reconstruction profile (advisor request
+    // 2026-07-29): phase 1 is the only parallel work, phase 2 is strictly serial.
+    auto t_p0 = std::chrono::high_resolution_clock::now();
+
     // Parallel: compute each factor's cube root. Cache access is read-only here.
     #pragma omp parallel for schedule(dynamic) num_threads(nthreads)
     for (int i = 0; i < n; i++)
@@ -1021,6 +1131,8 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
             miss[i] = 1;
         }
     }
+
+    auto t_p1 = std::chrono::high_resolution_clock::now();
 
     // Serial: combine into result and append newly computed roots to the cache.
     mpz_set_ui(result, 1);
@@ -1049,6 +1161,14 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
         }
         mpz_clear(cbrts[i]);
     }
+
+    auto t_p2 = std::chrono::high_resolution_clock::now();
+    g_recon_prof.parallel_ms +=
+        std::chrono::duration<double, std::milli>(t_p1 - t_p0).count();
+    g_recon_prof.serial_ms +=
+        std::chrono::duration<double, std::milli>(t_p2 - t_p1).count();
+    g_recon_prof.factors += n;
+    g_recon_prof.calls++;
 
     free(cbrts);
     free(miss);
@@ -2002,4 +2122,4 @@ void kf_trial_divide_delta(const mpz_t n, const kf_delta_slice_t *slice,
     }
     free(tf);
 }
-// Edit: 2026-07-22
+// Edit: 2026-07-30

@@ -347,6 +347,8 @@ int main(int argc, char **argv) {
     printf("Setting up %d GPU(s), %ld primes total (%s)...\n",
            n_gpus, (long)nprimes, use_delta ? "delta table" : "flat table");
     std::vector<GpuDev> devs((size_t)n_gpus);
+    gpu_xfer_prof_t xprof;                 // H2D/D2H accounting (advisor 2026-07-29)
+    gpu_xfer_reset(&xprof);
     int64_t base_slice = nprimes / n_gpus;                            // flat: primes/GPU
     int64_t base_blk   = use_delta ? (n_blocks_total / n_gpus) : 0;   // delta: blocks/GPU
     const size_t full  = K32_DELTA_FULL;                             // 1027 bytes/full block
@@ -366,8 +368,12 @@ int main(int argc, char **argv) {
             devs[g].n_slice    = 0;
             devs[g].d_primes   = nullptr;
             CUDA_CHECK(cudaMalloc(&d_delta[g], dev_bytes));
+            double t_x = gpu_now_ms();
             CUDA_CHECK(cudaMemcpy(d_delta[g], all_blocks + byte_start, dev_bytes,
                                   cudaMemcpyHostToDevice));
+            xprof.setup_h2d_ms += gpu_now_ms() - t_x;
+            xprof.setup_h2d_bytes += dev_bytes;
+            xprof.setup_h2d_calls++;
             printf("  GPU %d: blocks [%ld, %ld) = %u blocks, %.0f MB\n",
                    g, (long)b_lo, (long)b_hi, dev_nblocks[g], dev_bytes / 1e6);
         } else {
@@ -375,8 +381,12 @@ int main(int argc, char **argv) {
             int64_t count = (g == n_gpus - 1) ? (nprimes - start) : base_slice;
             devs[g].n_slice = count;
             CUDA_CHECK(cudaMalloc(&devs[g].d_primes, (size_t)count * sizeof(uint32_t)));
+            double t_x = gpu_now_ms();
             CUDA_CHECK(cudaMemcpy(devs[g].d_primes, primes + start,
                                   (size_t)count * sizeof(uint32_t), cudaMemcpyHostToDevice));
+            xprof.setup_h2d_ms += gpu_now_ms() - t_x;
+            xprof.setup_h2d_bytes += (size_t)count * sizeof(uint32_t);
+            xprof.setup_h2d_calls++;
             printf("  GPU %d: %ld primes (offset %ld)\n", g, (long)count, (long)start);
         }
         CUDA_CHECK(cudaMalloc(&devs[g].d_out_factors, MAX_GPU_FACTORS * sizeof(uint64_t)));
@@ -412,7 +422,13 @@ int main(int argc, char **argv) {
         mpz_export(y_limbs, &cnt, -1, sizeof(uint64_t), 0, 0, y);
         for (int g = 0; g < n_gpus; g++) {
             CUDA_CHECK(cudaSetDevice(g));
+            // Counted separately from the kernel: the event bracket below starts
+            // AFTER this copy, so factor_ms has never included it.
+            double t_x = gpu_now_ms();
             CUDA_CHECK(cudaMemcpyToSymbol(d_y_limbs, y_limbs, sizeof(uint64_t) * MAX_LIMBS));
+            xprof.challenge_h2d_ms += gpu_now_ms() - t_x;
+            xprof.challenge_h2d_bytes += sizeof(uint64_t) * MAX_LIMBS;
+            xprof.challenge_h2d_calls++;
             CUDA_CHECK(cudaMemset(devs[g].d_out_factors, 0, MAX_GPU_FACTORS * sizeof(uint64_t)));
             CUDA_CHECK(cudaMemset(devs[g].d_out_count, 0, sizeof(int)));
             CUDA_CHECK(cudaEventRecord(devs[g].ev0));
@@ -445,8 +461,12 @@ int main(int argc, char **argv) {
         for (int g = 0; g < n_gpus; g++) {
             CUDA_CHECK(cudaSetDevice(g));
             int h_count = 0;
+            double t_x = gpu_now_ms();
             CUDA_CHECK(cudaMemcpy(&h_count, devs[g].d_out_count,
                                   sizeof(int), cudaMemcpyDeviceToHost));
+            xprof.factors_d2h_ms += gpu_now_ms() - t_x;
+            xprof.factors_d2h_bytes += sizeof(int);
+            xprof.factors_d2h_calls++;
             if (h_count <= 0) continue;
             if (h_count > MAX_GPU_FACTORS) {
                 fprintf(stderr, "Warning: factor overflow on GPU %d (%d > %d) — "
@@ -454,8 +474,12 @@ int main(int argc, char **argv) {
                         g, h_count, MAX_GPU_FACTORS, MAX_GPU_FACTORS);
                 h_count = MAX_GPU_FACTORS;
             }
+            double t_f = gpu_now_ms();
             CUDA_CHECK(cudaMemcpy(h_out_factors, devs[g].d_out_factors,
                                   (size_t)h_count * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+            xprof.factors_d2h_ms += gpu_now_ms() - t_f;
+            xprof.factors_d2h_bytes += (size_t)h_count * sizeof(uint64_t);
+            xprof.factors_d2h_calls++;
             for (int j = 0; j < h_count; j++) {
                 unsigned long p = (unsigned long)h_out_factors[j];
                 int e = count_exponent(y, p);
@@ -506,6 +530,11 @@ int main(int argc, char **argv) {
 
     // ---- Cold run: kernel + reconstruction (warms cbrt cache) ----
     {
+        // Cold and warm are counted separately: the cold run is where the cache
+        // misses land (every cbrt is a full mpz_powm), the warm runs are the
+        // steady state the speedup figures are taken from.
+        kf_cbrt_stats_reset();
+        kf_recon_prof_reset();
         float cold_km = launch_all(y_smooth);
         auto tc0 = std::chrono::high_resolution_clock::now();
         kf_compute_cbrt_from_factors_omp(result, &solved_factors, modulo, &cache, &cache_dirty, exponent);
@@ -518,8 +547,19 @@ int main(int argc, char **argv) {
         double cold_recon_ms  = std::chrono::duration<double, std::milli>(tc1 - tc0).count();
         verify_eth_root(result, challenge_mod, modulo, exponent);
         printf("Cold run: factor_ms=%.2f, recon_ms=%.4f\n", cold_factor_ms, cold_recon_ms);
+        {
+            char tg[128];
+            snprintf(tg, sizeof(tg), "k32 %s %zub e%lu cold",
+                     gpu_method_name(method), challenge_bits, exponent);
+            kf_cbrt_stats_report(tg);
+            const kf_recon_prof_t *rp = kf_recon_prof_get();
+            printf("RECONPROF|%s|%.4f|%.4f|%ld|%ld\n", tg,
+                   rp->parallel_ms, rp->serial_ms, rp->factors, rp->calls);
+        }
 
         // ---- Warm runs: one per challenge file (different y each time) ----
+        kf_cbrt_stats_reset();
+        kf_recon_prof_reset();
         std::vector<double> factor_ms_v, recon_ms_v;
         factor_ms_v.reserve(n_challenges - 1);
         recon_ms_v.reserve(n_challenges - 1);
@@ -573,6 +613,23 @@ int main(int argc, char **argv) {
 
         gpu_print_benchmark("k32", (int)factor_ms_v.size(), powm_baseline_ms,
                             _gpu_vmean(factor_ms_v), _gpu_vmean(recon_ms_v), n_gpus);
+        {
+            char tg[128];
+            snprintf(tg, sizeof(tg), "k32 %s %zub e%lu warm",
+                     gpu_method_name(method), challenge_bits, exponent);
+            kf_cbrt_stats_report(tg);
+            const kf_recon_prof_t *rp = kf_recon_prof_get();
+            double rtot = rp->parallel_ms + rp->serial_ms;
+            printf("\n--- reconstruction phase split  (%s) ---\n", tg);
+            printf("  parallel (per-factor cbrt) %10.4f ms  %5.1f%%\n",
+                   rp->parallel_ms, rtot > 0 ? rp->parallel_ms / rtot * 100.0 : 0.0);
+            printf("  serial   (product mod M)   %10.4f ms  %5.1f%%\n",
+                   rp->serial_ms, rtot > 0 ? rp->serial_ms / rtot * 100.0 : 0.0);
+            printf("  %ld factors over %ld calls\n", rp->factors, rp->calls);
+            printf("RECONPROF|%s|%.4f|%.4f|%ld|%ld\n", tg,
+                   rp->parallel_ms, rp->serial_ms, rp->factors, rp->calls);
+            gpu_xfer_report(&xprof, tg, _gpu_vmean(factor_ms_v));
+        }
         gpu_write_json_warm(json_path, "k32", method, exponent, 32, challenge_bits,
                             0.0,   // CPU convention: powm_baseline_ms=0 in sieve/table file
                             cold_factor_ms, cold_recon_ms,
@@ -602,4 +659,4 @@ cleanup:
     return solved_attempt >= 0 ? 0 : 2;
 }
 
-// Edit: 2026-07-23
+// Edit: 2026-07-30

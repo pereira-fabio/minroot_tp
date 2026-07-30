@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 
 // ---------------------------------------------------------------------------
 // CUDA error-checking macro (identical to alg7_cuda.cu's version)
@@ -45,6 +46,96 @@
 // (with multiplicity); in practice a smooth factorization has far fewer distinct primes.
 // 2048 is a generous ceiling that avoids ever hitting the buffer limit.
 #define MAX_GPU_FACTORS 2048
+
+// ---------------------------------------------------------------------------
+// Host<->device transfer profile (advisor request 2026-07-29: "how much time is
+// spent moving data?").
+//
+// This matters because the reported factor_ms measures the KERNEL ONLY: the
+// cudaEventRecord bracket sits inside launch_all, after the challenge upload and
+// before the factor download, so neither transfer is currently counted anywhere.
+// Splitting setup from per-attempt traffic separates the one-time cost of
+// staging the prime table (amortised over every challenge in a run) from the
+// recurring per-attempt cost that a real attack would pay on every blind.
+//
+// All the copies measured here are synchronous with respect to the host
+// (pageable memory, default stream), so host wall-clock is an accurate measure
+// and no event bracketing is needed.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    double setup_h2d_ms;      // one-time: prime / delta table upload
+    size_t setup_h2d_bytes;
+    long   setup_h2d_calls;
+
+    double challenge_h2d_ms;  // per-attempt: blinded challenge limbs -> device
+    size_t challenge_h2d_bytes;
+    long   challenge_h2d_calls;
+
+    double factors_d2h_ms;    // per-attempt: factor count + factor list -> host
+    size_t factors_d2h_bytes;
+    long   factors_d2h_calls;
+} gpu_xfer_prof_t;
+
+static inline double gpu_now_ms(void)
+{
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::high_resolution_clock::now().time_since_epoch())
+        .count();
+}
+
+static inline void gpu_xfer_reset(gpu_xfer_prof_t *p)
+{
+    p->setup_h2d_ms = p->challenge_h2d_ms = p->factors_d2h_ms = 0.0;
+    p->setup_h2d_bytes = p->challenge_h2d_bytes = p->factors_d2h_bytes = 0;
+    p->setup_h2d_calls = p->challenge_h2d_calls = p->factors_d2h_calls = 0;
+}
+
+static inline double gpu_xfer_total_ms(const gpu_xfer_prof_t *p)
+{
+    return p->setup_h2d_ms + p->challenge_h2d_ms + p->factors_d2h_ms;
+}
+
+// Human table + greppable "XFERPROF|" lines. `tag` labels the run; factor_ms is
+// the measured kernel time so the report can state transfer cost as a fraction
+// of the work it brackets (pass 0 to omit that column).
+static inline void gpu_xfer_report(const gpu_xfer_prof_t *p, const char *tag,
+                                   double factor_ms)
+{
+    const char *t = tag ? tag : "";
+    double tot = gpu_xfer_total_ms(p);
+    double recur = p->challenge_h2d_ms + p->factors_d2h_ms;
+
+    printf("\n--- host<->device transfer profile  (%s) ---\n", t);
+    printf("  %-14s %10s %12s %14s %12s\n",
+           "phase", "calls", "MiB", "ms", "GB/s");
+    struct { const char *nm; double ms; size_t by; long ca; } rows[3] = {
+        { "setup H2D",     p->setup_h2d_ms,     p->setup_h2d_bytes,     p->setup_h2d_calls     },
+        { "challenge H2D", p->challenge_h2d_ms, p->challenge_h2d_bytes, p->challenge_h2d_calls },
+        { "factors D2H",   p->factors_d2h_ms,   p->factors_d2h_bytes,   p->factors_d2h_calls   },
+    };
+    for (int i = 0; i < 3; i++) {
+        double mib = (double)rows[i].by / (1024.0 * 1024.0);
+        double gbs = rows[i].ms > 0.0
+                   ? (double)rows[i].by / (rows[i].ms * 1e-3) / 1e9 : 0.0;
+        printf("  %-14s %10ld %12.3f %14.3f %12.2f\n",
+               rows[i].nm, rows[i].ca, mib, rows[i].ms, gbs);
+    }
+    printf("  %-14s %10s %12s %14.3f\n", "TOTAL", "", "", tot);
+    printf("  recurring (per-attempt) transfer: %.3f ms", recur);
+    if (factor_ms > 0.0)
+        printf("  = %.2f%% of kernel time (%.3f ms)",
+               recur / factor_ms * 100.0, factor_ms);
+    printf("\n");
+
+    printf("XFERPROF|%s|setup_h2d|%ld|%zu|%.4f\n",
+           t, p->setup_h2d_calls, p->setup_h2d_bytes, p->setup_h2d_ms);
+    printf("XFERPROF|%s|challenge_h2d|%ld|%zu|%.4f\n",
+           t, p->challenge_h2d_calls, p->challenge_h2d_bytes, p->challenge_h2d_ms);
+    printf("XFERPROF|%s|factors_d2h|%ld|%zu|%.4f\n",
+           t, p->factors_d2h_calls, p->factors_d2h_bytes, p->factors_d2h_ms);
+    fflush(stdout);
+}
 
 // ---------------------------------------------------------------------------
 // Device function: mod_big_by_u32
@@ -392,4 +483,4 @@ static inline bool gpu_load_challenge(mpz_t y_out, const char *data_dir,
     return true;
 }
 
-// Edit: 2026-07-17
+// Edit: 2026-07-30
