@@ -62,6 +62,41 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mt
 
+# ── typography ───────────────────────────────────────────────────────────────
+# Serif at 14 pt, Times where available, so the figures sit closer to the body
+# text than matplotlib's DejaVu Sans default.
+#
+# 14 pt is chosen against the INCLUSION width, not the page: the two-panel
+# figures are 11 in wide and included at 1.3\textwidth (~8.5 in), so they are
+# scaled DOWN by ~0.77 and 14 pt renders at ~10.8 pt beside 10 pt body text.
+# The single-panel figures (6.4 in at 0.8\textwidth) land at ~11.4 pt.
+#
+# Times New Roman is not redistributable and is absent on most Linux hosts, so
+# the family list falls through to the metric-compatible clones (Nimbus Roman is
+# URW's Times, Liberation Serif is the Croscore equivalent). Whichever is found
+# first is also handed to mathtext, which unlike font.serif takes a single name
+# and warns loudly if that name does not resolve.
+_SERIF_PREFS = ["Times New Roman", "Nimbus Roman", "Nimbus Roman No9 L",
+                "Liberation Serif", "FreeSerif", "DejaVu Serif"]
+
+def _first_available(names):
+    from matplotlib import font_manager as fm
+    have = {f.name for f in fm.fontManager.ttflist}
+    for n in names:
+        if n in have:
+            return n
+    return names[-1]
+
+_SERIF = _first_available(_SERIF_PREFS)
+
+plt.rcParams.update({"font.size": 14})
+plt.rcParams["font.family"] = "serif"
+plt.rcParams["font.serif"] = _SERIF_PREFS
+plt.rcParams["mathtext.fontset"] = "custom"
+plt.rcParams["mathtext.rm"] = _SERIF
+plt.rcParams["mathtext.it"] = f"{_SERIF}:italic"
+plt.rcParams["mathtext.bf"] = f"{_SERIF}:bold"
+
 FIGDIR = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else "figures"
 EXT = "png" if "--png" in sys.argv else "pdf"
 
@@ -350,7 +385,7 @@ K16_GPU_ERR = {s: gpu("k16", "sieve", s, "v100", 1, "factor_ms", err=True) for s
 def baseline_line(ax):
     ax.axhline(1.0, color="black", ls="--", lw=1.1, alpha=0.8)
     ax.text(0.985, 1.06, "sequential baseline (1×)", transform=ax.get_yaxis_transform(),
-            ha="right", va="bottom", fontsize=7, color="black", alpha=0.75)
+            ha="right", va="bottom", fontsize=9.8, color="black", alpha=0.75)
     ax.set_yscale("log")
     ax.yaxis.set_major_formatter(mt.FuncFormatter(lambda y, _: f"{y:g}×"))
     ax.yaxis.set_minor_formatter(mt.NullFormatter())
@@ -404,7 +439,7 @@ def peak_marker(ax, x, y, label=None):
     larger of the two peaks wins and both panels keep the same scale."""
     ax.plot(x, y, "D", color="#111111", ms=7, zorder=5)
     ax.text(x, y * 1.17, label or f"{y:.1f}×", ha="right", va="bottom",
-            fontsize=7.5, color="#111111")
+            fontsize=10.5, color="#111111")
     lo, hi = ax.get_ylim()
     ax.set_ylim(lo, max(hi, y * 1.9))
 
@@ -430,9 +465,9 @@ def fig_k16_paperscale():
     baseline_line(ax)
     pk = max(v for v in K16_PAPERSCALE[2048] if v)
     ax.text(16, ax.get_ylim()[0] * 1.4, f" N8 peak ({pk:.1f}×) ", rotation=90,
-            va="bottom", ha="right", fontsize=7, color="grey")
+            va="bottom", ha="right", fontsize=9.8, color="grey")
     ax.set_xlabel("MPI ranks"); ax.set_ylabel("speedup over sequential")
-    ax.legend(title="modulus", fontsize=8, ncol=2, loc="lower left")
+    ax.legend(title="modulus", fontsize=11.2, ncol=2, loc="lower left")
     savefig(fig, "k16_paperscale_speedup")
 
 
@@ -461,9 +496,9 @@ def fig_k16_large_moduli():
     pk_rank, pk = _peak(K16_LARGE[24576])
     ax.axvline(pk_rank, color="grey", ls=":", lw=1, alpha=0.7)
     ax.text(pk_rank, 19, f" peak ({pk:.1f}× @24576b) ", rotation=90,
-            va="bottom", ha="right", fontsize=7, color="grey")
+            va="bottom", ha="right", fontsize=9.8, color="grey")
     ax.set_xlabel("MPI ranks"); ax.set_ylabel("speedup over sequential")
-    ax.legend(title="modulus", fontsize=8, ncol=2, loc="lower center")
+    ax.legend(title="modulus", fontsize=11.2, ncol=2, loc="lower center")
     savefig(fig, "k16_large_moduli_speedup")
 
 
@@ -474,15 +509,15 @@ def fig_k16_gpu():
           label="single V100 (k16, factor-only)")
     for s, y in zip(xs, ys):
         ax.annotate(f"{y:.0f}×" if y >= 100 else f"{y:.1f}×", (s, y), xytext=(0, 7),
-                    textcoords="offset points", ha="center", fontsize=7.5, color="#1e7a44")
+                    textcoords="offset points", ha="center", fontsize=10.5, color="#1e7a44")
     ax.axhline(42, color="#c0392b", ls="--", lw=1.3, alpha=0.85)
-    ax.text(xs[0], 46, "paper target 42×", color="#c0392b", fontsize=8, va="bottom")
+    ax.text(xs[0], 46, "paper target 42×", color="#c0392b", fontsize=11.2, va="bottom")
     ax.set_xscale("log", base=2); ax.set_xticks(xs)
     ax.get_xaxis().set_major_formatter(mt.ScalarFormatter())
     baseline_line(ax)
     ax.set_xlabel("modulus size (bits)")
     ax.set_ylabel("speedup over sequential (sieve step)")
-    ax.legend(fontsize=8, loc="lower right")
+    ax.legend(fontsize=11.2, loc="lower right")
     savefig(fig, "k16_gpu_speedup")
 
 
@@ -510,13 +545,13 @@ def fig_k16_cpu_vs_gpu():
           [K16_PAPERSCALE_ERR[s][6] for s in SIZES], "o-", color="#ff7f0e", lw=1.8,
             label="AION CPU — N64 (128r)")
     ax.axhline(42, color="#c0392b", ls=":", lw=1.2, alpha=0.8)
-    ax.text(1150, 46, "paper target 42×", color="#c0392b", fontsize=7.5, va="bottom")
+    ax.text(1150, 46, "paper target 42×", color="#c0392b", fontsize=10.5, va="bottom")
     ax.set_xscale("log", base=2); ax.set_xticks(SIZES)
     ax.get_xaxis().set_major_formatter(mt.ScalarFormatter())
     baseline_line(ax)
     ax.set_xlabel("modulus size (bits)")
     ax.set_ylabel("speedup over sequential")
-    ax.legend(fontsize=7.3, loc="upper left")
+    ax.legend(fontsize=10.2, loc="upper left")
     savefig(fig, "k16_cpu_vs_gpu")
 
 
@@ -537,11 +572,11 @@ def fig_large_moduli():
     ax.axvline(32, color="grey", ls=":", lw=1, alpha=0.7)
     baseline_line(ax)
     ax.text(32, ax.get_ylim()[0] * 1.4, " k16 peak (N16) ", rotation=90,
-            va="bottom", ha="right", fontsize=7, color="grey")
+            va="bottom", ha="right", fontsize=9.8, color="grey")
     ax.axhline(20, color="#c0392b", ls="--", lw=1.0, alpha=0.7)
-    ax.text(2, 21.5, "paper 20× (Algo 3/7 target)", color="#c0392b", fontsize=6.5, va="bottom")
+    ax.text(2, 21.5, "paper 20× (Algo 3/7 target)", color="#c0392b", fontsize=9.1, va="bottom")
     ax.set_xlabel("MPI ranks"); ax.set_ylabel("speedup over sequential")
-    ax.legend(title="algorithm @ 24576b (sieve)", fontsize=7.5, ncol=2, loc="upper left")
+    ax.legend(title="algorithm @ 24576b (sieve)", fontsize=10.5, ncol=2, loc="upper left")
     savefig(fig, "large_moduli_scaling")
 
 # ── §7.9  Gap 1: k32 (128r, sieve) speedup vs modulus, both regimes ──────────
@@ -561,13 +596,13 @@ def fig_gap1():
     baseline_line(ax)
     big_s = GAP1.get(24576); big_t = cpu("k32", "table", 24576, 64)
     ax.text(430, 0.02, "paper-scale\n256–2048b:\nsieve dominates,\n$\\ll 1\\times$",
-            fontsize=7.5, va="center", color="#7a2020")
+            fontsize=10.5, va="center", color="#7a2020")
     ax.text(9000, 4, f"large moduli:\nbaseline dominates\n→ {big_s:.0f}× ({big_t:.0f}× table)",
-            fontsize=7.5, va="center", color="#1e5a1e")
+            fontsize=10.5, va="center", color="#1e5a1e")
     ax.text(3000, ax.get_ylim()[1] * 0.5, " break-even ≈3000b ", rotation=90,
-            va="top", ha="right", fontsize=7, color="grey")
+            va="top", ha="right", fontsize=9.8, color="grey")
     ax.set_xlabel("modulus size (bits)"); ax.set_ylabel("speedup over sequential")
-    ax.legend(fontsize=8, loc="lower right")
+    ax.legend(fontsize=11.2, loc="lower right")
     savefig(fig, "gap1_two_regime")
 
 # ── §7.3  k32 paper-scale speedup_total (sieve) + 2048b table ────────────────
@@ -586,7 +621,7 @@ def fig_k32_paperscale():
     ax.get_xaxis().set_major_formatter(mt.ScalarFormatter())
     baseline_line(ax)
     ax.set_xlabel("MPI ranks"); ax.set_ylabel("speedup over sequential")
-    ax.legend(title="modulus (sieve)", fontsize=7.3, ncol=2, loc="upper left")
+    ax.legend(title="modulus (sieve)", fontsize=10.2, ncol=2, loc="upper left")
     savefig(fig, "k32_paperscale_speedup")
 
 
@@ -612,9 +647,9 @@ def fig_k32_large_moduli():
     peak_marker(axs, 128, ps)
     peak_marker(axt, 128, pt)
     axs.set_ylabel("speedup over sequential")
-    axs.set_title("sieve method", fontsize=10, fontweight="bold")
-    axt.set_title("table method", fontsize=10, fontweight="bold")
-    axs.legend(title="modulus", fontsize=8, ncol=2, loc="upper left")
+    axs.set_title("sieve method", fontsize=14, fontweight="bold")
+    axt.set_title("table method", fontsize=14, fontweight="bold")
+    axs.legend(title="modulus", fontsize=11.2, ncol=2, loc="upper left")
     savefig(fig, "k32_large_moduli_speedup")
 
 
@@ -642,10 +677,10 @@ def fig_k32_cpu_vs_gpu():
         ax.get_xaxis().set_major_formatter(mt.ScalarFormatter()); ax.tick_params(axis="x", rotation=45)
         baseline_line(ax)
         ax.set_xlabel("modulus size (bits)")
-        ax.legend(fontsize=7.5, loc="upper left")
+        ax.legend(fontsize=10.5, loc="upper left")
     axs.set_ylabel("speedup over sequential")
-    axs.set_title("sieve method", fontsize=10, fontweight="bold")
-    axt.set_title("table method", fontsize=10, fontweight="bold")
+    axs.set_title("sieve method", fontsize=14, fontweight="bold")
+    axt.set_title("table method", fontsize=14, fontweight="bold")
     savefig(fig, "k32_cpu_vs_gpu")
 
 
@@ -677,7 +712,11 @@ PS_BOTH_ERR = {alg: {s: cpu_row(alg, "table", s, err=True) for s in SIZES} for a
 # ── large-moduli sieve (7 ranks); sizes 4096/8192/16384/24576 ────────────────
 LM = {alg: {s: cpu_row(alg, "sieve", s) for s in LM_SIZES}
       for alg in ("k35", "alg3", "alg4", "alg7")}
-# ── large-moduli TABLE method (k35/alg3/alg4; alg7 table is a dud → omitted) ──
+# ── large-moduli TABLE method (k35/alg3/alg4) ────────────────────────────────
+# alg7 is excluded because its table sweep is UNMEASURED at these sizes, not
+# because it is slow: every run at 16384b and 24576b took cube-root cache misses
+# and only 4 of 28 cells clear MIN_CLEAN, too few to trace a rank sweep. Its
+# paper-scale table data does survive the filter and is plotted by fig_ps.
 LM_TABLE = {alg: {s: cpu_row(alg, "table", s) for s in LM_SIZES}
             for alg in ("k35", "alg3", "alg4")}
 LM_ERR = {alg: {s: cpu_row(alg, "sieve", s, err=True) for s in LM_SIZES}
@@ -691,7 +730,8 @@ LM_PEAK = {alg: (cpu(alg, "sieve", 24576, 64),
 
 # ── GPU-vs-CPU across the 10 canonical sizes: CPU N64 sieve/table, GPU G4 ────
 #   cs/ct = AION CPU N64 sieve/table;  g = 4×V100 (sieve total);  l40 = 4×L40 total.
-#   alg7 has no table method (dud) → ct = None (single-panel figure).
+#   alg7's table sweep is cache-contaminated at large moduli → ct = None here
+#   (single-panel figure); see the MIN_CLEAN note.
 CVG = {}
 for alg in ("k35", "alg3", "alg4", "alg7"):
     CVG[alg] = {
@@ -716,11 +756,11 @@ def fig_ps(alg):
             ax.get_xaxis().set_major_formatter(mt.ScalarFormatter())
             baseline_line(ax); ax.set_xlabel("MPI ranks")
         axs.set_ylabel("speedup over sequential")
-        axs.set_title("sieve method", fontsize=10, fontweight="bold")
+        axs.set_title("sieve method", fontsize=14, fontweight="bold")
         # The table panel is deliberately sparse: points backed by fewer than
         # MIN_CLEAN cache-clean runs are not drawn (see the MIN_CLEAN note).
-        axt.set_title("table method  (cache-clean runs only)", fontsize=10, fontweight="bold")
-        axs.legend(title=f"{ALG_LABEL[alg]} — modulus", fontsize=7.3, ncol=2, loc="upper left")
+        axt.set_title("table method  (cache-clean runs only)", fontsize=14, fontweight="bold")
+        axs.legend(title=f"{ALG_LABEL[alg]} — modulus", fontsize=10.2, ncol=2, loc="upper left")
         savefig(fig, f"{alg}_paperscale_speedup")
         return
     fig, ax = plt.subplots(figsize=(6.4, 4.3))
@@ -732,7 +772,7 @@ def fig_ps(alg):
     ax.get_xaxis().set_major_formatter(mt.ScalarFormatter())
     baseline_line(ax)
     ax.set_xlabel("MPI ranks"); ax.set_ylabel("speedup over sequential")
-    ax.legend(title=f"{ALG_LABEL[alg]} — modulus (sieve)", fontsize=7.3, ncol=2, loc="upper left")
+    ax.legend(title=f"{ALG_LABEL[alg]} — modulus (sieve)", fontsize=10.2, ncol=2, loc="upper left")
     savefig(fig, f"{alg}_paperscale_speedup")
 
 def fig_lm(alg):
@@ -749,9 +789,9 @@ def fig_lm(alg):
         peak_marker(axs, 128, ps)
         peak_marker(axt, 128, pt)
         axs.set_ylabel("speedup over sequential")
-        axs.set_title("sieve method", fontsize=10, fontweight="bold")
-        axt.set_title("table method", fontsize=10, fontweight="bold")
-        axs.legend(title=f"{ALG_LABEL[alg]} — modulus", fontsize=7.5, ncol=2, loc="upper left")
+        axs.set_title("sieve method", fontsize=14, fontweight="bold")
+        axt.set_title("table method", fontsize=14, fontweight="bold")
+        axs.legend(title=f"{ALG_LABEL[alg]} — modulus", fontsize=10.5, ncol=2, loc="upper left")
         savefig(fig, f"{alg}_large_moduli_speedup")
         return
     # single-panel sieve (alg7 — no per-rank table sweep measured)
@@ -764,7 +804,7 @@ def fig_lm(alg):
     if pt is not None:
         peak_marker(ax, 128, pt, label=f"table {pt:.1f}×")
     ax.set_xlabel("MPI ranks"); ax.set_ylabel("speedup over sequential")
-    ax.legend(title=f"{ALG_LABEL[alg]} @ large moduli (sieve)", fontsize=7.5, ncol=2, loc="upper left")
+    ax.legend(title=f"{ALG_LABEL[alg]} @ large moduli (sieve)", fontsize=10.5, ncol=2, loc="upper left")
     savefig(fig, f"{alg}_large_moduli_speedup")
 
 def fig_cvg(alg):
@@ -779,14 +819,14 @@ def fig_cvg(alg):
             ax.set_xscale("log", base=2); ax.set_xticks(SIZES_ALL)
             ax.get_xaxis().set_major_formatter(mt.ScalarFormatter()); ax.tick_params(axis="x", rotation=45)
             baseline_line(ax); ax.set_xlabel("modulus size (bits)")
-            ax.legend(fontsize=7.5, loc="upper left")
+            ax.legend(fontsize=10.5, loc="upper left")
         axs.set_ylabel("speedup over sequential")
-        axs.set_title("sieve method", fontsize=10, fontweight="bold")
-        axt.set_title("table method", fontsize=10, fontweight="bold")
-        axs.legend(title=ALG_LABEL[alg], fontsize=7.5, loc="upper left")
+        axs.set_title("sieve method", fontsize=14, fontweight="bold")
+        axt.set_title("table method", fontsize=14, fontweight="bold")
+        axs.legend(title=ALG_LABEL[alg], fontsize=10.5, loc="upper left")
         savefig(fig, f"{alg}_cpu_vs_gpu")
         return
-    # single-panel (alg7 — no table method; table factorisation is a dud)
+    # single-panel (alg7 — no usable table curve at these sizes; see MIN_CLEAN)
     fig, ax = plt.subplots(figsize=(6.8, 4.4))
     eplot(ax, SIZES_ALL, d["cs"], d["cs_se"], "o-", color="#1f77b4", lw=1.9, label="AION CPU — N64 sieve")
     eplot(ax, SIZES_ALL, d["l40"], d["l40_se"], "o-.", color="#8e44ad", lw=1.7, ms=5, label="IRIS 4×L40")
@@ -795,7 +835,7 @@ def fig_cvg(alg):
     ax.get_xaxis().set_major_formatter(mt.ScalarFormatter()); ax.tick_params(axis="x", rotation=45)
     baseline_line(ax)
     ax.set_xlabel("modulus size (bits)"); ax.set_ylabel("speedup over sequential")
-    ax.legend(title=ALG_LABEL[alg], fontsize=7.5, loc="upper left")
+    ax.legend(title=ALG_LABEL[alg], fontsize=10.5, loc="upper left")
     savefig(fig, f"{alg}_cpu_vs_gpu")
 
 
@@ -823,9 +863,11 @@ def fig_variability(alg):
     import numpy as np
     from matplotlib.colors import LogNorm
 
-    # alg7's table method is a dud (0.075x at the design point vs the sieve's 26.4x)
-    # and is omitted from every other figure; its spread would describe a broken
-    # measurement rather than a real one.
+    # alg7's table method is omitted here because its runs are cache-contaminated
+    # (0 clean runs of 48 at 24576b), so a spread computed over them would
+    # describe cache population rather than run-to-run variability. This is a gap
+    # in the corpus, not a property of the algorithm -- on the paper-scale cells
+    # that DO clear MIN_CLEAN it beats the sieve by 1.2-1.4x. See fig_ps.
     methods = [m for m in ("sieve", "table")
                if not (alg == "alg7" and m == "table")
                and any(cpu(alg, m, s, n, err=True) is not None
@@ -849,15 +891,19 @@ def fig_variability(alg):
     axes = axes[0]
     norm = LogNorm(vmin=0.01, vmax=200.0)
     im = None
-    for ax, m in zip(axes, methods):
+    for k, (ax, m) in enumerate(zip(axes, methods)):
         im = ax.imshow(grids[m], origin="lower", aspect="auto",
                        cmap="YlOrRd", norm=norm)
         ax.set_xticks(range(len(NODES)))
         ax.set_xticklabels([str(r) for r in RANKS])
+        # Both panels share the modulus axis, so only the leftmost is labelled --
+        # repeating the values on the right panel put them hard against the left
+        # panel's cells at this wspace. The tick POSITIONS stay on every panel:
+        # they anchor the minor-tick grid drawn below.
         ax.set_yticks(range(len(SIZES_ALL)))
-        ax.set_yticklabels([f"{s}" for s in SIZES_ALL])
+        ax.set_yticklabels([f"{s}" for s in SIZES_ALL] if k == 0 else [])
         ax.set_xlabel("MPI ranks")
-        ax.set_title(f"{m} method", fontsize=10, fontweight="bold")
+        ax.set_title(f"{m} method", fontsize=14, fontweight="bold")
         # label only the cells that matter: anything a reader should not trust blindly
         for i in range(len(SIZES_ALL)):
             for j in range(len(NODES)):
@@ -865,7 +911,7 @@ def fig_variability(alg):
                 if np.isnan(val) or val < 5.0:
                     continue
                 ax.text(j, i, f"{val:.0f}", ha="center", va="center",
-                        fontsize=6.8, fontweight="bold",
+                        fontsize=9.5, fontweight="bold",
                         color="white" if val > 25 else "black")
         ax.set_xticks(np.arange(-0.5, len(NODES), 1), minor=True)
         ax.set_yticks(np.arange(-0.5, len(SIZES_ALL), 1), minor=True)
@@ -878,16 +924,19 @@ def fig_variability(alg):
     cax = fig.add_axes([0.905, 0.12, 0.018, 0.75])
     cb = fig.colorbar(im, cax=cax)
     cb.set_label(("95% CI half-width" if ERRMODE.startswith("ci95") else "standard error")
-                 + ", % of measured speedup", fontsize=8.5)
+                 + ", % of measured speedup", fontsize=11.9)
     cb.ax.yaxis.set_major_formatter(mt.FuncFormatter(lambda y, _: f"{y:g}%"))
     cb.ax.tick_params(labelsize=8)
-    # The interval's construction (t multiplier, log scale, df) is stated once in the
-    # methodology section of the thesis; repeating the formula in every figure title
-    # is redundant and reads as clutter. The title says what is plotted, not how.
-    fig.suptitle(f"{ALG_LABEL.get(alg, alg)} — run-to-run variability "
-                 + ("(95% confidence interval)"
-                    if ERRMODE.startswith("ci95") else "(standard error)"),
-                 fontsize=10.5, fontweight="bold")
+    # Suptitle disabled: the LaTeX \caption already names the algorithm and states
+    # what the colour means, so an embedded title duplicates it. Every other figure
+    # in this set is captionless for the same reason (see the module docstring).
+    # The panel titles ("sieve method" / "table method") stay -- they label the two
+    # axes rather than the figure, and nothing outside the image supplies them.
+    #
+    # fig.suptitle(f"{ALG_LABEL.get(alg, alg)} — run-to-run variability "
+    #              + ("(95% confidence interval)"
+    #                 if ERRMODE.startswith("ci95") else "(standard error)"),
+    #              fontsize=14.7, fontweight="bold")
     savefig(fig, f"{alg}_variability", tight=False)
 
 

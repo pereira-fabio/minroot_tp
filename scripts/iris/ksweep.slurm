@@ -1,0 +1,162 @@
+#!/bin/bash -l
+#SBATCH --time=06:00:00
+#SBATCH --nodes=1
+#SBATCH --partition=l40s
+#SBATCH --qos=besteffort
+#SBATCH --cpus-per-task=28
+#SBATCH --gres=gpu:4
+#SBATCH --output=ksweep_%j.out
+#SBATCH --error=ksweep_%j.err
+
+# ---------------------------------------------------------------------------
+# Cache-residency sweep over the smoothness bound (advisor meeting 2026-08-05)
+#
+# THE QUESTION
+# ------------
+# The thesis explains every GPU result with one principle: residency decides
+# everything. k16's 26 KB table sits in L1 and a single V100 runs its sieve step
+# 800x faster than sequential; k32's 813 MB misses every cache and loses to the
+# CPU cluster. But those are two samples of a continuum and the boundary between
+# them has never been measured -- only predicted.
+#
+# analysis/cache_residency.py predicts it from prime counts alone: on an L40 at
+# 4 GPUs the largest L2-resident bound is k30 (54.4 MB/GPU of 96 MB); k31 is the
+# first that does not fit (105 MB/GPU). This job tests whether that predicted
+# boundary is visible in the TIMINGS, which is the part arithmetic cannot settle.
+#
+# WHAT TO LOOK FOR
+# ----------------
+# The per-prime cost, printed as "ns per prime per pass". If residency matters,
+# that figure should be roughly flat while the slice fits in L2 and then jump
+# between k30 and k31 as the slice spills to GDDR6. If it rises smoothly instead,
+# residency is NOT the step-change the thesis's k16-vs-k32 contrast implies, and
+# the delta-encoding result (sub6:delta -- residency achieved, only 1.10x gained)
+# was the first hint of exactly that.
+#
+# Either outcome is worth having. A visible step confirms the model; a smooth
+# curve says the k16 win comes from having little WORK, not from residency, which
+# is what sub6:delta already argues.
+#
+# WHY A SEPARATE BINARY
+# ---------------------
+# alg2_ksweep_cuda writes algorithm "ksweep" into its own results directory and
+# never uses the alg2_k32_ filename prefix. A --k flag on the k32 solver was
+# tried on 2026-08-07 and reverted: thesis_figures.py matches that prefix, so a
+# k20 run would have been silently loaded as k32 data. Keep them apart.
+# ---------------------------------------------------------------------------
+
+set -u
+module purge
+module use /opt/apps/easybuild/systems/iris/rhel810-20250803/2023b/gpu/modules/all
+module load system/CUDA
+
+cd "$SLURM_SUBMIT_DIR" || exit 1
+BINDIR="bin_$SLURM_JOB_ID"; mkdir -p "$BINDIR"
+OUTDIR="results/results/iris/ksweep/G4"; mkdir -p "$OUTDIR"
+
+echo "Job:          $SLURM_JOB_ID"
+echo "Node:         $(hostname)"
+echo "GPUs:         $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1) x$(nvidia-smi -L | wc -l)"
+echo "PURPOSE:      does the predicted L2-residency boundary show up in timings?"
+echo ""
+
+# ---- Build ----------------------------------------------------------------
+NVCC_FLAGS="-arch=sm_89 -std=c++17 -O3 -I src/common -Xcompiler -fopenmp"
+COMMON="src/common/common.cpp src/common/factorization.cpp"
+LIBS="-lgmp -lgomp"
+
+echo -n "Building gen_prime_table ... "
+gcc -O2 tools/gen_prime_table.c -o "$BINDIR/gen_prime_table" \
+    && echo "OK" || { echo "FAILED"; exit 1; }
+
+echo -n "Building alg2_ksweep_cuda ... "
+nvcc src/iris/alg2_ksweep_cuda.cu $COMMON $NVCC_FLAGS $LIBS -o "$BINDIR/alg2_ksweep_cuda" \
+    && echo "OK" || { echo "FAILED"; exit 1; }
+echo ""
+
+# ---- Prime tables ---------------------------------------------------------
+# Sizes rise steeply: k31 is 420 MB and takes ~10 s, everything below k28 is
+# under a second. Generated once here, reused by every run below.
+#
+# The sweep is deliberately coarse at the bottom (little changes between k17 and
+# k22, all comfortably resident) and dense at the top, where the L40 boundary
+# is predicted to sit between k30 and k31.
+KS="20 24 26 28 29 30 31 32"
+
+echo "========================================"
+echo "PRIME TABLES"
+echo "========================================"
+for K in $KS; do
+    if [ "$K" = "32" ] && [ -f data/k32_primes.bin ]; then
+        echo "k32: using the shipped data/k32_primes.bin"
+        continue
+    fi
+    [ -f "data/k${K}_primes.bin" ] && { echo "k${K}: already present"; continue; }
+    "$BINDIR/gen_prime_table" "$K" || exit 1
+done
+echo ""
+
+# ---- Sweep ----------------------------------------------------------------
+# 24576 bits only. The residency question is about the TABLE, which does not
+# change with modulus size; running every size would multiply the job time
+# without adding a data point to the question being asked. 24576b is also where
+# the sieve dominates most, so the per-prime cost is measured most cleanly.
+SIZE=24576
+NRUNS=10
+
+# ---------------------------------------------------------------------------
+# EXPERIMENT 1 (the clean one) — vary the SPLIT at fixed k.
+#
+# Total work is constant; only the shard size moves. Per-prime cost therefore
+# isolates residency: flat while the shard streams from GDDR6, dropping once it
+# fits in L2. k32's 813 MB table crosses the L40's 96 MB L2 at a 9-way split, so
+# the sweep brackets that with room on both sides.
+#
+# Every run uses ONE physical GPU and times ONE shard, which is exactly what one
+# of N GPUs would cost. That is what lets a 4-GPU allocation speak about 256.
+# ---------------------------------------------------------------------------
+SPLITS="1 2 4 8 9 12 16 32 64 128 256"
+
+for K in 32 30; do
+    echo "========================================"
+    echo "EXPERIMENT 1 — k=$K, split sweep, ${SIZE}b, 1 GPU"
+    echo "========================================"
+    for SP in $SPLITS; do
+        JSON="$OUTDIR/ksweep_table_${SLURM_JOB_ID}_${SIZE}_k${K}_s${SP}_e3.json"
+        echo "--- k=$K, 1/$SP of the table ---"
+        "$BINDIR/alg2_ksweep_cuda" \
+            --k "$K" --data data --size "$SIZE" \
+            --n-challenges "$NRUNS" --n-gpus 1 --split "$SP" \
+            --exponent 3 --json "$JSON" || echo "  (k=$K split=$SP failed — continuing)"
+        echo ""
+    done
+done
+
+# ---------------------------------------------------------------------------
+# EXPERIMENT 2 — vary k at a fixed split, for the hit-rate/table-size trade.
+#
+# Confounded by design (k changes work AND size together), so it does NOT settle
+# the residency question on its own. It is here because it answers a different
+# one: which k gives the best speedup at a realistic device count, which is what
+# a real attacker would pick.
+# ---------------------------------------------------------------------------
+for NG in 4 1; do
+    echo "========================================"
+    echo "EXPERIMENT 2 — k sweep, $NG GPU(s), ${SIZE}b"
+    echo "========================================"
+    for K in $KS; do
+        JSON="$OUTDIR/ksweep_table_${SLURM_JOB_ID}_${SIZE}_k${K}_g${NG}_e3.json"
+        echo "--- k=$K, $NG GPU(s) ---"
+        "$BINDIR/alg2_ksweep_cuda" \
+            --k "$K" --data data --size "$SIZE" \
+            --n-challenges "$NRUNS" --n-gpus "$NG" \
+            --exponent 3 --json "$JSON" || echo "  (k=$K failed — continuing)"
+        echo ""
+    done
+done
+
+echo "========================================"
+echo "DONE — analyse with:"
+echo "  python3 analysis/cache_residency.py --measured $OUTDIR"
+echo "  (N-GPU scaling is a separate job: scripts/iris/gpu_scale_sim.slurm)"
+echo "========================================"
