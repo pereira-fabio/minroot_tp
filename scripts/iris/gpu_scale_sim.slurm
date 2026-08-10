@@ -67,7 +67,7 @@ echo "In:    $CHAL"
 echo "Out:   $OUTDIR"
 echo ""
 
-CHAL_SIZES="24576 8192"
+CHAL_SIZES="256 384 512 768 1024 2048 8192 24576"
 
 NVCC_FLAGS="-arch=sm_89 -std=c++17 -O3 -I src/common -Xcompiler -fopenmp"
 COMMON="src/common/common.cpp src/common/factorization.cpp"
@@ -109,9 +109,15 @@ fi
 # least polluted by fixed overhead. The split list brackets the L40's residency
 # threshold (N=9 for k32) with several points on each side, and runs out to 1024
 # so the combine-bound turnover is unambiguous rather than inferred from a tail.
-SPLITS="1 2 4 8 9 12 16 24 32 48 64 96 128 192 256 384 512 1024"
+SPLITS="1 2 4 8 9 12 16 24 32 48 64 96 128 192 256 384 512 768 1024 2048 4096"
 
-for SIZE in 24576 8192; do
+# Paper scale first. Those are the sizes that decide whether the attack threatens
+# MinRoot as deployed, and they are the ones the thesis is currently silent about
+# on the GPU-scaling axis: sub5:comparison shows every large-bound variant below
+# 1x at 256-2048 bits on the cluster, but says nothing about whether ENOUGH GPUs
+# would change that. The sweep runs to 4096 devices precisely so the answer cannot
+# be dismissed as "you did not try enough hardware".
+for SIZE in 256 384 512 768 1024 2048 8192 24576; do
     echo "========================================"
     echo "N-GPU SCALING — k32, ${SIZE} bits"
     echo "========================================"
