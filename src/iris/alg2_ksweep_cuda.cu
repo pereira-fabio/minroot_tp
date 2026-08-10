@@ -438,8 +438,13 @@ int main(int argc, char **argv) {
     int solved = 0;
     for (int run = 0; run < n_challenges; run++) {
         char cf[512];
+        // Same naming as the initial load: challenge_<n>_<chal_k>_<bits>.txt.
+        // read_mpz_from_file exit(1)s on a missing file, so getting this wrong
+        // kills the process on the first warm run -- which is exactly what it
+        // did before this was fixed.
         if (data_dir && size_bits > 0)
-            snprintf(cf, sizeof(cf), "%s/challenge_%d_%d.txt", data_dir, run, size_bits);
+            snprintf(cf, sizeof(cf), "%s/challenge_%d_%d_%d.txt",
+                     data_dir, run, chal_k, size_bits);
         else
             snprintf(cf, sizeof(cf), "%s", challenge_file);
         mpz_t y; mpz_init(y);
