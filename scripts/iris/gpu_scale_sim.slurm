@@ -48,17 +48,53 @@ module use /opt/apps/easybuild/systems/iris/rhel810-20250803/2023b/gpu/modules/a
 module load system/CUDA
 
 cd "$SLURM_SUBMIT_DIR" || exit 1
-BINDIR="bin_$SLURM_JOB_ID"; mkdir -p "$BINDIR"
-OUTDIR="results/results/iris/gpu_scale_sim"; mkdir -p "$OUTDIR"
+
+# Paths follow the convention every other IRIS script uses (all_gpu_l40.slurm):
+#   results ->  data/results/iris/<alg>/G<n>/l40
+#   builds  ->  src/iris/build_<jobid>   (job-private, so concurrent jobs cannot
+#                                         overwrite each other's binaries)
+#   inputs  ->  data/challenges/k<K>/
+N_GPUS=${SLURM_GPUS_ON_NODE:-4}
+CHAL="data/challenges/k32"
+OUTDIR="data/results/iris/gpu_scale_sim/G${N_GPUS}/l40"
+BINDIR="src/iris/build_${SLURM_JOB_ID}"
+mkdir -p "$OUTDIR" "$BINDIR"
 
 echo "Job:   $SLURM_JOB_ID"
 echo "Node:  $(hostname)"
-echo "GPUs:  $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1) x$(nvidia-smi -L | wc -l)"
+echo "GPUs:  $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1) x${N_GPUS}"
+echo "In:    $CHAL"
+echo "Out:   $OUTDIR"
 echo ""
+
+CHAL_SIZES="24576 8192"
 
 NVCC_FLAGS="-arch=sm_89 -std=c++17 -O3 -I src/common -Xcompiler -fopenmp"
 COMMON="src/common/common.cpp src/common/factorization.cpp"
 LIBS="-lgmp -lgomp"
+
+# ---- Challenge set ---------------------------------------------------------
+# Generated here if absent so the job does not depend on what happens to be on
+# disk. Naming is fixed by tools/challenges.c:
+#     data/challenges/k<K>/{modulo_<K>_<bits>.txt, challenge_<n>_<K>_<bits>.txt}
+#
+# Cost warning: the FIRST call at a given size has to find a random prime of that
+# width, which at 24576 bits takes a few minutes. It is cached afterwards -- the
+# tool reloads an existing modulo rather than regenerating -- so later sizes and
+# later jobs are quick.
+echo -n "Building challenges tool ... "
+gcc -O2 -fopenmp tools/challenges.c -lgmp -o "$BINDIR/challenges" \
+    && echo "OK" || { echo "FAILED"; exit 1; }
+
+for SZ in $CHAL_SIZES; do
+    if [ -f "$CHAL/challenge_0_32_${SZ}.txt" ] && [ -f "$CHAL/modulo_32_${SZ}.txt" ]; then
+        echo "challenges ${SZ}b: present"
+    else
+        echo "challenges ${SZ}b: generating (first run at this size is slow) ..."
+        "$BINDIR/challenges" 10 "$SZ" 32 || { echo "challenge generation FAILED"; exit 1; }
+    fi
+done
+echo ""
 
 echo -n "Building gpu_scale_sim_cuda ... "
 nvcc src/iris/gpu_scale_sim_cuda.cu $COMMON $NVCC_FLAGS $LIBS \
@@ -80,7 +116,7 @@ for SIZE in 24576 8192; do
     echo "N-GPU SCALING — k32, ${SIZE} bits"
     echo "========================================"
     "$BINDIR/gpu_scale_sim_cuda" \
-        --data data --size "$SIZE" --k 32 \
+        --data "$CHAL" --size "$SIZE" --k 32 \
         --splits "$SPLITS" --n-runs 5 --exponent 3 \
         --json "$OUTDIR/gpu_scale_sim_${SLURM_JOB_ID}_${SIZE}_k32.json"
     echo ""
@@ -93,8 +129,11 @@ if [ -f data/k30_primes.bin ]; then
     echo "========================================"
     echo "N-GPU SCALING — k30 (largest L2-resident bound), 24576 bits"
     echo "========================================"
+    # k30 table against the k32 challenge set: --chal-k 32 names the set, --k 30
+    # the table. Only factor_ms is meaningful here (a 2^30 table cannot factor a
+    # 2^32-smooth challenge), which is the quantity this job is about.
     "$BINDIR/gpu_scale_sim_cuda" \
-        --data data --size 24576 --k 30 \
+        --data "$CHAL" --size 24576 --k 30 --chal-k 32 \
         --splits "$SPLITS" --n-runs 5 --exponent 3 \
         --json "$OUTDIR/gpu_scale_sim_${SLURM_JOB_ID}_24576_k30.json"
 else

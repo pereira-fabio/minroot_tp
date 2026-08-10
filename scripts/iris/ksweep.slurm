@@ -51,19 +51,62 @@ module use /opt/apps/easybuild/systems/iris/rhel810-20250803/2023b/gpu/modules/a
 module load system/CUDA
 
 cd "$SLURM_SUBMIT_DIR" || exit 1
-BINDIR="bin_$SLURM_JOB_ID"; mkdir -p "$BINDIR"
-OUTDIR="results/results/iris/ksweep/G4"; mkdir -p "$OUTDIR"
+
+# Paths follow all_gpu_l40.slurm:
+#   results ->  data/results/iris/<alg>/G<n>/l40
+#   builds  ->  src/iris/build_<jobid>
+#   inputs  ->  data/challenges/k<K>/
+#
+# The k32 challenge set is used for EVERY table bound. That is deliberate: a
+# challenge is crafted smooth for one bound, and no k20..k31 sets exist, so
+# sweeping the table against a fixed set is the only option. It is also the
+# right one -- the kernel scans its shard whatever the challenge is, so
+# factor_ms (the residency signal) is valid throughout. End-to-end speedup is
+# not, and the binary prints "n/a" for it rather than a wrong number whenever
+# the table bound is below the challenge's.
+N_GPUS=${SLURM_GPUS_ON_NODE:-4}
+CHAL="data/challenges/k32"
+OUTDIR="data/results/iris/ksweep/G${N_GPUS}/l40"
+BINDIR="src/iris/build_${SLURM_JOB_ID}"
+mkdir -p "$OUTDIR" "$BINDIR"
 
 echo "Job:          $SLURM_JOB_ID"
 echo "Node:         $(hostname)"
-echo "GPUs:         $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1) x$(nvidia-smi -L | wc -l)"
+echo "GPUs:         $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1) x${N_GPUS}"
+echo "In:           $CHAL  (k32 set, used for every table bound — see note above)"
+echo "Out:          $OUTDIR"
 echo "PURPOSE:      does the predicted L2-residency boundary show up in timings?"
 echo ""
+
+CHAL_SIZES="24576"
 
 # ---- Build ----------------------------------------------------------------
 NVCC_FLAGS="-arch=sm_89 -std=c++17 -O3 -I src/common -Xcompiler -fopenmp"
 COMMON="src/common/common.cpp src/common/factorization.cpp"
 LIBS="-lgmp -lgomp"
+
+# ---- Challenge set ---------------------------------------------------------
+# Generated here if absent so the job does not depend on what happens to be on
+# disk. Naming is fixed by tools/challenges.c:
+#     data/challenges/k<K>/{modulo_<K>_<bits>.txt, challenge_<n>_<K>_<bits>.txt}
+#
+# Cost warning: the FIRST call at a given size has to find a random prime of that
+# width, which at 24576 bits takes a few minutes. It is cached afterwards -- the
+# tool reloads an existing modulo rather than regenerating -- so later sizes and
+# later jobs are quick.
+echo -n "Building challenges tool ... "
+gcc -O2 -fopenmp tools/challenges.c -lgmp -o "$BINDIR/challenges" \
+    && echo "OK" || { echo "FAILED"; exit 1; }
+
+for SZ in $CHAL_SIZES; do
+    if [ -f "$CHAL/challenge_0_32_${SZ}.txt" ] && [ -f "$CHAL/modulo_32_${SZ}.txt" ]; then
+        echo "challenges ${SZ}b: present"
+    else
+        echo "challenges ${SZ}b: generating (first run at this size is slow) ..."
+        "$BINDIR/challenges" 10 "$SZ" 32 || { echo "challenge generation FAILED"; exit 1; }
+    fi
+done
+echo ""
 
 echo -n "Building gen_prime_table ... "
 gcc -O2 tools/gen_prime_table.c -o "$BINDIR/gen_prime_table" \
@@ -125,7 +168,7 @@ for K in 32 30; do
         JSON="$OUTDIR/ksweep_table_${SLURM_JOB_ID}_${SIZE}_k${K}_s${SP}_e3.json"
         echo "--- k=$K, 1/$SP of the table ---"
         "$BINDIR/alg2_ksweep_cuda" \
-            --k "$K" --data data --size "$SIZE" \
+            --k "$K" --chal-k 32 --data "$CHAL" --size "$SIZE" \
             --n-challenges "$NRUNS" --n-gpus 1 --split "$SP" \
             --exponent 3 --json "$JSON" || echo "  (k=$K split=$SP failed — continuing)"
         echo ""
@@ -148,7 +191,7 @@ for NG in 4 1; do
         JSON="$OUTDIR/ksweep_table_${SLURM_JOB_ID}_${SIZE}_k${K}_g${NG}_e3.json"
         echo "--- k=$K, $NG GPU(s) ---"
         "$BINDIR/alg2_ksweep_cuda" \
-            --k "$K" --data data --size "$SIZE" \
+            --k "$K" --chal-k 32 --data "$CHAL" --size "$SIZE" \
             --n-challenges "$NRUNS" --n-gpus "$NG" \
             --exponent 3 --json "$JSON" || echo "  (k=$K failed — continuing)"
         echo ""

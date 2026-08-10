@@ -140,6 +140,20 @@ static double device_l2_mb(int dev) {
     return (double)prop.l2CacheSize / 1e6;
 }
 
+// read_mpz_from_file prints an error and returns void, so a missing file leaves
+// the mpz at zero and the run limps on producing nonsense. Check first and die
+// with the path, which is the only thing the operator needs to see.
+static void require_file(const char *path, const char *what) {
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "ERROR: %s not found: %s\n", what, path);
+        fprintf(stderr, "       challenge sets live in data/challenges/k<K>/ --\n"
+                        "       pass e.g. --data data/challenges/k32\n");
+        exit(1);
+    }
+    fclose(f);
+}
+
 static void print_usage(const char *prog) {
     fprintf(stderr,
         "Usage: %s [<challenge_file> <modulo_file>] [options]\n"
@@ -152,7 +166,11 @@ static void print_usage(const char *prog) {
         "  --n-gpus N                    devices to split the table across (default: 1)\n"
         "  --json FILE                   write JSON results\n"
         "\n"
-        "Build the table first:  tools/gen_prime_table <k>\n", prog);
+        "  --chal-k K                    bound the challenge set was crafted for\n"
+        "                                (default: --k; use 32 to sweep tables\n"
+        "                                against the existing k32 challenges)\n"
+        "\nBuild the table first:  tools/gen_prime_table <k>\n"
+        "Challenge sets:         --data data/challenges/k32\n", prog);
 }
 
 int main(int argc, char **argv) {
@@ -166,6 +184,7 @@ int main(int argc, char **argv) {
     int n_challenges           = 10;
     int n_gpus                 = 1;
     int k_bound                = 0;         // no default: the sweep must be explicit
+    int chal_k                 = 0;         // challenge-set bound; defaults to k_bound
     // --split N: divide the table into N shards and process only the first
     // n_gpus of them, so ONE physical device measures what one of N would see.
     // This is what makes the residency question answerable: IRIS caps a job at
@@ -183,6 +202,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--split")        && i+1<argc) split        = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--exponent")     && i+1<argc) exponent     = strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--primes")       && i+1<argc) primes_path  = argv[++i];
+        else if (!strcmp(argv[i], "--chal-k")       && i+1<argc) chal_k       = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--json")         && i+1<argc) json_path    = argv[++i];
         else if (argv[i][0] != '-') {
             if (!challenge_file) challenge_file = argv[i];
@@ -206,13 +226,20 @@ int main(int argc, char **argv) {
     }
 
     // Resolve challenge/modulo from --data + --size if not given positionally.
+    // data/challenges/k<K>/{modulo_<K>_<bits>.txt, challenge_<n>_<K>_<bits>.txt}
+    // per tools/challenges.c. --chal-k names the bound the SET was crafted for,
+    // which is independent of --k: sweeping the table bound against a fixed
+    // challenge set is exactly the point (see the sweep script).
     static char cbuf[512], mbuf[512];
+    if (chal_k <= 0) chal_k = k_bound;
     if (data_dir && size_bits > 0 && !challenge_file) {
-        snprintf(cbuf, sizeof(cbuf), "%s/challenge_0_%d.txt", data_dir, size_bits);
-        snprintf(mbuf, sizeof(mbuf), "%s/modulo_%d.txt", data_dir, size_bits);
+        snprintf(cbuf, sizeof(cbuf), "%s/challenge_0_%d_%d.txt", data_dir, chal_k, size_bits);
+        snprintf(mbuf, sizeof(mbuf), "%s/modulo_%d_%d.txt",      data_dir, chal_k, size_bits);
         challenge_file = cbuf; modulo_file = mbuf;
     }
     if (!challenge_file || !modulo_file) { print_usage(argv[0]); return 1; }
+    require_file(modulo_file, "modulo");
+    require_file(challenge_file, "challenge");
 
     {
         int avail = 1;
@@ -454,8 +481,21 @@ int main(int argc, char **argv) {
         printf("\n=== k=%d, %d-way split, %.3f MB/shard%s ===\n", k_bound, split, per_gpu_mb,
                (l2_mb > 0 && per_gpu_mb <= l2_mb) ? " [L2-resident]" : "");
         printf("  factor  %8.2f ms    recon %7.2f ms    total %8.2f ms\n", fm, rm, fm + rm);
-        printf("  speedup %8.2fx   (vs %.2f ms sequential)\n",
-               (fm + rm) > 0 ? powm_baseline_ms / (fm + rm) : 0.0, powm_baseline_ms);
+        // A challenge crafted 2^chal_k-smooth cannot factor under a smaller
+        // bound: its factors run up to 2^chal_k and a k<chal_k table simply does
+        // not contain them. factor_ms is still exactly right -- the kernel scans
+        // its shard either way, which is the quantity the residency question
+        // turns on -- but end-to-end speedup is only meaningful when the solve
+        // completes, so it is suppressed rather than printed as a wrong number.
+        if (solved > 0) {
+            printf("  speedup %8.2fx   (vs %.2f ms sequential)\n",
+                   (fm + rm) > 0 ? powm_baseline_ms / (fm + rm) : 0.0, powm_baseline_ms);
+        } else {
+            printf("  speedup       n/a   (challenge is 2^%d-smooth; a 2^%d table\n"
+                   "                       cannot factor it -- factor_ms above is\n"
+                   "                       still the valid measurement)\n",
+                   chal_k, k_bound);
+        }
         // Per-prime cost normalises the shard size away, so a change here is a
         // change in the COST OF A PRIME -- which is the residency signal. The
         // divisor is the shard, not the table.

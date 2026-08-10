@@ -119,6 +119,20 @@ static double measure_combine_ms(int n_nodes, const mpz_t modulo, gmp_randstate_
     return dt;
 }
 
+// read_mpz_from_file prints an error and returns void, so a missing file leaves
+// the mpz at zero and the run limps on producing nonsense. Check first and die
+// with the path, which is the only thing the operator needs to see.
+static void require_file(const char *path, const char *what) {
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "ERROR: %s not found: %s\n", what, path);
+        fprintf(stderr, "       challenge sets live in data/challenges/k<K>/ --\n"
+                        "       pass e.g. --data data/challenges/k32\n");
+        exit(1);
+    }
+    fclose(f);
+}
+
 static void usage(const char *p) {
     fprintf(stderr,
         "Usage: %s --data DIR --size BITS [options]\n"
@@ -127,7 +141,9 @@ static void usage(const char *p) {
         "  --n-gpus G       physical devices per simulated node (default: all)\n"
         "  --n-runs R       timed repeats per split (default: 5)\n"
         "  --exponent E     root exponent (default 3)\n"
-        "  --json FILE      write the projection as JSON\n", p);
+        "  --chal-k K       bound the challenge set was crafted for (default: --k)\n"
+        "  --json FILE      write the projection as JSON\n"
+        "\nChallenge sets: --data data/challenges/k32\n", p);
 }
 
 int main(int argc, char **argv)
@@ -135,6 +151,7 @@ int main(int argc, char **argv)
     const char *data_dir = nullptr, *json_path = nullptr, *primes_path = nullptr;
     const char *splits_s = "1 2 4 8 16 32 64 128 256 512";
     int size_bits = 0, n_gpus = 0, n_runs = 5, k_bound = 32;
+    int chal_k = 0;   // bound the challenge set was crafted for; defaults to k_bound
     unsigned long exponent = 3;
 
     for (int i = 1; i < argc; i++) {
@@ -146,9 +163,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--n-runs")   && i+1<argc) n_runs     = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--exponent") && i+1<argc) exponent   = strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--primes")   && i+1<argc) primes_path= argv[++i];
+        else if (!strcmp(argv[i], "--chal-k")   && i+1<argc) chal_k     = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--json")     && i+1<argc) json_path  = argv[++i];
     }
     if (!data_dir || size_bits <= 0) { usage(argv[0]); return 1; }
+    if (chal_k <= 0) chal_k = k_bound;
     if (k_bound < 17 || k_bound > 32) {
         fprintf(stderr, "ERROR: --k must be 17..32 (got %d)\n", k_bound); return 1;
     }
@@ -165,9 +184,15 @@ int main(int argc, char **argv)
     if (n_gpus > avail) n_gpus = avail;
     const int GPUS_PER_NODE = n_gpus;   // this host stands in for one node
 
+    // Naming follows tools/challenges.c: data/challenges/k<K>/ holds
+    // modulo_<K>_<bits>.txt and challenge_<n>_<K>_<bits>.txt. The K in the
+    // filename is the bound the challenge was CRAFTED for, which is not
+    // necessarily --k (see the note in the sweep script).
     static char cbuf[512], mbuf[512], pbuf[256];
-    snprintf(cbuf, sizeof(cbuf), "%s/challenge_0_%d.txt", data_dir, size_bits);
-    snprintf(mbuf, sizeof(mbuf), "%s/modulo_%d.txt", data_dir, size_bits);
+    snprintf(cbuf, sizeof(cbuf), "%s/challenge_0_%d_%d.txt", data_dir, chal_k, size_bits);
+    snprintf(mbuf, sizeof(mbuf), "%s/modulo_%d_%d.txt",      data_dir, chal_k, size_bits);
+    require_file(mbuf, "modulo");
+    require_file(cbuf, "challenge");
     if (!primes_path) { snprintf(pbuf, sizeof(pbuf), "data/k%d_primes.bin", k_bound); primes_path = pbuf; }
 
     mpz_t challenge, modulo, e_inv, result;
