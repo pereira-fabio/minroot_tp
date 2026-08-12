@@ -55,9 +55,18 @@ PRIMES_UPPER=data/k35_upper_primes.bin
 OUTDIR=$SLURM_SUBMIT_DIR/data/results/aion/cpu_scale_sim/cpu_scale_sim_${SLURM_JOB_ID}
 mkdir -p $OUTDIR
 
-BINDIR=src/aion/build_${SLURM_JOB_ID}
-mkdir -p $BINDIR
-make cpu_scale_sim && mv cpu_scale_sim $BINDIR/ || exit 1
+BINARY=./cpu_scale_sim_${SLURM_JOB_ID}
+trap 'rm -f $BINARY' EXIT
+
+mpicxx -O3 -std=c++17 -fopenmp -Wall \
+    -I src/common \
+    src/aion/cpu_scale_sim.cpp src/common/solver_common.cpp \
+    src/common/common.cpp src/common/factorization.cpp \
+    src/common/prefilter.cpp src/common/crt_common.cpp \
+    -lgmp -o $BINARY
+
+if [ $? -ne 0 ]; then echo "Compilation failed"; exit 1; fi
+echo "Compilation successful ($BINARY)"
 
 echo "=== Job info ==="
 echo "Job ID:    $SLURM_JOB_ID"
@@ -74,7 +83,7 @@ for V in $VARIANTS; do
     for SIZE in $SIZES; do
         for M in $METHODS; do
             echo "---- $V $M ${SIZE}b ----"
-            srun --ntasks=$SLURM_NTASKS $BINDIR/cpu_scale_sim \
+            srun --mpi=pmix --ntasks=$SLURM_NTASKS $BINARY \
                  --data $CHAL --primes $PRIMES --primes-upper $PRIMES_UPPER \
                  --size $SIZE --k $KBITS --method $M \
                  --splits $SPLITS --reps $REPS --exponent $EXPONENT \
