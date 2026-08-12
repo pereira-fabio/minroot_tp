@@ -43,7 +43,7 @@ cd $SLURM_SUBMIT_DIR
 # can straddle the boundary; cpu_scale_sim reproduces alg2_k35's split and loads
 # both, so --k 35 measures all of k35's primes rather than the lower seventh.
 VARIANTS=${VARIANTS:-"k32 k35"}
-SIZES=${SIZES:-"256 1024 8192 24576"}
+SIZES=${SIZES:-"256 384 512 768 1024 2048 4096 8192 16384 24576"}
 METHODS=${METHODS:-"sieve table"}
 SPLITS=${SPLITS:-"1,2,4,8,16,32,64,128,192,256,384,512,768,1024,2048"}
 EXPONENT=${EXPONENT:-3}
