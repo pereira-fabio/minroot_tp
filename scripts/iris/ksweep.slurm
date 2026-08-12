@@ -119,12 +119,17 @@ echo ""
 
 # ---- Prime tables ---------------------------------------------------------
 # Sizes rise steeply: k31 is 420 MB and takes ~10 s, everything below k28 is
-# under a second. Generated once here, reused by every run below.
+# under a second. Generated once here, reused by every run below; k17..k31 come
+# to ~870 MB on disk, with k32's 813 MB already shipped.
 #
-# The sweep is deliberately coarse at the bottom (little changes between k17 and
-# k22, all comfortably resident) and dense at the top, where the L40 boundary
-# is predicted to sit between k30 and k31.
-KS="20 24 26 28 29 30 31 32"
+# EVERY k from 17 to 32 (was "20 24 26 28 29 30 31 32", coarse at the bottom on
+# the assumption that nothing happens there). It does: k20 turned out to sit on
+# an OCCUPANCY cliff -- 17.48 ns/prime against a 2.7 ns steady state -- and with
+# the old spacing that cliff was a single point with a 4x gap to its neighbour,
+# so where it starts and where it recovers were both unmeasured. k17..k23 map it.
+# The extra eight values are cheap: 10.7M primes against the old list's 411M,
+# so the sweep runs under 3% longer.
+KS="17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32"
 
 echo "========================================"
 echo "PRIME TABLES"
@@ -203,3 +208,5 @@ echo "DONE — analyse with:"
 echo "  python3 analysis/cache_residency.py --measured $OUTDIR"
 echo "  (N-GPU scaling is a separate job: scripts/iris/gpu_scale_sim.slurm)"
 echo "========================================"
+
+# Edit: 2026-08-12
