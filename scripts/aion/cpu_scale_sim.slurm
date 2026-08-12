@@ -49,9 +49,22 @@ SPLITS=${SPLITS:-"1,2,4,8,16,32,64,128,192,256,384,512,768,1024,2048"}
 EXPONENT=${EXPONENT:-3}
 REPS=${REPS:-3}
 
-CHAL=data/challenges/k32
-PRIMES=data/tables/k32_primes.bin
-PRIMES_UPPER=data/k35_upper_primes.bin
+# Each variant reads its OWN challenge set, as the solvers do: a k35 challenge
+# is crafted 2^35-smooth and lives in data/challenges/k35. Using k32's set for a
+# k35 run (the first version of this script) asks for challenge_0_35_* inside
+# the k32 directory, which does not exist.
+# The repo is inconsistent about where prime tables live -- alg2_k32.cpp defaults
+# to "k32_primes.bin" (submit dir) while scripts/iris/ksweep.slurm uses
+# "data/k32_primes.bin" -- so resolve it rather than assume, and say so if it is
+# missing instead of launching sixteen jobs that each discover it separately.
+find_table () {
+    for p in "$@"; do [ -f "$p" ] && { echo "$p"; return 0; }; done
+    return 1
+}
+PRIMES=$(find_table k32_primes.bin data/k32_primes.bin data/tables/k32_primes.bin) || {
+    echo "FATAL: no k32 prime table found (looked in ., data/, data/tables/)"; exit 1; }
+PRIMES_UPPER=$(find_table data/k35_upper_primes.bin k35_upper_primes.bin \
+                          data/tables/k35_upper_primes.bin) || PRIMES_UPPER=""
 OUTDIR=$SLURM_SUBMIT_DIR/data/results/aion/cpu_scale_sim/cpu_scale_sim_${SLURM_JOB_ID}
 mkdir -p $OUTDIR
 
@@ -75,19 +88,31 @@ echo "Variants:  $VARIANTS"
 echo "Sizes:     $SIZES"
 echo "Methods:   $METHODS"
 echo "Splits:    $SPLITS"
+echo "Primes:    $PRIMES${PRIMES_UPPER:+ + $PRIMES_UPPER}"
 echo "Results:   $OUTDIR"
 echo ""
 
 for V in $VARIANTS; do
     KBITS=${V#k}
+    CHAL=data/challenges/${V}
+    if [ ! -d "$CHAL" ]; then
+        echo "SKIP $V: no challenge set at $CHAL"; continue
+    fi
+    # k35's table method needs the upper (2^32,2^35] table as well as k32's.
+    if [ "$KBITS" -gt 32 ] && [ -z "$PRIMES_UPPER" ]; then
+        echo "SKIP $V: --method table needs k35_upper_primes.bin, not found"; continue
+    fi
+    UPPER_ARG=""
+    [ -n "$PRIMES_UPPER" ] && UPPER_ARG="--primes-upper $PRIMES_UPPER"
     for SIZE in $SIZES; do
         for M in $METHODS; do
             echo "---- $V $M ${SIZE}b ----"
             srun --mpi=pmix --ntasks=$SLURM_NTASKS $BINARY \
-                 --data $CHAL --primes $PRIMES --primes-upper $PRIMES_UPPER \
-                 --size $SIZE --k $KBITS --method $M \
+                 --data $CHAL --primes $PRIMES $UPPER_ARG \
+                 --size $SIZE --k $KBITS --chal-k $KBITS --method $M \
                  --splits $SPLITS --reps $REPS --exponent $EXPONENT \
-                 --json $OUTDIR/cpu_scale_sim_${SLURM_JOB_ID}_${SIZE}_${V}_${M}_e${EXPONENT}.json
+                 --json $OUTDIR/cpu_scale_sim_${SLURM_JOB_ID}_${SIZE}_${V}_${M}_e${EXPONENT}.json \
+                 || echo "  ($V $M ${SIZE}b failed -- continuing)"
             echo ""
         done
     done

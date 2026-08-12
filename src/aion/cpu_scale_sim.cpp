@@ -35,8 +35,8 @@
 //
 // Run it under the production layout (2 ranks/node, 32 threads each) so the
 // memory contention a real rank sees is present:
-//     srun -N1 -n2 -c32 ./cpu_scale_sim --size 24576 --k 32 --method table \
-//          --splits 1,2,4,...,1024 --json out.json
+//     srun -N1 -n2 -c32 ./cpu_scale_sim --size 24576 --k 32 --method table
+//                        --splits 1,2,4,...,1024 --json out.json
 // Every rank times the SAME slice; the reported figure is the max, matching
 // how the solvers report a phase.
 //
@@ -117,10 +117,10 @@ int main(int argc, char *argv[])
     const char *json_out = NULL;
     const char *method   = "table";
     const char *splits_s = "1,2,4,8,16,32,64,128,192,256,384,512,768,1024";
-    const char *primes_file = "data/tables/k32_primes.bin";
+    const char *primes_file = "k32_primes.bin";   // as alg2_k32.cpp defaults
     const char *primes_upper = K35U_DEFAULT_PATH;   // only read when k > 32
     const char *cbrt_dir = "data/cbrt";
-    int  size_bits = 24576, kbits = 32, reps = 3;
+    int  size_bits = 24576, kbits = 32, reps = 3, chal_k = 0;
     unsigned long exponent = 3;
 
     for (int i = 1; i < argc; i++) {
@@ -133,6 +133,7 @@ int main(int argc, char *argv[])
         else if (!strcmp(argv[i], "--cbrt-dir") && i+1 < argc) cbrt_dir = argv[++i];
         else if (!strcmp(argv[i], "--size")   && i+1 < argc) size_bits   = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--k")      && i+1 < argc) kbits       = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--chal-k") && i+1 < argc) chal_k      = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--reps")   && i+1 < argc) reps        = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--exponent") && i+1 < argc) exponent  = atol(argv[++i]);
         else { if (!rank) fprintf(stderr, "unknown option '%s'\n", argv[i]); MPI_Finalize(); return 1; }
@@ -150,9 +151,10 @@ int main(int argc, char *argv[])
     }
     std::sort(splits.begin(), splits.end());
 
+    if (chal_k <= 0) chal_k = kbits;   // default: the set matching the bound
     char cf[512], mf[512];
-    snprintf(cf, sizeof(cf), "%s/challenge_0_%d_%d.txt", data_dir, kbits, size_bits);
-    snprintf(mf, sizeof(mf), "%s/modulo_%d_%d.txt",      data_dir, kbits, size_bits);
+    snprintf(cf, sizeof(cf), "%s/challenge_0_%d_%d.txt", data_dir, chal_k, size_bits);
+    snprintf(mf, sizeof(mf), "%s/modulo_%d_%d.txt",      data_dir, chal_k, size_bits);
 
     mpz_t challenge, modulo;
     mpz_inits(challenge, modulo, NULL);
@@ -160,6 +162,12 @@ int main(int argc, char *argv[])
         if (!rank) fprintf(stderr, "cannot read %s / %s\n", cf, mf);
         mpz_clears(challenge, modulo, NULL); MPI_Finalize(); return 1;
     }
+
+    // Exactly the bounds the solvers use: alg2_k32 stops at UINT32_MAX,
+    // alg2_k35 overshoots 2^35 by 1024 to catch nextprime overflow.
+    const uint64_t range_hi = (kbits <= 32) ? ((kbits == 32) ? (uint64_t)UINT32_MAX
+                                                             : ((1ULL << kbits) - 1))
+                                            : ((1ULL << kbits) + 1024ULL);
 
     int sp_count = 0;
     unsigned *sp = kf_generate_small_primes(&sp_count);
@@ -173,14 +181,29 @@ int main(int argc, char *argv[])
     {
         char p[KSC_CBRT_PATH_MAX];
         ksc_shared_cbrt_path(p, sizeof(p), cbrt_dir, mf);
-        if (!kf_cbrt_cache_load(&cache, p)) {
-            if (!rank) fprintf(stderr,
-                "FATAL: no merged cbrt cache at %s.\n"
-                "  local_recon would measure modexps, not reconstruction. Build it with\n"
-                "  analysis/merge_cbrt_cache.py after a normal solver run at this size.\n", p);
-            mpz_clears(challenge, modulo, NULL); MPI_Finalize(); return 1;
+        if (kf_cbrt_cache_load(&cache, p)) {
+            if (!rank) printf("cbrt: loaded %s (%d entries)\n", p, cache.count);
+        } else {
+            // No merged cache (it is produced by merge_cbrt_cache.py after a
+            // normal solver run). Build it here instead, ONCE, before any timing
+            // starts. This is not optional: with a cold cache every cbrt(p) is a
+            // full-width modexp costing about as much as the whole sequential
+            // baseline, so a timed local_recon would measure cache-filling.
+            // Production runs under Plan A always have it warm, so warming it
+            // here is what makes the measurement comparable to theirs.
+            double t0 = MPI_Wtime();
+            kfactor_list_t all; kfl_init(&all);
+            uint64_t lo, hi; rank0_slice(1, range_hi, &lo, &hi);
+            kf_trial_divide_sieve(challenge, lo, hi, sp_count, sp, &all);
+            mpz_t warm; mpz_init(warm);
+            bool dirty = false;
+            kf_compute_cbrt_from_factors_omp(warm, &all, modulo, &cache, &dirty, exponent);
+            mpz_clear(warm);
+            if (!rank)
+                printf("cbrt: no %s -- built %d entries from %d factors in %.1f s\n",
+                       p, cache.count, all.count, MPI_Wtime() - t0);
+            kfl_free(&all);
         }
-        if (!rank) printf("cbrt: loaded %s (%d entries)\n", p, cache.count);
     }
     gmp_randstate_t rs; gmp_randinit_mt(rs); gmp_randseed_ui(rs, 20260812UL);
 
@@ -204,11 +227,6 @@ int main(int argc, char *argv[])
     }
     MPI_Bcast(&powm_ms, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    // Exactly the bounds the solvers use: alg2_k32 stops at UINT32_MAX,
-    // alg2_k35 overshoots 2^35 by 1024 to catch nextprime overflow.
-    const uint64_t range_hi = (kbits <= 32) ? ((kbits == 32) ? (uint64_t)UINT32_MAX
-                                                             : ((1ULL << kbits) - 1))
-                                            : ((1ULL << kbits) + 1024ULL);
     std::vector<SimRow> rows;
 
     for (int N : splits) {
