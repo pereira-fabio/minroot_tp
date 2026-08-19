@@ -64,13 +64,14 @@
 // reported apart from the measured terms rather than blended into them.
 static double gather_model_ms(int nranks) { return 0.0113 * pow((double)nranks, 0.357); }
 
-struct SimRow {
-    int      nranks;
+struct SimRow
+{
+    int nranks;
     uint64_t my_lo, my_hi;
-    double   slice_mb;
-    int64_t  slice_primes;
-    double   factor_ms, local_recon_ms, combine_ms, gather_ms;
-    int      factors_found;
+    double slice_mb;
+    int64_t slice_primes;
+    double factor_ms, local_recon_ms, combine_ms, gather_ms;
+    int factors_found;
 };
 
 // One rank's factoring slice of an nranks-way job -- the split of alg2_k32.cpp.
@@ -80,14 +81,16 @@ static void rank0_slice(int nranks, uint64_t range_hi, uint64_t *lo, uint64_t *h
     uint64_t span = range_hi - RANGE_LO + 1;
     *lo = RANGE_LO;
     *hi = RANGE_LO + span / (uint64_t)nranks - 1;
-    if (nranks == 1) *hi = range_hi;
+    if (nranks == 1)
+        *hi = range_hi;
 }
 
 // combine(N): rank 0's N-1 dependent full-width modular multiplications.
 // Measured, not modelled -- the operands are real |M|-bit residues.
 static double measure_combine_ms(int nranks, const mpz_t modulo, gmp_randstate_t rs)
 {
-    if (nranks <= 1) return 0.0;
+    if (nranks <= 1)
+        return 0.0;
     size_t bits = mpz_sizeinbase(modulo, 2);
     mpz_t acc, partial;
     mpz_inits(acc, partial, NULL);
@@ -97,7 +100,8 @@ static double measure_combine_ms(int nranks, const mpz_t modulo, gmp_randstate_t
     mpz_mod(partial, partial, modulo);
 
     double t0 = MPI_Wtime();
-    for (int i = 0; i < nranks - 1; i++) {
+    for (int i = 0; i < nranks - 1; i++)
+    {
         mpz_mul(acc, acc, partial);
         mpz_mod(acc, acc, modulo);
     }
@@ -115,52 +119,82 @@ int main(int argc, char *argv[])
 
     const char *data_dir = "data/challenges/k32";
     const char *json_out = NULL;
-    const char *method   = "table";
+    const char *method = "table";
     const char *splits_s = "1,2,4,8,16,32,64,128,192,256,384,512,768,1024";
     const char *primes_file = "k32_primes.bin";   // as alg2_k32.cpp defaults
-    const char *primes_upper = K35U_DEFAULT_PATH;   // only read when k > 32
+    const char *primes_upper = K35U_DEFAULT_PATH; // only read when k > 32
     const char *cbrt_dir = "data/cbrt";
-    int  size_bits = 24576, kbits = 32, reps = 3, chal_k = 0;
+    int size_bits = 24576, kbits = 32, reps = 3, chal_k = 0;
     unsigned long exponent = 3;
 
-    for (int i = 1; i < argc; i++) {
-        if      (!strcmp(argv[i], "--data")   && i+1 < argc) data_dir    = argv[++i];
-        else if (!strcmp(argv[i], "--json")   && i+1 < argc) json_out    = argv[++i];
-        else if (!strcmp(argv[i], "--method") && i+1 < argc) method      = argv[++i];
-        else if (!strcmp(argv[i], "--splits") && i+1 < argc) splits_s    = argv[++i];
-        else if (!strcmp(argv[i], "--primes") && i+1 < argc) primes_file = argv[++i];
-        else if (!strcmp(argv[i], "--primes-upper") && i+1 < argc) primes_upper = argv[++i];
-        else if (!strcmp(argv[i], "--cbrt-dir") && i+1 < argc) cbrt_dir = argv[++i];
-        else if (!strcmp(argv[i], "--size")   && i+1 < argc) size_bits   = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--k")      && i+1 < argc) kbits       = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--chal-k") && i+1 < argc) chal_k      = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--reps")   && i+1 < argc) reps        = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--exponent") && i+1 < argc) exponent  = atol(argv[++i]);
-        else { if (!rank) fprintf(stderr, "unknown option '%s'\n", argv[i]); MPI_Finalize(); return 1; }
+    for (int i = 1; i < argc; i++)
+    {
+        if (!strcmp(argv[i], "--data") && i + 1 < argc)
+            data_dir = argv[++i];
+        else if (!strcmp(argv[i], "--json") && i + 1 < argc)
+            json_out = argv[++i];
+        else if (!strcmp(argv[i], "--method") && i + 1 < argc)
+            method = argv[++i];
+        else if (!strcmp(argv[i], "--splits") && i + 1 < argc)
+            splits_s = argv[++i];
+        else if (!strcmp(argv[i], "--primes") && i + 1 < argc)
+            primes_file = argv[++i];
+        else if (!strcmp(argv[i], "--primes-upper") && i + 1 < argc)
+            primes_upper = argv[++i];
+        else if (!strcmp(argv[i], "--cbrt-dir") && i + 1 < argc)
+            cbrt_dir = argv[++i];
+        else if (!strcmp(argv[i], "--size") && i + 1 < argc)
+            size_bits = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--k") && i + 1 < argc)
+            kbits = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--chal-k") && i + 1 < argc)
+            chal_k = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--reps") && i + 1 < argc)
+            reps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--exponent") && i + 1 < argc)
+            exponent = atol(argv[++i]);
+        else
+        {
+            if (!rank)
+                fprintf(stderr, "unknown option '%s'\n", argv[i]);
+            MPI_Finalize();
+            return 1;
+        }
     }
-    if (kbits < 17 || kbits > 35) {
-        if (!rank) fprintf(stderr, "--k must be in [17,35]\n");
-        MPI_Finalize(); return 1;
+    if (kbits < 17 || kbits > 35)
+    {
+        if (!rank)
+            fprintf(stderr, "--k must be in [17,35]\n");
+        MPI_Finalize();
+        return 1;
     }
 
     std::vector<int> splits;
-    for (const char *p = splits_s; *p; ) {
+    for (const char *p = splits_s; *p;)
+    {
         splits.push_back(atoi(p));
-        while (*p && *p != ',') p++;
-        if (*p == ',') p++;
+        while (*p && *p != ',')
+            p++;
+        if (*p == ',')
+            p++;
     }
     std::sort(splits.begin(), splits.end());
 
-    if (chal_k <= 0) chal_k = kbits;   // default: the set matching the bound
+    if (chal_k <= 0)
+        chal_k = kbits; // default: the set matching the bound
     char cf[512], mf[512];
     snprintf(cf, sizeof(cf), "%s/challenge_0_%d_%d.txt", data_dir, chal_k, size_bits);
-    snprintf(mf, sizeof(mf), "%s/modulo_%d_%d.txt",      data_dir, chal_k, size_bits);
+    snprintf(mf, sizeof(mf), "%s/modulo_%d_%d.txt", data_dir, chal_k, size_bits);
 
     mpz_t challenge, modulo;
     mpz_inits(challenge, modulo, NULL);
-    if (!ksc_broadcast_challenge_modulo(challenge, modulo, cf, mf, rank)) {
-        if (!rank) fprintf(stderr, "cannot read %s / %s\n", cf, mf);
-        mpz_clears(challenge, modulo, NULL); MPI_Finalize(); return 1;
+    if (!ksc_broadcast_challenge_modulo(challenge, modulo, cf, mf, rank))
+    {
+        if (!rank)
+            fprintf(stderr, "cannot read %s / %s\n", cf, mf);
+        mpz_clears(challenge, modulo, NULL);
+        MPI_Finalize();
+        return 1;
     }
 
     // Exactly the bounds the solvers use: alg2_k32 stops at UINT32_MAX,
@@ -177,13 +211,18 @@ int main(int argc, char *argv[])
     // a cold cache each cbrt(p) is a full-width modexp costing about as much as
     // the entire sequential baseline, so local_recon would measure cache-filling
     // rather than reconstruction, and the job would never finish.
-    cbrt_cache_t cache; kf_cbrt_cache_init(&cache);
+    cbrt_cache_t cache;
+    kf_cbrt_cache_init(&cache);
     {
         char p[KSC_CBRT_PATH_MAX];
         ksc_shared_cbrt_path(p, sizeof(p), cbrt_dir, mf);
-        if (kf_cbrt_cache_load(&cache, p)) {
-            if (!rank) printf("cbrt: loaded %s (%d entries)\n", p, cache.count);
-        } else {
+        if (kf_cbrt_cache_load(&cache, p))
+        {
+            if (!rank)
+                printf("cbrt: loaded %s (%d entries)\n", p, cache.count);
+        }
+        else
+        {
             // No merged cache (it is produced by merge_cbrt_cache.py after a
             // normal solver run). Build it here instead, ONCE, before any timing
             // starts. This is not optional: with a cold cache every cbrt(p) is a
@@ -192,10 +231,13 @@ int main(int argc, char *argv[])
             // Production runs under Plan A always have it warm, so warming it
             // here is what makes the measurement comparable to theirs.
             double t0 = MPI_Wtime();
-            kfactor_list_t all; kfl_init(&all);
-            uint64_t lo, hi; rank0_slice(1, range_hi, &lo, &hi);
+            kfactor_list_t all;
+            kfl_init(&all);
+            uint64_t lo, hi;
+            rank0_slice(1, range_hi, &lo, &hi);
             kf_trial_divide_sieve(challenge, lo, hi, sp_count, sp, &all);
-            mpz_t warm; mpz_init(warm);
+            mpz_t warm;
+            mpz_init(warm);
             bool dirty = false;
             kf_compute_cbrt_from_factors_omp(warm, &all, modulo, &cache, &dirty, exponent);
             mpz_clear(warm);
@@ -205,12 +247,16 @@ int main(int argc, char *argv[])
             kfl_free(&all);
         }
     }
-    gmp_randstate_t rs; gmp_randinit_mt(rs); gmp_randseed_ui(rs, 20260812UL);
+    gmp_randstate_t rs;
+    gmp_randinit_mt(rs);
+    gmp_randseed_ui(rs, 20260812UL);
 
     // The baseline this is all divided into: the sequential inverse root.
     double powm_ms = 0.0;
-    if (rank == 0) {
-        mpz_t b, out; mpz_inits(b, out, NULL);
+    if (rank == 0)
+    {
+        mpz_t b, out;
+        mpz_inits(b, out, NULL);
         ksc_compute_e_inv(b, modulo, exponent);
         double t0 = MPI_Wtime();
         mpz_powm(out, challenge, b, modulo);
@@ -229,67 +275,99 @@ int main(int argc, char *argv[])
 
     std::vector<SimRow> rows;
 
-    for (int N : splits) {
-        SimRow r{}; r.nranks = N;
+    for (int N : splits)
+    {
+        SimRow r{};
+        r.nranks = N;
         rank0_slice(N, range_hi, &r.my_lo, &r.my_hi);
 
         // A rank's range can straddle 2^32, so k35 needs both tables --- the
         // same split alg2_k35.cpp performs. Omitting the upper one would
         // silently report a seventh of k35's work as all of it.
-        uint32_t *slice   = NULL; uint64_t slice_n  = 0;
-        uint64_t *uslice  = NULL; int64_t  uslice_n = 0;
-        if (!strcmp(method, "table")) {
-            if (r.my_lo <= (uint64_t)UINT32_MAX) {
+        uint32_t *slice = NULL;
+        uint64_t slice_n = 0;
+        uint64_t *uslice = NULL;
+        int64_t uslice_n = 0;
+        if (!strcmp(method, "table"))
+        {
+            if (r.my_lo <= (uint64_t)UINT32_MAX)
+            {
                 uint64_t lo32 = std::min(r.my_hi, (uint64_t)UINT32_MAX);
                 slice = kf_load_prime_slice(&slice_n, primes_file,
                                             (uint32_t)r.my_lo, (uint32_t)lo32);
-                if (!slice) { if (!rank) fprintf(stderr, "cannot load %s\n", primes_file); break; }
+                if (!slice)
+                {
+                    if (!rank)
+                        fprintf(stderr, "cannot load %s\n", primes_file);
+                    break;
+                }
             }
-            if (r.my_hi > (uint64_t)UINT32_MAX) {
+            if (r.my_hi > (uint64_t)UINT32_MAX)
+            {
                 uint64_t ulo = std::max(r.my_lo, (uint64_t)UINT32_MAX + 1);
                 uslice = kf_load_prime_slice_u64(&uslice_n, primes_upper, ulo, r.my_hi);
-                if (!uslice) { if (!rank) fprintf(stderr, "cannot load %s\n", primes_upper); break; }
+                if (!uslice)
+                {
+                    if (!rank)
+                        fprintf(stderr, "cannot load %s\n", primes_upper);
+                    break;
+                }
             }
         }
         r.slice_primes = (int64_t)slice_n + uslice_n;
-        r.slice_mb     = (slice_n * 4.0 + uslice_n * 8.0) / 1e6;
+        r.slice_mb = (slice_n * 4.0 + uslice_n * 8.0) / 1e6;
 
         // ---- factor + local_recon, best of `reps` (warm) ----
         double best_f = 1e300, best_r = 1e300;
-        for (int rep = 0; rep < reps; rep++) {
-            kfactor_list_t found; kfl_init(&found);
+        for (int rep = 0; rep < reps; rep++)
+        {
+            kfactor_list_t found;
+            kfl_init(&found);
             MPI_Barrier(MPI_COMM_WORLD);
             double t0 = MPI_Wtime();
-            if (!strcmp(method, "table")) {
-                if (slice)  kf_trial_divide_table(challenge, slice, (int64_t)slice_n, &found);
-                if (uslice) kf_trial_divide_table_u64(challenge, uslice, uslice_n, &found);
-            } else {
+            if (!strcmp(method, "table"))
+            {
+                if (slice)
+                    kf_trial_divide_table(challenge, slice, (int64_t)slice_n, &found);
+                if (uslice)
+                    kf_trial_divide_table_u64(challenge, uslice, uslice_n, &found);
+            }
+            else
+            {
                 kf_trial_divide_sieve(challenge, r.my_lo, r.my_hi, sp_count, sp, &found);
             }
             double t1 = MPI_Wtime();
 
             bool dirty = false;
-            mpz_t partial; mpz_init(partial);
+            mpz_t partial;
+            mpz_init(partial);
             kf_compute_cbrt_from_factors_omp(partial, &found, modulo, &cache, &dirty, exponent);
             double t2 = MPI_Wtime();
 
             best_f = std::min(best_f, (t1 - t0) * 1e3);
             best_r = std::min(best_r, (t2 - t1) * 1e3);
             r.factors_found = found.count;
-            mpz_clear(partial); kfl_free(&found);
+            mpz_clear(partial);
+            kfl_free(&found);
         }
-        if (slice) free(slice);
-        if (uslice) free(uslice);
+        if (slice)
+            free(slice);
+        if (uslice)
+            free(uslice);
 
-        r.factor_ms = best_f; r.local_recon_ms = best_r;
+        r.factor_ms = best_f;
+        r.local_recon_ms = best_r;
         r.combine_ms = measure_combine_ms(N, modulo, rs);
-        r.gather_ms  = gather_model_ms(N);
+        r.gather_ms = gather_model_ms(N);
 
         // A phase is what the slowest rank spent on it, as the solvers report.
-        double mine[3] = { r.factor_ms, r.local_recon_ms, r.combine_ms }, mx[3];
+        double mine[3] = {r.factor_ms, r.local_recon_ms, r.combine_ms}, mx[3];
         MPI_Reduce(mine, mx, 3, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
-        if (rank == 0) {
-            r.factor_ms = mx[0]; r.local_recon_ms = mx[1]; r.combine_ms = mx[2];
+        if (rank == 0)
+        {
+            r.factor_ms = mx[0];
+            r.local_recon_ms = mx[1];
+            r.combine_ms = mx[2];
             double total = r.factor_ms + r.local_recon_ms + r.combine_ms + r.gather_ms;
             printf("%8d %12.2f %10d %12.3f %12.3f %12.3f %12.3f %9.2fx\n",
                    N, r.slice_mb, r.factors_found, r.factor_ms, r.local_recon_ms,
@@ -299,9 +377,11 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (rank == 0 && json_out) {
+    if (rank == 0 && json_out)
+    {
         FILE *f = fopen(json_out, "w");
-        if (f) {
+        if (f)
+        {
             fprintf(f, "{\n  \"metadata\": {\n"
                        "    \"algorithm\": \"cpu_scale_sim\",\n"
                        "    \"method\": \"%s\",\n    \"smoothness_bound_bits\": %d,\n"
@@ -312,9 +392,10 @@ int main(int argc, char *argv[])
                        "(0.0113*N^0.357 ms, rank-count only, does not scale with |M|)\"\n  },\n",
                     method, kbits, size_bits, exponent, nprocs, omp_get_max_threads(), powm_ms);
             fprintf(f, "  \"rows\": [\n");
-            for (size_t i = 0; i < rows.size(); i++) {
+            for (size_t i = 0; i < rows.size(); i++)
+            {
                 const SimRow &r = rows[i];
-                double tot  = r.factor_ms + r.local_recon_ms + r.combine_ms + r.gather_ms;
+                double tot = r.factor_ms + r.local_recon_ms + r.combine_ms + r.gather_ms;
                 double totg = r.factor_ms + r.local_recon_ms + r.combine_ms;
                 fprintf(f, "    { \"nranks\": %d, \"nodes\": %d, \"slice_mb\": %.3f, "
                            "\"slice_primes\": %lld, \"factors_found\": %d, "
@@ -325,7 +406,7 @@ int main(int argc, char *argv[])
                         r.nranks, (r.nranks + 1) / 2, r.slice_mb,
                         (long long)r.slice_primes, r.factors_found,
                         r.factor_ms, r.local_recon_ms, r.combine_ms, r.gather_ms,
-                        tot,  tot  > 0 ? powm_ms / tot  : 0.0,
+                        tot, tot > 0 ? powm_ms / tot : 0.0,
                         totg, totg > 0 ? powm_ms / totg : 0.0,
                         i + 1 < rows.size() ? "," : "");
             }
@@ -342,5 +423,3 @@ int main(int argc, char *argv[])
     MPI_Finalize();
     return 0;
 }
-
-// Edit: 2026-08-12

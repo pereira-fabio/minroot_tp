@@ -198,5 +198,3 @@ ls data/challenges/alg4_multi/modulo_*_e5.txt 2>/dev/null | sed 's/^/  /'
 echo ""
 echo "Job ID: $SLURM_JOB_ID"
 echo "============================================================"
-
-# Edit: 2026-07-11

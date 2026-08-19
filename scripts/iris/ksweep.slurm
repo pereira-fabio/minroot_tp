@@ -9,7 +9,6 @@
 #SBATCH --error=ksweep_%j.err
 
 # ---------------------------------------------------------------------------
-# Cache-residency sweep over the smoothness bound (advisor meeting 2026-08-05)
 #
 # THE QUESTION
 # ------------
@@ -208,5 +207,3 @@ echo "DONE — analyse with:"
 echo "  python3 analysis/cache_residency.py --measured $OUTDIR"
 echo "  (N-GPU scaling is a separate job: scripts/iris/gpu_scale_sim.slurm)"
 echo "========================================"
-
-# Edit: 2026-08-12

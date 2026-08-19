@@ -107,5 +107,3 @@ echo "Task $SLURM_ARRAY_TASK_ID (N=${N_NODES}) complete."
 ls $JSON_DIR/*_${SLURM_JOB_ID}_*.json 2>/dev/null | sed 's|.*/||' | sed 's/^/  /'
 echo "speedup_total = powm_baseline_ms / total_ms   (both in the same JSON)"
 echo "============================================================"
-
-# Edit: 2026-07-13

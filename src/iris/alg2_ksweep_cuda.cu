@@ -18,14 +18,7 @@
 // the measurement.
 //
 // WHY IT IS A SEPARATE BINARY (do not merge this back into alg2_k32_cuda.cu)
-// --------------------------------------------------------------------------
-// A --k flag was tried on the k32 solver on 2026-08-07 and reverted. Sharing the
-// binary means sharing the results namespace, and the loader in
-// analysis/thesis_figures.py matches on the "alg2_k32_<method>_" filename prefix:
-// a k20 run would have been silently loaded as k32 data and would have corrupted
-// the thesis figures. Its JSON would also have carried algorithm "k32" with
-// smoothness_bound_bits 20, which no downstream join can reconcile.
-//
+// --------------------------------------------------------------------------//
 // So this binary has its OWN identity end to end:
 //     algorithm tag   "ksweep"        (never "k32")
 //     JSON filename   ksweep_table_<job>_<size>_e<N>.json
@@ -99,7 +92,7 @@
 // ---------------------------------------------------------------------------
 
 __constant__ uint64_t d_y_limbs[MAX_LIMBS];
-__constant__ int      d_nlimbs;
+__constant__ int d_nlimbs;
 
 // ---------------------------------------------------------------------------
 // Trial-division kernel.
@@ -111,19 +104,22 @@ __constant__ int      d_nlimbs;
 // ---------------------------------------------------------------------------
 
 __global__ void ksweep_trial_divide_kernel(
-        const uint32_t * __restrict__ primes, int64_t nprimes,
-        uint64_t *out_factors, int *out_count)
+    const uint32_t *__restrict__ primes, int64_t nprimes,
+    uint64_t *out_factors, int *out_count)
 {
-    int64_t idx    = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t stride = (int64_t)gridDim.x  * blockDim.x;
-    int nlimbs     = d_nlimbs;
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = (int64_t)gridDim.x * blockDim.x;
+    int nlimbs = d_nlimbs;
 
-    for (int64_t i = idx; i < nprimes; i += stride) {
-        uint64_t p   = (uint64_t)primes[i];
+    for (int64_t i = idx; i < nprimes; i += stride)
+    {
+        uint64_t p = (uint64_t)primes[i];
         uint64_t rem = mod_big_by_u32(d_y_limbs, nlimbs, p);
-        if (rem == 0) {
+        if (rem == 0)
+        {
             int slot = atomicAdd(out_count, 1);
-            if (slot < MAX_GPU_FACTORS) out_factors[slot] = p;
+            if (slot < MAX_GPU_FACTORS)
+                out_factors[slot] = p;
         }
     }
 }
@@ -134,18 +130,22 @@ __global__ void ksweep_trial_divide_kernel(
 // was not written against.
 // ---------------------------------------------------------------------------
 
-static double device_l2_mb(int dev) {
+static double device_l2_mb(int dev)
+{
     cudaDeviceProp prop{};
-    if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess) return 0.0;
+    if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess)
+        return 0.0;
     return (double)prop.l2CacheSize / 1e6;
 }
 
 // read_mpz_from_file prints an error and returns void, so a missing file leaves
 // the mpz at zero and the run limps on producing nonsense. Check first and die
 // with the path, which is the only thing the operator needs to see.
-static void require_file(const char *path, const char *what) {
+static void require_file(const char *path, const char *what)
+{
     FILE *f = fopen(path, "r");
-    if (!f) {
+    if (!f)
+    {
         fprintf(stderr, "ERROR: %s not found: %s\n", what, path);
         fprintf(stderr, "       challenge sets live in data/challenges/k<K>/ --\n"
                         "       pass e.g. --data data/challenges/k32\n");
@@ -154,73 +154,93 @@ static void require_file(const char *path, const char *what) {
     fclose(f);
 }
 
-static void print_usage(const char *prog) {
+static void print_usage(const char *prog)
+{
     fprintf(stderr,
-        "Usage: %s [<challenge_file> <modulo_file>] [options]\n"
-        "  --k N                         smoothness bound 2^N, 17..32  [REQUIRED]\n"
-        "  --data DIR                    challenge directory (use with --size)\n"
-        "  --size N                      modulus size in bits\n"
-        "  --exponent E                  root exponent (default: 3)\n"
-        "  --primes FILE                 table path (default: data/kN_primes.bin)\n"
-        "  --n-challenges N              challenge files to run (default: 10)\n"
-        "  --n-gpus N                    devices to split the table across (default: 1)\n"
-        "  --json FILE                   write JSON results\n"
-        "\n"
-        "  --chal-k K                    bound the challenge set was crafted for\n"
-        "                                (default: --k; use 32 to sweep tables\n"
-        "                                against the existing k32 challenges)\n"
-        "\nBuild the table first:  tools/gen_prime_table <k>\n"
-        "Challenge sets:         --data data/challenges/k32\n", prog);
+            "Usage: %s [<challenge_file> <modulo_file>] [options]\n"
+            "  --k N                         smoothness bound 2^N, 17..32  [REQUIRED]\n"
+            "  --data DIR                    challenge directory (use with --size)\n"
+            "  --size N                      modulus size in bits\n"
+            "  --exponent E                  root exponent (default: 3)\n"
+            "  --primes FILE                 table path (default: data/kN_primes.bin)\n"
+            "  --n-challenges N              challenge files to run (default: 10)\n"
+            "  --n-gpus N                    devices to split the table across (default: 1)\n"
+            "  --json FILE                   write JSON results\n"
+            "\n"
+            "  --chal-k K                    bound the challenge set was crafted for\n"
+            "                                (default: --k; use 32 to sweep tables\n"
+            "                                against the existing k32 challenges)\n"
+            "\nBuild the table first:  tools/gen_prime_table <k>\n"
+            "Challenge sets:         --data data/challenges/k32\n",
+            prog);
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     const char *challenge_file = nullptr;
-    const char *modulo_file    = nullptr;
-    const char *data_dir       = nullptr;
-    int size_bits              = 0;
-    unsigned long exponent     = 3;
-    const char *primes_path    = nullptr;   // resolved from k unless overridden
-    const char *json_path      = nullptr;
-    int n_challenges           = 10;
-    int n_gpus                 = 1;
-    int k_bound                = 0;         // no default: the sweep must be explicit
-    int chal_k                 = 0;         // challenge-set bound; defaults to k_bound
+    const char *modulo_file = nullptr;
+    const char *data_dir = nullptr;
+    int size_bits = 0;
+    unsigned long exponent = 3;
+    const char *primes_path = nullptr; // resolved from k unless overridden
+    const char *json_path = nullptr;
+    int n_challenges = 10;
+    int n_gpus = 1;
+    int k_bound = 0; // no default: the sweep must be explicit
+    int chal_k = 0;  // challenge-set bound; defaults to k_bound
     // --split N: divide the table into N shards and process only the first
     // n_gpus of them, so ONE physical device measures what one of N would see.
     // This is what makes the residency question answerable: IRIS caps a job at
     // 4 GPUs, but the interesting slices are 1/64 or 1/256 of the table. 0 =
     // "same as n_gpus", i.e. the ordinary all-devices-cover-the-table split.
-    int split                  = 0;
+    int split = 0;
 
-    for (int i = 1; i < argc; i++) {
-        if      (!strcmp(argv[i], "--k")            && i+1<argc) k_bound      = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--data")         && i+1<argc) data_dir     = argv[++i];
-        else if (!strcmp(argv[i], "--size")         && i+1<argc) size_bits    = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--n-challenges") && i+1<argc) n_challenges = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--n-runs")       && i+1<argc) n_challenges = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--n-gpus")       && i+1<argc) n_gpus       = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--split")        && i+1<argc) split        = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--exponent")     && i+1<argc) exponent     = strtoul(argv[++i], nullptr, 10);
-        else if (!strcmp(argv[i], "--primes")       && i+1<argc) primes_path  = argv[++i];
-        else if (!strcmp(argv[i], "--chal-k")       && i+1<argc) chal_k       = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--json")         && i+1<argc) json_path    = argv[++i];
-        else if (argv[i][0] != '-') {
-            if (!challenge_file) challenge_file = argv[i];
-            else if (!modulo_file) modulo_file  = argv[i];
+    for (int i = 1; i < argc; i++)
+    {
+        if (!strcmp(argv[i], "--k") && i + 1 < argc)
+            k_bound = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--data") && i + 1 < argc)
+            data_dir = argv[++i];
+        else if (!strcmp(argv[i], "--size") && i + 1 < argc)
+            size_bits = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--n-challenges") && i + 1 < argc)
+            n_challenges = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--n-runs") && i + 1 < argc)
+            n_challenges = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--n-gpus") && i + 1 < argc)
+            n_gpus = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--split") && i + 1 < argc)
+            split = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--exponent") && i + 1 < argc)
+            exponent = strtoul(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--primes") && i + 1 < argc)
+            primes_path = argv[++i];
+        else if (!strcmp(argv[i], "--chal-k") && i + 1 < argc)
+            chal_k = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--json") && i + 1 < argc)
+            json_path = argv[++i];
+        else if (argv[i][0] != '-')
+        {
+            if (!challenge_file)
+                challenge_file = argv[i];
+            else if (!modulo_file)
+                modulo_file = argv[i];
         }
     }
 
     // k is mandatory and bounded. Below 17 the streamed range is empty or nearly
     // so (the dense k16 cbrt table is the right structure there); above 32 a
     // prime no longer fits the u32 the table stores.
-    if (k_bound < 17 || k_bound > 32) {
+    if (k_bound < 17 || k_bound > 32)
+    {
         fprintf(stderr, "ERROR: --k is required and must be 17..32 (got %d)\n\n", k_bound);
         print_usage(argv[0]);
         return 1;
     }
 
     static char kpath[256];
-    if (!primes_path) {
+    if (!primes_path)
+    {
         snprintf(kpath, sizeof(kpath), "data/k%d_primes.bin", k_bound);
         primes_path = kpath;
     }
@@ -231,28 +251,39 @@ int main(int argc, char **argv) {
     // which is independent of --k: sweeping the table bound against a fixed
     // challenge set is exactly the point (see the sweep script).
     static char cbuf[512], mbuf[512];
-    if (chal_k <= 0) chal_k = k_bound;
-    if (data_dir && size_bits > 0 && !challenge_file) {
+    if (chal_k <= 0)
+        chal_k = k_bound;
+    if (data_dir && size_bits > 0 && !challenge_file)
+    {
         snprintf(cbuf, sizeof(cbuf), "%s/challenge_0_%d_%d.txt", data_dir, chal_k, size_bits);
-        snprintf(mbuf, sizeof(mbuf), "%s/modulo_%d_%d.txt",      data_dir, chal_k, size_bits);
-        challenge_file = cbuf; modulo_file = mbuf;
+        snprintf(mbuf, sizeof(mbuf), "%s/modulo_%d_%d.txt", data_dir, chal_k, size_bits);
+        challenge_file = cbuf;
+        modulo_file = mbuf;
     }
-    if (!challenge_file || !modulo_file) { print_usage(argv[0]); return 1; }
+    if (!challenge_file || !modulo_file)
+    {
+        print_usage(argv[0]);
+        return 1;
+    }
     require_file(modulo_file, "modulo");
     require_file(challenge_file, "challenge");
 
     {
         int avail = 1;
         cudaGetDeviceCount(&avail);
-        if (n_gpus < 1) n_gpus = 1;
-        if (n_gpus > avail) {
+        if (n_gpus < 1)
+            n_gpus = 1;
+        if (n_gpus > avail)
+        {
             fprintf(stderr, "Warning: only %d GPU(s) available, using %d\n", avail, avail);
             n_gpus = avail;
         }
     }
 
-    if (split <= 0) split = n_gpus;          // default: cover the whole table
-    if (split < n_gpus) {
+    if (split <= 0)
+        split = n_gpus; // default: cover the whole table
+    if (split < n_gpus)
+    {
         fprintf(stderr, "ERROR: --split %d < --n-gpus %d; a shard per device is the minimum\n",
                 split, n_gpus);
         return 1;
@@ -260,19 +291,24 @@ int main(int argc, char **argv) {
 
     mpz_t challenge, modulo, e_inv, result;
     mpz_inits(challenge, modulo, e_inv, result, NULL);
-    read_mpz_from_file(challenge, challenge_file);   // aborts internally on failure
+    read_mpz_from_file(challenge, challenge_file); // aborts internally on failure
     read_mpz_from_file(modulo, modulo_file);
     const size_t challenge_bits = mpz_sizeinbase(modulo, 2);
     {
-        mpz_t phi, e; mpz_inits(phi, e, NULL);
-        mpz_sub_ui(phi, modulo, 1); mpz_set_ui(e, exponent);
-        if (!mpz_invert(e_inv, e, phi)) {
-            fprintf(stderr, "Error: e is not invertible mod (M-1)\n"); return 1;
+        mpz_t phi, e;
+        mpz_inits(phi, e, NULL);
+        mpz_sub_ui(phi, modulo, 1);
+        mpz_set_ui(e, exponent);
+        if (!mpz_invert(e_inv, e, phi))
+        {
+            fprintf(stderr, "Error: e is not invertible mod (M-1)\n");
+            return 1;
         }
         mpz_clears(phi, e, NULL);
     }
     int nlimbs = (int)((mpz_sizeinbase(modulo, 2) + 63) / 64);
-    if (nlimbs > MAX_LIMBS) {
+    if (nlimbs > MAX_LIMBS)
+    {
         fprintf(stderr, "Error: modulus needs %d limbs, MAX_LIMBS=%d\n", nlimbs, MAX_LIMBS);
         return 1;
     }
@@ -281,7 +317,8 @@ int main(int argc, char **argv) {
     printf("=== Algorithm 2 k-sweep — B = 2^%d ===\n", k_bound);
     printf("Table: %s\n", primes_path);
     FILE *pf = fopen(primes_path, "rb");
-    if (!pf) {
+    if (!pf)
+    {
         fprintf(stderr, "Error: cannot open %s\n"
                         "       build it first:  tools/gen_prime_table %d\n",
                 primes_path, k_bound);
@@ -294,17 +331,22 @@ int main(int argc, char **argv) {
         auto t0 = std::chrono::high_resolution_clock::now();
         uint64_t cnt64 = 0;
         primes = kf_load_prime_table(&cnt64, primes_path);
-        if (!primes) { fprintf(stderr, "Error: cannot load %s\n", primes_path); return 1; }
+        if (!primes)
+        {
+            fprintf(stderr, "Error: cannot load %s\n", primes_path);
+            return 1;
+        }
         nprimes = (int64_t)cnt64;
         printf("Loaded %ld primes in %.1f ms\n", (long)nprimes,
                std::chrono::duration<double, std::milli>(
-                   std::chrono::high_resolution_clock::now() - t0).count());
+                   std::chrono::high_resolution_clock::now() - t0)
+                   .count());
     }
 
     // ---- Residency verdict: the hypothesis this run is testing ----
-    const double table_mb   = (double)nprimes * sizeof(uint32_t) / 1e6;
-    const double per_gpu_mb = table_mb / split;      // shard size, not table/devices
-    const double l2_mb      = device_l2_mb(0);
+    const double table_mb = (double)nprimes * sizeof(uint32_t) / 1e6;
+    const double per_gpu_mb = table_mb / split; // shard size, not table/devices
+    const double l2_mb = device_l2_mb(0);
     printf("Table %.2f MB total; %d-way split -> %.3f MB per shard\n",
            table_mb, split, per_gpu_mb);
     if (split != n_gpus)
@@ -318,13 +360,15 @@ int main(int argc, char **argv) {
 
     // ---- Per-GPU setup ----
     std::vector<GpuDev> devs((size_t)n_gpus);
-    gpu_xfer_prof_t xprof; gpu_xfer_reset(&xprof);
+    gpu_xfer_prof_t xprof;
+    gpu_xfer_reset(&xprof);
     // Shard by `split`, not by n_gpus. With split == n_gpus this is the ordinary
     // split and the devices between them cover the table. With split > n_gpus the
     // run covers only n_gpus/split of it -- deliberately, because the quantity
     // being measured is the cost of ONE shard, not of the whole sweep.
     int64_t base_slice = nprimes / split;
-    for (int g = 0; g < n_gpus; g++) {
+    for (int g = 0; g < n_gpus; g++)
+    {
         CUDA_CHECK(cudaSetDevice(g));
         int64_t start = (int64_t)g * base_slice;
         int64_t count = (g == split - 1) ? (nprimes - start) : base_slice;
@@ -337,7 +381,7 @@ int main(int argc, char **argv) {
         xprof.setup_h2d_bytes += (size_t)count * sizeof(uint32_t);
         xprof.setup_h2d_calls++;
         CUDA_CHECK(cudaMalloc(&devs[g].d_out_factors, MAX_GPU_FACTORS * sizeof(uint64_t)));
-        CUDA_CHECK(cudaMalloc(&devs[g].d_out_count,   sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&devs[g].d_out_count, sizeof(int)));
         CUDA_CHECK(cudaEventCreate(&devs[g].ev0));
         CUDA_CHECK(cudaEventCreate(&devs[g].ev1));
         CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
@@ -355,11 +399,13 @@ int main(int argc, char **argv) {
 
     const int THREADS = 256, BLOCKS = 1024;
 
-    auto launch_all = [&](const mpz_t y) -> float {
+    auto launch_all = [&](const mpz_t y) -> float
+    {
         uint64_t y_limbs[MAX_LIMBS] = {};
         size_t cnt = 0;
         mpz_export(y_limbs, &cnt, -1, sizeof(uint64_t), 0, 0, y);
-        for (int g = 0; g < n_gpus; g++) {
+        for (int g = 0; g < n_gpus; g++)
+        {
             CUDA_CHECK(cudaSetDevice(g));
             double t_x = gpu_now_ms();
             CUDA_CHECK(cudaMemcpyToSymbol(d_y_limbs, y_limbs, sizeof(uint64_t) * MAX_LIMBS));
@@ -376,18 +422,22 @@ int main(int argc, char **argv) {
             CUDA_CHECK(cudaEventRecord(devs[g].ev1));
         }
         float km = 0;
-        for (int g = 0; g < n_gpus; g++) {
+        for (int g = 0; g < n_gpus; g++)
+        {
             CUDA_CHECK(cudaSetDevice(g));
             CUDA_CHECK(cudaEventSynchronize(devs[g].ev1));
             float t = 0;
             CUDA_CHECK(cudaEventElapsedTime(&t, devs[g].ev0, devs[g].ev1));
-            if (t > km) km = t;
+            if (t > km)
+                km = t;
         }
         return km;
     };
 
-    auto collect_factors = [&](kfactor_list_t *fl, mpz_t cof, const mpz_t y) {
-        for (int g = 0; g < n_gpus; g++) {
+    auto collect_factors = [&](kfactor_list_t *fl, mpz_t cof, const mpz_t y)
+    {
+        for (int g = 0; g < n_gpus; g++)
+        {
             CUDA_CHECK(cudaSetDevice(g));
             int h_count = 0;
             double t_x = gpu_now_ms();
@@ -396,21 +446,30 @@ int main(int argc, char **argv) {
             xprof.factors_d2h_ms += gpu_now_ms() - t_x;
             xprof.factors_d2h_bytes += sizeof(int);
             xprof.factors_d2h_calls++;
-            if (h_count <= 0) continue;
-            if (h_count > MAX_GPU_FACTORS) h_count = MAX_GPU_FACTORS;
+            if (h_count <= 0)
+                continue;
+            if (h_count > MAX_GPU_FACTORS)
+                h_count = MAX_GPU_FACTORS;
             t_x = gpu_now_ms();
             CUDA_CHECK(cudaMemcpy(h_out_factors, devs[g].d_out_factors,
                                   (size_t)h_count * sizeof(uint64_t), cudaMemcpyDeviceToHost));
             xprof.factors_d2h_ms += gpu_now_ms() - t_x;
             xprof.factors_d2h_bytes += (size_t)h_count * sizeof(uint64_t);
             xprof.factors_d2h_calls++;
-            for (int i = 0; i < h_count; i++) {
+            for (int i = 0; i < h_count; i++)
+            {
                 unsigned long p = (unsigned long)h_out_factors[i];
                 int k = 0;
-                if (cof) {
-                    while (mpz_divisible_ui_p(cof, p)) { mpz_divexact_ui(cof, cof, p); k++; }
+                if (cof)
+                {
+                    while (mpz_divisible_ui_p(cof, p))
+                    {
+                        mpz_divexact_ui(cof, cof, p);
+                        k++;
+                    }
                 }
-                if (k > 0) kfl_append_ul(fl, p, k);
+                if (k > 0)
+                    kfl_append_ul(fl, p, k);
             }
         }
         (void)y;
@@ -419,10 +478,12 @@ int main(int argc, char **argv) {
     // ---- powm baseline (same reference the whole thesis uses) ----
     double powm_baseline_ms = 0.0;
     {
-        mpz_t chk; mpz_init(chk);
+        mpz_t chk;
+        mpz_init(chk);
         const int REPS = 5;
         std::vector<double> t(REPS);
-        for (int i = 0; i < REPS; i++) {
+        for (int i = 0; i < REPS; i++)
+        {
             double t0 = gpu_now_ms();
             mpz_powm(chk, challenge, e_inv, modulo);
             t[i] = gpu_now_ms() - t0;
@@ -436,7 +497,8 @@ int main(int argc, char **argv) {
     // ---- Warm runs ----
     std::vector<double> factor_v, recon_v;
     int solved = 0;
-    for (int run = 0; run < n_challenges; run++) {
+    for (int run = 0; run < n_challenges; run++)
+    {
         char cf[512];
         // Same naming as the initial load: challenge_<n>_<chal_k>_<bits>.txt.
         // read_mpz_from_file exit(1)s on a missing file, so getting this wrong
@@ -447,23 +509,29 @@ int main(int argc, char **argv) {
                      data_dir, run, chal_k, size_bits);
         else
             snprintf(cf, sizeof(cf), "%s", challenge_file);
-        mpz_t y; mpz_init(y);
+        mpz_t y;
+        mpz_init(y);
         read_mpz_from_file(y, cf);
 
         float kernel_ms = launch_all(y);
 
-        mpz_t cof; mpz_init_set(cof, y);
-        kfactor_list_t fl; kfl_init(&fl);
+        mpz_t cof;
+        mpz_init_set(cof, y);
+        kfactor_list_t fl;
+        kfl_init(&fl);
         collect_factors(&fl, cof, y);
 
         double t_rec0 = gpu_now_ms();
         bool smooth = (mpz_cmp_ui(cof, 1) == 0);
-        if (smooth) {
+        if (smooth)
+        {
             kf_compute_cbrt_from_factors_omp(result, &fl, modulo, &cache,
                                              &cache_dirty, exponent);
-            mpz_t chk; mpz_init(chk);
+            mpz_t chk;
+            mpz_init(chk);
             mpz_powm_ui(chk, result, exponent, modulo);
-            if (mpz_cmp(chk, y) == 0) solved++;
+            if (mpz_cmp(chk, y) == 0)
+                solved++;
             mpz_clear(chk);
         }
         double recon_ms = gpu_now_ms() - t_rec0;
@@ -474,14 +542,21 @@ int main(int argc, char **argv) {
                run, (double)kernel_ms, recon_ms, kernel_ms + recon_ms,
                smooth ? "smooth" : "NOT smooth");
 
-        kfl_free(&fl); mpz_clears(cof, y, NULL);
+        kfl_free(&fl);
+        mpz_clears(cof, y, NULL);
     }
-    if (cache_dirty) kf_cbrt_cache_save(&cache, cache_path);
+    if (cache_dirty)
+        kf_cbrt_cache_save(&cache, cache_path);
 
     // ---- Summary ----
-    if (!factor_v.empty()) {
+    if (!factor_v.empty())
+    {
         double fs = 0, rs = 0;
-        for (size_t i = 0; i < factor_v.size(); i++) { fs += factor_v[i]; rs += recon_v[i]; }
+        for (size_t i = 0; i < factor_v.size(); i++)
+        {
+            fs += factor_v[i];
+            rs += recon_v[i];
+        }
         double fm = fs / factor_v.size(), rm = rs / recon_v.size();
         printf("\n=== k=%d, %d-way split, %.3f MB/shard%s ===\n", k_bound, split, per_gpu_mb,
                (l2_mb > 0 && per_gpu_mb <= l2_mb) ? " [L2-resident]" : "");
@@ -492,10 +567,13 @@ int main(int argc, char **argv) {
         // its shard either way, which is the quantity the residency question
         // turns on -- but end-to-end speedup is only meaningful when the solve
         // completes, so it is suppressed rather than printed as a wrong number.
-        if (solved > 0) {
+        if (solved > 0)
+        {
             printf("  speedup %8.2fx   (vs %.2f ms sequential)\n",
                    (fm + rm) > 0 ? powm_baseline_ms / (fm + rm) : 0.0, powm_baseline_ms);
-        } else {
+        }
+        else
+        {
             printf("  speedup       n/a   (challenge is 2^%d-smooth; a 2^%d table\n"
                    "                       cannot factor it -- factor_ms above is\n"
                    "                       still the valid measurement)\n",
@@ -518,15 +596,20 @@ int main(int argc, char **argv) {
     gpu_write_json_warm(json_path, "ksweep", GPU_METHOD_TABLE, exponent, k_bound,
                         challenge_bits, powm_baseline_ms, 0.0, 0.0,
                         factor_v, recon_v, solved, split);
-    if (json_path) printf("\nJSON -> %s\n", json_path);
+    if (json_path)
+        printf("\nJSON -> %s\n", json_path);
 
-    for (int g = 0; g < n_gpus; g++) {
+    for (int g = 0; g < n_gpus; g++)
+    {
         CUDA_CHECK(cudaSetDevice(g));
-        cudaFree(devs[g].d_primes); cudaFree(devs[g].d_out_factors);
+        cudaFree(devs[g].d_primes);
+        cudaFree(devs[g].d_out_factors);
         cudaFree(devs[g].d_out_count);
-        cudaEventDestroy(devs[g].ev0); cudaEventDestroy(devs[g].ev1);
+        cudaEventDestroy(devs[g].ev0);
+        cudaEventDestroy(devs[g].ev1);
     }
-    free(h_out_factors); free(primes);
+    free(h_out_factors);
+    free(primes);
     kf_cbrt_cache_clear(&cache);
     mpz_clears(challenge, modulo, e_inv, result, NULL);
     return 0;

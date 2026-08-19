@@ -9,7 +9,6 @@
 #SBATCH --error=gpu_scale_sim_%j.err
 
 # ---------------------------------------------------------------------------
-# How many GPUs would this attack actually need? (advisor meeting 2026-08-05)
 #
 # IRIS gives 4 GPUs. At 4 GPUs k32 reaches ~9x on an L40 against the CPU
 # cluster's 52x, so the question is how many it would take to matter -- and

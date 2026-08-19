@@ -19,5 +19,3 @@ clean:
 	rm -f $(TARGET)
 
 .PHONY: clean
-
-# Edit: 2026-06-12

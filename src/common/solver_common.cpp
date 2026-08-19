@@ -158,9 +158,9 @@ void ksc_init_json_results(
 {
     r->config.smoothness_bits = smoothness_bits;
     r->config.challenge_bits = (rank == 0) ? mpz_sizeinbase(challenge, 2) : 0;
-    r->config.method_name    = method_name;
-    r->config.num_threads    = threads_per_rank;
-    r->config.mpi_ranks      = mpi_ranks;
+    r->config.method_name = method_name;
+    r->config.num_threads = threads_per_rank;
+    r->config.mpi_ranks = mpi_ranks;
     r->config.n_warm_attempted = 1; // one challenge per run_one; merge sums these
     r->timing.powm_baseline_ms = 0.0;
 }
@@ -442,8 +442,8 @@ static void mkdir_data()
     // Create data/ and data/cbrt/ if they don't exist.
     // Use mkdir() syscall directly — no shell subprocess, no injection surface.
     // EEXIST is expected and safe to ignore.
-    mkdir(KSC_DATA_DIR,  0755);
-    mkdir(KSC_CBRT_DIR,  0755);
+    mkdir(KSC_DATA_DIR, 0755);
+    mkdir(KSC_CBRT_DIR, 0755);
 }
 
 unsigned long *ksc_ensure_k16_primes(int *prime_count_out)
@@ -534,7 +534,7 @@ void ksc_ensure_k16_cbrt(
     // zero-padded big-endian bytes.  prime_count and modulo are identical on
     // every rank, so the stride and layout need no extra broadcast.
     size_t stride = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
-    size_t total  = (size_t)prime_count * stride;
+    size_t total = (size_t)prime_count * stride;
     unsigned char *tbl_buf = (unsigned char *)calloc(total ? total : 1, 1);
     if (rank == 0)
     {
@@ -881,15 +881,13 @@ int ksc_alg3_broadcast_cofactor(
             else if (mpz_sizeinbase(q, 2) > 32 &&
                      mpz_sizeinbase(q, 2) <= ALG3_B_PRIME_BITS + 1)
             {
-                // M4 (2026-07-16): the q0 primality test is modelled as a table
-                // lookup, so its wall-time is measured separately and reported
-                // back to be excluded from the factor time (not attack work).
                 auto _p0 = std::chrono::high_resolution_clock::now();
                 int q0_is_prime = mpz_probab_prime_p(q, 15);
                 auto _p1 = std::chrono::high_resolution_clock::now();
                 if (primality_ms)
                     *primality_ms += std::chrono::duration<double, std::milli>(
-                                         _p1 - _p0).count();
+                                         _p1 - _p0)
+                                         .count();
                 if (q0_is_prime)
                 {
                     // Almost-smooth: one medium prime q0 in (2^32, 2^65]
@@ -1179,8 +1177,8 @@ int ksc_reconstruct_y(
     benchmark_results_t *json_results,
     const ksc_recon_ctx_t *ctx)
 {
-    const int rank    = ctx->rank;
-    const int nranks  = ctx->nranks;
+    const int rank = ctx->rank;
+    const int nranks = ctx->nranks;
 
     // ---- Phase 2a: sieve y + cofactor broadcast ----
     auto t_fac2_start = std::chrono::high_resolution_clock::now();
@@ -1204,16 +1202,16 @@ int ksc_reconstruct_y(
     }
 
     mpz_set_ui(cofactor_out, 1);
-    double primality_dt = 0.0;   // M4: q0 primality-test time to exclude
+    double primality_dt = 0.0; // M4: q0 primality-test time to exclude
     int complete = ksc_alg3_broadcast_cofactor(
         cofactor_out, y, local_prod, ctx->cbrt_bytes, rank, nranks, &primality_dt);
     mpz_clear(local_prod);
 
     auto t_fac2_end = std::chrono::high_resolution_clock::now();
-    // M4 (2026-07-16): exclude the q0 primality-test time (modelled as a table
-    // lookup, not attack work).
     double fac2_dt = std::chrono::duration<double, std::milli>(
-                         t_fac2_end - t_fac2_start).count() - primality_dt;
+                         t_fac2_end - t_fac2_start)
+                         .count() -
+                     primality_dt;
     if (fac2_dt_out)
         *fac2_dt_out = fac2_dt;
 
@@ -1244,7 +1242,8 @@ int ksc_reconstruct_y(
 
     auto t_loc1 = std::chrono::high_resolution_clock::now();
     double local_dt = std::chrono::duration<double, std::milli>(
-                          t_loc1 - t_loc0).count();
+                          t_loc1 - t_loc0)
+                          .count();
 
     if (bench == 1)
         ksc_gather_prime_stats(json_results,
@@ -1314,7 +1313,8 @@ void ksc_fold_cofactor_cbrt(
     mpz_t cbrt_q0;
     mpz_init(cbrt_q0);
     unsigned long q0_ul = mpz_fits_ulong_p(cofactor)
-                              ? mpz_get_ui(cofactor) : 0UL;
+                              ? mpz_get_ui(cofactor)
+                              : 0UL;
     int idx = (q0_ul > 0UL) ? kf_cbrt_cache_find(cache, q0_ul) : -1;
     if (idx >= 0)
     {
@@ -1398,7 +1398,8 @@ void ksc_run_bench_loop(
             if (rank == 0)
                 json_results->timing.warmup_total_ms.push_back(
                     std::chrono::duration<double, std::milli>(
-                        wu_t1 - wu_t0).count());
+                        wu_t1 - wu_t0)
+                        .count());
             mpz_clears(wu_ch, wu_cbrt, NULL);
             kfl_free(&wu_factors);
             MPI_Barrier(MPI_COMM_WORLD);
@@ -1425,8 +1426,8 @@ void ksc_run_bench_loop(
 
         int attempt = 0;
         const int MAX_ATTEMPTS = 256;
-        bool bench_succeeded = false;  // false if all blinding attempts exhausted
-        double primality_dt = 0.0;     // M4: q0 primality-test time to exclude from factor_ms
+        bool bench_succeeded = false; // false if all blinding attempts exhausted
+        double primality_dt = 0.0;    // M4: q0 primality-test time to exclude from factor_ms
         size_t blinded_nbytes = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
         unsigned char *blinded_buf = (unsigned char *)malloc(blinded_nbytes);
 
@@ -1452,7 +1453,8 @@ void ksc_run_bench_loop(
                     {
                         fprintf(stderr,
                                 "[rank 0] WARNING: blinding table exhausted "
-                                "at attempt %d\n", attempt);
+                                "at attempt %d\n",
+                                attempt);
                         mpz_set(blinded_challenge, challenge);
                     }
                 }
@@ -1496,7 +1498,7 @@ void ksc_run_bench_loop(
                 mpz_set_ui(cofactor, 1);
                 complete = ksc_alg3_broadcast_cofactor(
                     cofactor, blinded_challenge, local_prod, cbrt_bytes,
-                    rank, nranks, &primality_dt);  // M4: accumulate q0-primality time
+                    rank, nranks, &primality_dt); // M4: accumulate q0-primality time
             }
             else
             {
@@ -1541,101 +1543,99 @@ void ksc_run_bench_loop(
         else
         {
 
-        if (rank == 0)
-        {
-            // M4 (2026-07-16): exclude the q0 primality-test time — modelled as a
-            // table lookup, not attack work (advisor 2026-07-15).
-            double dt = std::chrono::duration<double, std::milli>(
-                            t_fac1 - t_fac0).count() - primality_dt;
-            accum_record(fac_acc, dt);
-            json_results->timing.factor_times.push_back(dt);
-            json_results->timing.blinding_attempts.push_back(attempt + 1);
-            // alg3: record cofactor classification for hit-rate analysis
-            if (strategy->accept_almost_smooth)
+            if (rank == 0)
             {
-                json_results->hits.hit_type.push_back(
-                    mpz_cmp_ui(cofactor, 1) == 0 ? 1 : 2);
-                json_results->hits.cofactor_bits.push_back(
-                    (int)mpz_sizeinbase(cofactor, 2));
+                double dt = std::chrono::duration<double, std::milli>(
+                                t_fac1 - t_fac0)
+                                .count() -
+                            primality_dt;
+                accum_record(fac_acc, dt);
+                json_results->timing.factor_times.push_back(dt);
+                json_results->timing.blinding_attempts.push_back(attempt + 1);
+                // alg3: record cofactor classification for hit-rate analysis
+                if (strategy->accept_almost_smooth)
+                {
+                    json_results->hits.hit_type.push_back(
+                        mpz_cmp_ui(cofactor, 1) == 0 ? 1 : 2);
+                    json_results->hits.cofactor_bits.push_back(
+                        (int)mpz_sizeinbase(cofactor, 2));
+                }
             }
-        }
 
-        // ---- Reconstruction ----
+            // ---- Reconstruction ----
 
-        auto t_loc0 = std::chrono::high_resolution_clock::now();
+            auto t_loc0 = std::chrono::high_resolution_clock::now();
 
-        mpz_t local_cbrt;
-        mpz_init(local_cbrt);
-        double cbrt_hit_ms = 0.0, cbrt_miss_ms = 0.0;
-        int cbrt_hits = 0, cbrt_misses = 0;
-        ksc_compute_local_cbrt(local_cbrt, &local_factors, e_inv, modulo,
+            mpz_t local_cbrt;
+            mpz_init(local_cbrt);
+            double cbrt_hit_ms = 0.0, cbrt_miss_ms = 0.0;
+            int cbrt_hits = 0, cbrt_misses = 0;
+            ksc_compute_local_cbrt(local_cbrt, &local_factors, e_inv, modulo,
+                                   cache, cache_dirty,
+                                   &cbrt_hit_ms, &cbrt_miss_ms,
+                                   &cbrt_hits, &cbrt_misses, true);
+
+            // Optional fold: rank 0 multiplies cbrt(cofactor) into partial product
+            if (strategy->fold != NULL && rank == 0 && mpz_cmp_ui(cofactor, 1) != 0)
+                strategy->fold(local_cbrt, cofactor, e_inv, modulo,
                                cache, cache_dirty,
-                               &cbrt_hit_ms, &cbrt_miss_ms,
-                               &cbrt_hits, &cbrt_misses, true);
+                               json_results, bench, strategy->ctx);
 
-        // Optional fold: rank 0 multiplies cbrt(cofactor) into partial product
-        if (strategy->fold != NULL && rank == 0 && mpz_cmp_ui(cofactor, 1) != 0)
-            strategy->fold(local_cbrt, cofactor, e_inv, modulo,
-                           cache, cache_dirty,
-                           json_results, bench, strategy->ctx);
+            auto t_loc1 = std::chrono::high_resolution_clock::now();
+            double local_dt = std::chrono::duration<double, std::milli>(
+                                  t_loc1 - t_loc0)
+                                  .count();
 
-        auto t_loc1 = std::chrono::high_resolution_clock::now();
-        double local_dt = std::chrono::duration<double, std::milli>(
-                              t_loc1 - t_loc0).count();
+            if (bench == 0)
+                ksc_gather_prime_stats(json_results,
+                                       local_factors.count,
+                                       (int64_t)(my_hi - my_lo + 1),
+                                       rank, nranks);
 
-        if (bench == 0)
-            ksc_gather_prime_stats(json_results,
-                                   local_factors.count,
-                                   (int64_t)(my_hi - my_lo + 1),
-                                   rank, nranks);
+            if (rank == 0)
+            {
+                json_results->timing.cbrt_hit_ms.push_back(cbrt_hit_ms);
+                json_results->timing.cbrt_miss_ms.push_back(cbrt_miss_ms);
+                json_results->timing.cbrt_hits.push_back(cbrt_hits);
+                json_results->timing.cbrt_misses.push_back(cbrt_misses);
+            }
 
-        if (rank == 0)
-        {
-            json_results->timing.cbrt_hit_ms.push_back(cbrt_hit_ms);
-            json_results->timing.cbrt_miss_ms.push_back(cbrt_miss_ms);
-            json_results->timing.cbrt_hits.push_back(cbrt_hits);
-            json_results->timing.cbrt_misses.push_back(cbrt_misses);
-        }
+            double max_local_dt = 0.0;
+            MPI_Reduce(&local_dt, &max_local_dt, 1, MPI_DOUBLE, MPI_MAX,
+                       0, MPI_COMM_WORLD);
+            if (rank == 0)
+            {
+                accum_record(loc_acc, max_local_dt);
+                cur_max_loc = max_local_dt;
+                json_results->timing.local_cbrt_times.push_back(max_local_dt);
+            }
 
-        double max_local_dt = 0.0;
-        MPI_Reduce(&local_dt, &max_local_dt, 1, MPI_DOUBLE, MPI_MAX,
-                   0, MPI_COMM_WORLD);
-        if (rank == 0)
-        {
-            accum_record(loc_acc, max_local_dt);
-            cur_max_loc = max_local_dt;
-            json_results->timing.local_cbrt_times.push_back(max_local_dt);
-        }
+            MPI_Barrier(MPI_COMM_WORLD);
 
-        MPI_Barrier(MPI_COMM_WORLD);
+            double iter_gat = 0.0, iter_com = 0.0;
+            ksc_gather_and_combine_cbrt(result_out, local_cbrt, modulo, cbrt_bytes,
+                                        rank, nranks, attempt,
+                                        blind_table, blind_table_size,
+                                        &iter_gat, &iter_com);
+            mpz_clear(local_cbrt);
 
-        double iter_gat = 0.0, iter_com = 0.0;
-        ksc_gather_and_combine_cbrt(result_out, local_cbrt, modulo, cbrt_bytes,
-                                    rank, nranks, attempt,
-                                    blind_table, blind_table_size,
-                                    &iter_gat, &iter_com);
-        mpz_clear(local_cbrt);
+            if (rank == 0)
+            {
+                accum_record(gat_acc, iter_gat);
+                json_results->timing.gather_times.push_back(iter_gat);
+                accum_record(com_acc, iter_com);
+                json_results->timing.combine_times.push_back(iter_com);
+                double recon_dt = cur_max_loc + iter_gat + iter_com;
+                accum_record(recon_acc, recon_dt);
+                json_results->timing.recon_times.push_back(recon_dt);
+                if (!json_results->timing.factor_times.empty())
+                    json_results->timing.total_times.push_back(
+                        json_results->timing.factor_times.back() + recon_dt);
+            }
 
-        if (rank == 0)
-        {
-            accum_record(gat_acc, iter_gat);
-            json_results->timing.gather_times.push_back(iter_gat);
-            accum_record(com_acc, iter_com);
-            json_results->timing.combine_times.push_back(iter_com);
-            double recon_dt = cur_max_loc + iter_gat + iter_com;
-            accum_record(recon_acc, recon_dt);
-            json_results->timing.recon_times.push_back(recon_dt);
-            if (!json_results->timing.factor_times.empty())
-                json_results->timing.total_times.push_back(
-                    json_results->timing.factor_times.back() + recon_dt);
-        }
-
-        kfl_free(&local_factors);
+            kfl_free(&local_factors);
         } // end reconstruction (bench_succeeded)
     } // single timed run
 
     mpz_clears(blinded_challenge, cofactor, NULL);
 }
-
-
-// Edit: 2026-07-16

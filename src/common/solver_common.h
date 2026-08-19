@@ -50,7 +50,6 @@ void ksc_make_cbrt_cache_path(char *buf, size_t bufsz,
                               int rank);
 
 // ---------------------------------------------------------------------------
-// Merged per-variant cbrt cache path (advisor M1, 2026-07-16).
 //
 // Builds  <cbrt_dir>/cbrt_<size>.cbrt  — the ONE full cache per (variant, size)
 // produced by analysis/merge_cbrt_cache.py.  <size> is parsed from the modulo
@@ -264,11 +263,6 @@ int ksc_alg2_broadcast_complete(
 // cofactor_out is set on ALL ranks on return (1 if B-smooth, q0 if almost-smooth).
 // Returns 1 if the challenge is fully accounted for (proceed), 0 if retry.
 // ---------------------------------------------------------------------------
-// primality_ms (optional, M4 2026-07-16): if non-NULL, the wall-time of the q0
-// primality test (mpz_probab_prime_p, rank 0 only) is *added* to *primality_ms
-// so the caller can subtract it from the measured factor time — the advisor
-// models q0's primality check as a table lookup, not attack work, so it is not
-// timed.  Pass NULL (default) from untimed precompute paths.
 int ksc_alg3_broadcast_cofactor(
     mpz_t cofactor_out,
     const mpz_t blinded,
@@ -316,21 +310,22 @@ void ksc_fold_cofactor_cbrt(
 // cbrt bounds, cache, prime range, blinding table, MPI topology).  Construct
 // once per solve_one, pass as a const pointer to each ksc_reconstruct_y call.
 // ---------------------------------------------------------------------------
-typedef struct {
-    const mpz_t    *modulo;
-    size_t          cbrt_bytes;
-    const mpz_t    *e_inv;
-    cbrt_cache_t   *cache;
-    bool           *cache_dirty;
-    uint64_t        my_lo, my_hi;
-    int             sp_count;
+typedef struct
+{
+    const mpz_t *modulo;
+    size_t cbrt_bytes;
+    const mpz_t *e_inv;
+    cbrt_cache_t *cache;
+    bool *cache_dirty;
+    uint64_t my_lo, my_hi;
+    int sp_count;
     const unsigned *sp;
     blinding_pair_t *blind_table;
-    int             blind_table_size;
-    int             rank, nranks;
-    run_method_t     method;       // METHOD_TABLE → use prime_slice in Phase 2 sieve
-    uint32_t        *prime_slice;  // preloaded slice for table method (may be NULL)
-    int64_t          slice_count;
+    int blind_table_size;
+    int rank, nranks;
+    run_method_t method;   // METHOD_TABLE → use prime_slice in Phase 2 sieve
+    uint32_t *prime_slice; // preloaded slice for table method (may be NULL)
+    int64_t slice_count;
 } ksc_recon_ctx_t;
 
 // ---------------------------------------------------------------------------
@@ -387,11 +382,12 @@ typedef void (*ksc_fold_fn_t)(
     int bench,
     void *ctx);
 
-typedef struct {
-    ksc_factor_fn_t factor;           // required
-    ksc_fold_fn_t   fold;             // NULL for k32/k35
-    bool            accept_almost_smooth; // true for alg3; false for k32/k35
-    void           *ctx;              // algorithm-specific state
+typedef struct
+{
+    ksc_factor_fn_t factor;    // required
+    ksc_fold_fn_t fold;        // NULL for k32/k35
+    bool accept_almost_smooth; // true for alg3; false for k32/k35
+    void *ctx;                 // algorithm-specific state
 } ksc_factor_strategy_t;
 
 // ---------------------------------------------------------------------------
@@ -420,6 +416,3 @@ void ksc_run_bench_loop(
     benchmark_results_t *json_results,
     const ksc_factor_strategy_t *strategy,
     int rank, int nranks);
-
-
-// Edit: 2026-07-16

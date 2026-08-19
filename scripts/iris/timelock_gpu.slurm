@@ -169,5 +169,3 @@ echo "  'Overshoot' is the price of batching and is the reason a GPU search"
 echo "  does not convert its raw throughput advantage into an equal wall-clock"
 echo "  advantage over the serial CPU search."
 echo "============================================================"
-
-# Edit: 2026-07-28

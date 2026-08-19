@@ -58,13 +58,14 @@
 // alg3 factoring strategy
 // ---------------------------------------------------------------------------
 
-typedef struct {
+typedef struct
+{
     uint64_t my_lo, my_hi;
     int sp_count;
     const unsigned *sp;
     run_method_t method;
-    uint32_t    *prime_slice;
-    int64_t      slice_count;
+    uint32_t *prime_slice;
+    int64_t slice_count;
     const kf_delta_slice_t *delta_slice; // non-null => delta-encoded table method
 } alg3_ctx_t;
 
@@ -83,16 +84,16 @@ static void alg3_factor_fn(
 #endif
         bool do_thr = (bench == 1 && rank == 0);
         std::vector<int64_t> thr_tested(do_thr ? nT : 0, 0);
-        std::vector<int>     thr_found (do_thr ? nT : 0, 0);
+        std::vector<int> thr_found(do_thr ? nT : 0, 0);
         if (c->delta_slice)
             kf_trial_divide_delta(blinded, c->delta_slice, out,
                                   do_thr ? thr_tested.data() : nullptr,
-                                  do_thr ? thr_found.data()  : nullptr,
+                                  do_thr ? thr_found.data() : nullptr,
                                   do_thr ? nT : 0);
         else
             kf_trial_divide_table(blinded, c->prime_slice, c->slice_count, out,
                                   do_thr ? thr_tested.data() : nullptr,
-                                  do_thr ? thr_found.data()  : nullptr,
+                                  do_thr ? thr_found.data() : nullptr,
                                   do_thr ? nT : 0);
         if (do_thr)
         {
@@ -108,7 +109,9 @@ static void alg3_factor_fn(
     {
         kf_trial_divide_sieve(blinded, c->my_lo, c->my_hi,
                               c->sp_count, c->sp, out);
-        (void)bench; (void)json; (void)rank;
+        (void)bench;
+        (void)json;
+        (void)rank;
     }
 }
 
@@ -120,7 +123,9 @@ static void alg3_fold_fn(
     benchmark_results_t *json, int bench, void *ctx)
 {
     ksc_fold_cofactor_cbrt(local_cbrt, cofactor, e_inv, modulo, cache, dirty);
-    (void)json; (void)bench; (void)ctx;
+    (void)json;
+    (void)bench;
+    (void)ctx;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,13 +149,14 @@ static benchmark_results_t run_one(
                                         challenge_file, modulo_file, rank))
     {
         mpz_clears(challenge, modulo, result, NULL);
-        return benchmark_results_t{};  // unreachable — ksc_broadcast aborts
+        return benchmark_results_t{}; // unreachable — ksc_broadcast aborts
     }
 
     if (rank == 0)
     {
-        const char *mname = method == METHOD_TABLE ? "table"
-                          : method == METHOD_POWM  ? "powm" : "sieve";
+        const char *mname = method == METHOD_TABLE  ? "table"
+                            : method == METHOD_POWM ? "powm"
+                                                    : "sieve";
         printf("\n=== %s  [%s | %dr×%dt | %zub] ===\n",
                challenge_file, mname, nranks,
 #ifdef _OPENMP
@@ -213,12 +219,9 @@ static benchmark_results_t run_one(
         }
     }
 
-    // cbrt cache (M1, 2026-07-16): prefer the merged per-variant cache
-    // <cbrt_dir>/cbrt_<size>.cbrt (loaded read-only by every rank, includes the
-    // q0 medium primes); fall back to the per-rank build if it is absent.
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt_alg3", rank);  // per-rank fallback
+                             cbrt_dir, modulo_file, ".cbrt_alg3", rank); // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
@@ -247,16 +250,6 @@ static benchmark_results_t run_one(
 
     // Precompute cbrt(q0) for the medium prime before the bench loop so all
     // warm bench runs are instant cache hits (avoids ~1800ms powm on run 1).
-    //
-    // Fix E (2026-06-11): the factoring of the unblinded challenge is now
-    // DISTRIBUTED — every rank sieves its own slice and ksc_alg3_broadcast_cofactor
-    // combines on rank 0 to yield q0.  Previously rank 0 sieved the entire
-    // [65537, 2^32] range alone while all other ranks idled at the barrier
-    // below (~nranks× the distributed cost, per challenge).  Coverage is
-    // identical (the union of all rank slices is the full range).
-    //
-    // M1 (2026-07-16): skipped entirely when the merged cache is loaded — it
-    // already contains every q0 medium prime, so no per-run precompute is needed.
     if (!used_shared)
     {
         kfactor_list_t pre_factors;
@@ -328,13 +321,13 @@ static benchmark_results_t run_one(
     ksc_init_json_results(&json_results, 32, mname,
                           nranks, n_threads_json, challenge, rank);
     json_results.config.algorithm = "alg3";
-    json_results.config.exponent  = exponent;
+    json_results.config.exponent = exponent;
 
     // ---- Strategy + shared bench loop ----
-    alg3_ctx_t alg3_ctx = { my_lo, my_hi, sp_count, sp, method, prime_slice, slice_count,
-                            have_delta ? &delta_slice : nullptr };
-    ksc_factor_strategy_t strategy = { alg3_factor_fn, alg3_fold_fn,
-                                       true, &alg3_ctx };
+    alg3_ctx_t alg3_ctx = {my_lo, my_hi, sp_count, sp, method, prime_slice, slice_count,
+                           have_delta ? &delta_slice : nullptr};
+    ksc_factor_strategy_t strategy = {alg3_factor_fn, alg3_fold_fn,
+                                      true, &alg3_ctx};
 
     ksc_run_bench_loop(
         result, method,
@@ -367,7 +360,7 @@ static benchmark_results_t run_one(
         kf_delta_slice_free(&delta_slice);
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
-    if (!used_shared && cbrt_cache_dirty)   // merged cache is read-only
+    if (!used_shared && cbrt_cache_dirty) // merged cache is read-only
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
     kf_cbrt_cache_clear(&local_cbrt_cache);
     mpz_clear(e_inv);
@@ -433,8 +426,8 @@ int main(int argc, char *argv[])
     const char *modulo_suffix = "";
     const char *cbrt_dir = KSC_CBRT_DIR;
     int run_all = 0;
-    int do_convert_delta = 0;   // --convert-delta: build k32_primes.dlt and exit
-    bool use_delta = false;     // --table-format delta: use the delta-encoded table
+    int do_convert_delta = 0; // --convert-delta: build k32_primes.dlt and exit
+    bool use_delta = false;   // --table-format delta: use the delta-encoded table
     bool primes_user_set = false;
     int n_challenges = 1;
     bool skip_powm = false;
@@ -509,7 +502,8 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[argi], "--n-challenges") == 0 && argi + 1 < argc)
         {
             n_challenges = atoi(argv[++argi]);
-            if (n_challenges < 1) n_challenges = 1;
+            if (n_challenges < 1)
+                n_challenges = 1;
         }
         else if (strcmp(argv[argi], "--cbrt-dir") == 0 && argi + 1 < argc)
         {
@@ -661,7 +655,7 @@ int main(int argc, char *argv[])
     if (run_all)
     {
         // ALG3 challenge naming: challenge_<N>_alg3_<bits>.txt / modulo_alg3_<bits>.txt
-        const char *sizes[] = { KSC_CANONICAL_SIZES_LIST };
+        const char *sizes[] = {KSC_CANONICAL_SIZES_LIST};
         for (int s = 0; s < KSC_N_CANONICAL_SIZES; s++)
         {
             char cf[512], mf[512], jf[768];
@@ -681,9 +675,6 @@ int main(int argc, char *argv[])
             }
             else
             {
-                // Plan A (2026-07-17): every challenge 0..n_challenges-1 is a timed
-                // warm run — no separate cold run (merged cbrt cache makes
-                // challenge_0 statistically identical; cbrt_misses=0 for all runs).
                 benchmark_results_t combined;
                 bool has_data = false;
                 for (int ci = 0; ci < n_challenges; ci++)
@@ -695,7 +686,11 @@ int main(int argc, char *argv[])
                     if (rank == 0)
                     {
                         FILE *fck = fopen(cfi, "r");
-                        if (fck) { fclose(fck); exists = 1; }
+                        if (fck)
+                        {
+                            fclose(fck);
+                            exists = 1;
+                        }
                     }
                     MPI_Bcast(&exists, 1, MPI_INT, 0, MPI_COMM_WORLD);
                     if (!exists)
@@ -709,8 +704,15 @@ int main(int argc, char *argv[])
                                                     sp_count, sp, my_lo, my_hi,
                                                     method, primes_file, exponent,
                                                     cbrt_dir, skip_powm);
-                    if (!has_data) { combined = std::move(r); has_data = true; }
-                    else           { merge_benchmark_results(combined, r); }
+                    if (!has_data)
+                    {
+                        combined = std::move(r);
+                        has_data = true;
+                    }
+                    else
+                    {
+                        merge_benchmark_results(combined, r);
+                    }
                 }
                 if (has_data && rank == 0 && jf_ptr)
                     write_benchmark_json(jf_ptr, combined);
@@ -728,5 +730,3 @@ int main(int argc, char *argv[])
     MPI_Finalize();
     return 0;
 }
-
-// Edit: 2026-07-22

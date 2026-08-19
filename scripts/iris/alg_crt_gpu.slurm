@@ -80,4 +80,3 @@ echo "=== done. Compare A vs B with: ==="
 echo "  python3 analysis/crt_best_alpha.py $BASE_DIR/G1/host   # Option A"
 echo "  python3 analysis/crt_best_alpha.py $BASE_DIR/G1/gpu    # Option B"
 
-# Edit: 2026-07-16

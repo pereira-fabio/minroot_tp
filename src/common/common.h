@@ -200,16 +200,16 @@ static inline double accum_mean(const bench_accum_t *a, int n)
 
 struct bench_config_t
 {
-    int           smoothness_bits   = 0;       // B exponent: 16 / 32 / 35
-    size_t        challenge_bits    = 0;       // modulus bit-length
-    const char   *method_name       = nullptr; // "sieve" / "table" / "powm"
-    const char   *algorithm         = "";      // "k16"/"k32"/"k35"/"alg3"/"alg4"/"alg7"
-    unsigned long exponent          = 3;       // e-th root exponent (3 or 5)
-    unsigned long b0                = 0;        // alg4 pre-filter bound (0 if n/a)
-    int           t_threshold_bits  = 0;        // alg4 discard threshold bits (0 if n/a)
-    int           num_threads       = 0;
-    int           mpi_ranks         = 0;
-    int           n_warm_attempted  = 0;       // warm challenges attempted (for runs_failed)
+    int smoothness_bits = 0;           // B exponent: 16 / 32 / 35
+    size_t challenge_bits = 0;         // modulus bit-length
+    const char *method_name = nullptr; // "sieve" / "table" / "powm"
+    const char *algorithm = "";        // "k16"/"k32"/"k35"/"alg3"/"alg4"/"alg7"
+    unsigned long exponent = 3;        // e-th root exponent (3 or 5)
+    unsigned long b0 = 0;              // alg4 pre-filter bound (0 if n/a)
+    int t_threshold_bits = 0;          // alg4 discard threshold bits (0 if n/a)
+    int num_threads = 0;
+    int mpi_ranks = 0;
+    int n_warm_attempted = 0; // warm challenges attempted (for runs_failed)
 };
 
 struct bench_timing_t
@@ -221,24 +221,24 @@ struct bench_timing_t
     std::vector<double> local_cbrt_times;
     std::vector<double> gather_times;
     std::vector<double> combine_times;
-    std::vector<int>    blinding_attempts;
+    std::vector<int> blinding_attempts;
     std::vector<double> cbrt_hit_ms;
     std::vector<double> cbrt_miss_ms;
-    std::vector<int>    cbrt_hits;
-    std::vector<int>    cbrt_misses;
+    std::vector<int> cbrt_hits;
+    std::vector<int> cbrt_misses;
     std::vector<double> prefilter_times; // alg4 pre-filter time per run (empty otherwise)
     std::vector<double> warmup_total_ms;
-    double              powm_baseline_ms = 0.0;
+    double powm_baseline_ms = 0.0;
 };
 
 struct bench_stats_t
 {
     // Prime distribution across MPI ranks (recorded from first warm run)
     std::vector<int64_t> primes_tested_per_rank;
-    std::vector<int>     primes_found_per_rank;
+    std::vector<int> primes_found_per_rank;
     // Per-thread load balance within rank 0 (first warm run only)
     std::vector<int64_t> thread_primes_tested;
-    std::vector<int>     thread_primes_found;
+    std::vector<int> thread_primes_found;
 };
 
 // Algorithm-specific cofactor classification — empty for k16/k32/k35
@@ -253,7 +253,7 @@ struct benchmark_results_t
 {
     bench_config_t config;
     bench_timing_t timing;
-    bench_stats_t  stats;
+    bench_stats_t stats;
     alg_hit_data_t hits;
 };
 
@@ -271,7 +271,7 @@ struct benchmark_results_t
 //   });
 void write_benchmark_json(const char *filepath,
                           const benchmark_results_t &results,
-                          void (*extra_sections)(FILE*) = nullptr);
+                          void (*extra_sections)(FILE *) = nullptr);
 
 // Append all timing vectors from src into dst.
 // Call once per warm challenge (challenges 1..N-1) after using challenge_0
@@ -281,5 +281,3 @@ void write_benchmark_json(const char *filepath,
 // dst.config.n_warm_attempted accumulates the warm challenges attempted.
 void merge_benchmark_results(benchmark_results_t &dst,
                              const benchmark_results_t &src);
-
-// Edit: 2026-07-17

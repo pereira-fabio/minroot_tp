@@ -73,38 +73,10 @@
 
 // run_method_t defined in common.h
 
-// Pre-filter parameters (§3.2 Biryukov et al.)
-// B0 = 2^20 — matches the paper (π(2^20) ≈ 82,025 primes), generated once via
-// alg4_b0_primes().  (Raised from 2^16 on 2026-06-11 now that benchmarks run at
-// paper-scale moduli, where the rank-0 pre-filter cost is small.)
-//
-// Mechanism (paper §3.2 threshold-discard, implemented 2026-06-12): the solver
-// scans the blinding table; for each candidate it computes the residue after
-// dividing out all primes ≤ B0 and DISCARDS it (no full sieve) if that residue
-// exceeds t = 2^76 — too large to be (B, B')-almost-smooth.  The first candidate
-// whose residue ≤ t is sieved fully.  (Replaces the earlier best-of-K scoring;
-// both are benchmark-neutral since the pre-filter never runs when attempt 0 hits.)
 #define ALG4_T_THRESHOLD_BITS 76 // discard if B0-residue > 2^76 (paper §3.2)
 #define BLIND_TABLE_SIZE 256     // blinding candidates available to the pre-filter scan
 
 // kprint_stat() defined in common.h
-
-// ---------------------------------------------------------------------------
-// alg4_b0_primes — the B0 = 2^20 prime base for the pre-filter (paper's value)
-//
-// Generated once, lazily, on first use.  The pre-filter threshold scan runs on
-// rank 0 only and outside any OMP region, so the static lazy init is
-// single-threaded and safe.  π(2^20) ≈ 82,025 primes (~640 KB).
-//
-// 2026-06-11: raised from B0 = 2^16 (which reused the sp[] sieve base) to the
-// paper's B0 = 2^20 (§3.2).  The earlier B0 = 2^16 was chosen to bound the
-// rank-0 pre-filter cost at very large moduli (dividing a 24576-bit candidate
-// by 82K primes while the other ranks wait at the following MPI_Bcast).  With
-// the move to paper-scale moduli ({256, 384, 512, 768, 1024} bits) the
-// pre-filter is cheap, so we use the paper's bound.  Note: the pre-filter only
-// runs when blinding attempt 0 fails; crafted benchmark challenges always hit
-// on attempt 0, so this change does not affect any crafted-benchmark numbers.
-// ---------------------------------------------------------------------------
 
 #define ALG4_B0 (1UL << 20) // pre-filter smoothness bound (paper §3.2)
 
@@ -170,13 +142,14 @@ static benchmark_results_t run_one(
                                         challenge_file, modulo_file, rank))
     {
         mpz_clears(challenge, modulo, result, NULL);
-        return benchmark_results_t{};  // unreachable — ksc_broadcast aborts
+        return benchmark_results_t{}; // unreachable — ksc_broadcast aborts
     }
 
     if (rank == 0)
     {
-        const char *mname = method == METHOD_TABLE ? "table"
-                          : method == METHOD_POWM  ? "powm" : "sieve";
+        const char *mname = method == METHOD_TABLE  ? "table"
+                            : method == METHOD_POWM ? "powm"
+                                                    : "sieve";
         printf("\n=== %s  [%s | %dr×%dt | %zub] ===\n",
                challenge_file, mname, nranks,
 #ifdef _OPENMP
@@ -240,12 +213,9 @@ static benchmark_results_t run_one(
         }
     }
 
-    // cbrt cache (M1, 2026-07-16): prefer the merged per-variant cache
-    // <cbrt_dir>/cbrt_<size>.cbrt (loaded read-only by every rank, includes the
-    // medium-prime cofactor cbrts); fall back to the per-rank build if absent.
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
-                             cbrt_dir, modulo_file, ".cbrt_alg4", rank);  // per-rank fallback
+                             cbrt_dir, modulo_file, ".cbrt_alg4", rank); // per-rank fallback
 
     cbrt_cache_t local_cbrt_cache;
     kf_cbrt_cache_init(&local_cbrt_cache);
@@ -275,24 +245,6 @@ static benchmark_results_t run_one(
     // Precompute cbrt(q0) for a single medium-prime cofactor before the bench
     // loop, so warm runs on the common (single prime ≤ 2^64) path are instant
     // cache hits instead of paying ~1800ms powm on run 1.
-    //
-    // Fix E (2026-06-11): the factoring of the unblinded challenge is now
-    // DISTRIBUTED — every rank sieves its slice and ksc_alg3_broadcast_cofactor
-    // combines on rank 0 to derive the cofactor.  Previously rank 0 sieved the
-    // entire [65537, 2^32] range alone while all other ranks idled at the
-    // barrier below.  ksc_alg3_broadcast_cofactor only accepts a single prime
-    // cofactor in (2^32, 2^65], which covers the alg4 single-prime case (≤2^64).
-    // Composite cofactors return complete=0 and are intentionally NOT
-    // precomputed here:
-    //   - ≤2^64 composites factor in microseconds, so the first warm run caches
-    //     them cheaply;
-    //   - >2^64 composites (alg4_multi) were already deferred to the first warm
-    //     run in the old code (Pollard's rho is too slow to run under a barrier).
-    // Net behaviour matches the previous block for every case that matters,
-    // with no full-range sieve serialised on rank 0.
-    //
-    // M1 (2026-07-16): skipped entirely when the merged cache is loaded — it
-    // already contains every medium-prime cofactor cbrt.
     if (!used_shared)
     {
         kfactor_list_t pre_factors;
@@ -378,9 +330,9 @@ static benchmark_results_t run_one(
     // as alg3.  The k_size field in JSON records the sieve upper bound in bits.
     ksc_init_json_results(&json_results, 32, mname,
                           nranks, n_threads_json, challenge, rank);
-    json_results.config.algorithm        = "alg4";
-    json_results.config.exponent         = exponent;
-    json_results.config.b0               = ALG4_B0;
+    json_results.config.algorithm = "alg4";
+    json_results.config.exponent = exponent;
+    json_results.config.b0 = ALG4_B0;
     json_results.config.t_threshold_bits = ALG4_T_THRESHOLD_BITS;
 
     // ---- 2 warmup runs ----
@@ -743,7 +695,8 @@ static benchmark_results_t run_one(
                     if (record_cbrt)
                     {
                         cbrt_miss_ms += std::chrono::duration<double, std::milli>(
-                                            _mt1 - _mt0).count();
+                                            _mt1 - _mt0)
+                                            .count();
                         cbrt_misses++;
                     }
 
@@ -862,7 +815,7 @@ static benchmark_results_t run_one(
     if (rank == 0)
         kf_blinding_table_free(blind_table, BLIND_TABLE_SIZE);
 
-    if (!used_shared && cbrt_cache_dirty)   // merged cache is read-only
+    if (!used_shared && cbrt_cache_dirty) // merged cache is read-only
         kf_cbrt_cache_save(&local_cbrt_cache, cbrt_cache_path);
     kf_cbrt_cache_clear(&local_cbrt_cache);
 
@@ -930,8 +883,8 @@ int main(int argc, char *argv[])
     const char *cbrt_dir = KSC_CBRT_DIR;
     int run_all = 0;
     int run_all_multi = 0;
-    int do_convert_delta = 0;   // --convert-delta: build k32_primes.dlt and exit
-    bool use_delta = false;     // --table-format delta: use the delta-encoded table
+    int do_convert_delta = 0; // --convert-delta: build k32_primes.dlt and exit
+    bool use_delta = false;   // --table-format delta: use the delta-encoded table
     bool primes_user_set = false;
     int n_challenges = 1;
     bool skip_powm = false;
@@ -1010,7 +963,8 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[argi], "--n-challenges") == 0 && argi + 1 < argc)
         {
             n_challenges = atoi(argv[++argi]);
-            if (n_challenges < 1) n_challenges = 1;
+            if (n_challenges < 1)
+                n_challenges = 1;
         }
         else if (strcmp(argv[argi], "--cbrt-dir") == 0 && argi + 1 < argc)
         {
@@ -1175,7 +1129,7 @@ int main(int argc, char *argv[])
     {
         // --all:         challenge_<N>_alg4_<bits>.txt       / modulo_alg4_<bits>.txt
         // --all --multi: challenge_<N>_alg4_multi_<bits>.txt / modulo_alg4_multi_<bits>.txt
-        const char *sizes[] = { KSC_CANONICAL_SIZES_LIST };
+        const char *sizes[] = {KSC_CANONICAL_SIZES_LIST};
         const char *pat = run_all_multi ? "alg4_multi" : "alg4";
         for (int s = 0; s < KSC_N_CANONICAL_SIZES; s++)
         {
@@ -1197,9 +1151,6 @@ int main(int argc, char *argv[])
             }
             else
             {
-                // Plan A (2026-07-17): every challenge 0..n_challenges-1 is a timed
-                // warm run — no separate cold run (merged cbrt cache makes
-                // challenge_0 statistically identical; cbrt_misses=0 for all runs).
                 benchmark_results_t combined;
                 bool has_data = false;
                 for (int ci = 0; ci < n_challenges; ci++)
@@ -1211,7 +1162,11 @@ int main(int argc, char *argv[])
                     if (rank == 0)
                     {
                         FILE *fck = fopen(cfi, "r");
-                        if (fck) { fclose(fck); exists = 1; }
+                        if (fck)
+                        {
+                            fclose(fck);
+                            exists = 1;
+                        }
                     }
                     MPI_Bcast(&exists, 1, MPI_INT, 0, MPI_COMM_WORLD);
                     if (!exists)
@@ -1225,8 +1180,15 @@ int main(int argc, char *argv[])
                                                     sp_count, sp, my_lo, my_hi,
                                                     method, primes_file, exponent,
                                                     cbrt_dir, skip_powm);
-                    if (!has_data) { combined = std::move(r); has_data = true; }
-                    else           { merge_benchmark_results(combined, r); }
+                    if (!has_data)
+                    {
+                        combined = std::move(r);
+                        has_data = true;
+                    }
+                    else
+                    {
+                        merge_benchmark_results(combined, r);
+                    }
                 }
                 if (has_data && rank == 0 && jf_ptr)
                     write_benchmark_json(jf_ptr, combined);
@@ -1244,5 +1206,3 @@ int main(int argc, char *argv[])
     MPI_Finalize();
     return 0;
 }
-
-// Edit: 2026-07-22

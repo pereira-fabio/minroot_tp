@@ -131,4 +131,3 @@ echo "large enough that a single modexp is expensive (see the Gap-1 / t-step pag
 echo "Config B shows sequential cost — attack requires B >= 2^32 for 128-bit (u=8)."
 echo "============================================================"
 
-# Edit: 2026-06-13

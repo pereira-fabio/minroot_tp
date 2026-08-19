@@ -130,5 +130,3 @@ echo ""
 echo "speedup = solve_s / attack_s  (>1 means the attack beats the sequential VDF delay)"
 echo "Expect solve_s and attack_s both ~linear in T; the ratio is the per-step T-step result."
 echo "============================================================"
-
-# Edit: 2026-06-13

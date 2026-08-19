@@ -1,7 +1,5 @@
 # src/iris/ — CUDA GPU solvers (IRIS cluster)
 
-*Edit: 2026-06-30*
-
 ## What this is
 
 A single-GPU, single-process CUDA port of **Phase 1** of Algorithm 7 (the
@@ -27,12 +25,12 @@ cluster; AION is the CPU-only cluster and has no GPU nodes).
 
 ```bash
 # On IRIS (the GPU cluster — not AION which is CPU-only):
-module load system/CUDA/12.6.0          # confirmed 2026-06-25
+module load system/CUDA/12.6.0         
 # GCC and GMP module names on IRIS may differ from AION's env/development/2023b
 # toolchain — check with `module spider GCC` and `module spider GMP` first.
 
 cd src/iris
-# IRIS GPU nodes have 4x Nvidia Tesla V100 SXM2 → sm_70 (confirmed 2026-06-25)
+# IRIS GPU nodes have 4x Nvidia Tesla V100 SXM2 → sm_70
 make ARCH=sm_70
 ```
 
@@ -78,8 +76,7 @@ passing, exactly as elsewhere in this project.
   write collisions should be infrequent — but if profiling on real hardware
   shows atomic contention is a bottleneck, the fix is the same idea already
   used for the CPU OpenMP version (per-thread/per-block private partials,
-  reduced at the end) — see `wiki/implementation/performance-review-2026-06-11.md`
-  item C.
+  reduced at the end)
 - **No top-K candidate retry.** Only the single highest-`log_sum` candidate
   is tried in Phase 2. `log_sum` is an *estimate* (it under-counts primes
   that divide `y_r` more than once — see the code comment in

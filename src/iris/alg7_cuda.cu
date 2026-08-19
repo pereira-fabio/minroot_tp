@@ -80,7 +80,8 @@ __constant__ int d_y_nlimbs;
 // ---------------------------------------------------------------------------
 
 // (a * b) mod q, valid whenever a < q and b < q and q < 2^32 (so a*b < 2^64).
-__device__ __forceinline__ uint64_t mulmod_u32(uint64_t a, uint64_t b, uint64_t q) {
+__device__ __forceinline__ uint64_t mulmod_u32(uint64_t a, uint64_t b, uint64_t q)
+{
     return (a * b) % q;
 }
 
@@ -89,18 +90,23 @@ __device__ __forceinline__ uint64_t mulmod_u32(uint64_t a, uint64_t b, uint64_t 
 // coefficients for inputs this size never approach int64_t's range).
 // Precondition: gcd(a, m) == 1 (guaranteed here since m=q is prime and
 // a = M mod q is nonzero — M is prime and q != M, so q never divides M).
-__device__ uint64_t modinv_u64(uint64_t a, uint64_t m) {
+__device__ uint64_t modinv_u64(uint64_t a, uint64_t m)
+{
     int64_t old_r = (int64_t)a, r = (int64_t)m;
     int64_t old_s = 1, s = 0;
-    while (r != 0) {
+    while (r != 0)
+    {
         int64_t quotient = old_r / r;
         int64_t tmp_r = old_r - quotient * r;
-        old_r = r; r = tmp_r;
+        old_r = r;
+        r = tmp_r;
         int64_t tmp_s = old_s - quotient * s;
-        old_s = s; s = tmp_s;
+        old_s = s;
+        s = tmp_s;
     }
     int64_t result = old_s % (int64_t)m;
-    if (result < 0) result += (int64_t)m;
+    if (result < 0)
+        result += (int64_t)m;
     return (uint64_t)result;
 }
 
@@ -117,11 +123,13 @@ __device__ uint64_t modinv_u64(uint64_t a, uint64_t m) {
 // ---------------------------------------------------------------------------
 
 __global__ void inverted_sieve_kernel(const uint32_t *primes, int64_t nprimes,
-                                       int64_t R, float *log_sum) {
+                                      int64_t R, float *log_sum)
+{
     int64_t idx = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     int64_t stride = (int64_t)blockDim.x * gridDim.x;
 
-    for (int64_t i = idx; i < nprimes; i += stride) {
+    for (int64_t i = idx; i < nprimes; i += stride)
+    {
         uint64_t q = primes[i];
 
         uint64_t x_mod_q = mod_big_by_u32(d_x_limbs, d_nlimbs, q);
@@ -132,7 +140,8 @@ __global__ void inverted_sieve_kernel(const uint32_t *primes, int64_t nprimes,
         uint64_t r_start = mulmod_u32(neg_x_mod_q, M_inv_q, q);
 
         float log_q = log2f((float)q);
-        for (int64_t r = (int64_t)r_start; r < R; r += (int64_t)q) {
+        for (int64_t r = (int64_t)r_start; r < R; r += (int64_t)q)
+        {
             atomicAdd(&log_sum[r], log_q);
         }
     }
@@ -149,14 +158,18 @@ __global__ void inverted_sieve_kernel(const uint32_t *primes, int64_t nprimes,
 
 __global__ void factor_candidate_kernel(const uint32_t *primes, int64_t nprimes,
                                         uint32_t *out_primes, int *out_count,
-                                        int max_out) {
+                                        int max_out)
+{
     int64_t idx = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     int64_t stride = (int64_t)blockDim.x * gridDim.x;
-    for (int64_t i = idx; i < nprimes; i += stride) {
+    for (int64_t i = idx; i < nprimes; i += stride)
+    {
         uint64_t q = primes[i];
-        if (mod_big_by_u32(d_y_limbs, d_y_nlimbs, q) == 0) {
+        if (mod_big_by_u32(d_y_limbs, d_y_nlimbs, q) == 0)
+        {
             int slot = atomicAdd(out_count, 1);
-            if (slot < max_out) out_primes[slot] = (uint32_t)q;
+            if (slot < max_out)
+                out_primes[slot] = (uint32_t)q;
         }
     }
 }
@@ -166,12 +179,14 @@ __global__ void factor_candidate_kernel(const uint32_t *primes, int64_t nprimes,
 // fixed-size buffer suitable for upload to __constant__ memory.
 // ---------------------------------------------------------------------------
 
-static int export_limbs(const mpz_t value, uint64_t *out, int max_limbs) {
+static int export_limbs(const mpz_t value, uint64_t *out, int max_limbs)
+{
     memset(out, 0, sizeof(uint64_t) * max_limbs);
     size_t count = 0;
     mpz_export(out, &count, -1 /* least significant word first */, sizeof(uint64_t),
-                0 /* native endian within a word */, 0 /* nails */, value);
-    if (count > (size_t)max_limbs) {
+               0 /* native endian within a word */, 0 /* nails */, value);
+    if (count > (size_t)max_limbs)
+    {
         fprintf(stderr, "Error: modulus/challenge exceeds MAX_LIMBS=%d (%zu limbs needed)\n",
                 max_limbs, count);
         exit(1);
@@ -191,13 +206,14 @@ static int export_limbs(const mpz_t value, uint64_t *out, int max_limbs) {
 // Per-device state for the multi-GPU prime-range split. Each device owns a
 // contiguous slice of the sieve primes plus its own Phase-1 log_sum[R] and
 // Phase-2 factor-output buffers.
-struct Alg7Dev {
-    int64_t   p_lo;            // first prime index this device owns
-    int64_t   p_count;         // number of primes in this device's slice
-    uint32_t *d_primes;        // this device's prime slice
-    float    *d_log_sum;       // R floats — this device's PARTIAL Phase-1 sum
-    uint32_t *d_out_primes;    // Phase-2 dividing-prime output
-    int      *d_out_count;
+struct Alg7Dev
+{
+    int64_t p_lo;           // first prime index this device owns
+    int64_t p_count;        // number of primes in this device's slice
+    uint32_t *d_primes;     // this device's prime slice
+    float *d_log_sum;       // R floats — this device's PARTIAL Phase-1 sum
+    uint32_t *d_out_primes; // Phase-2 dividing-prime output
+    int *d_out_count;
     cudaEvent_t ev0, ev1;
 };
 
@@ -208,30 +224,36 @@ struct Alg7Dev {
 // device scanning the whole prime table.
 static void gpu_factor_candidate(const mpz_t y, kfactor_list_t *found,
                                  const Alg7Dev *devs, int n_gpus,
-                                 int tpb, int max_out) {
+                                 int tpb, int max_out)
+{
     uint64_t y_limbs[MAX_LIMBS];
     int y_nl = export_limbs(y, y_limbs, MAX_LIMBS);
 
     // Launch the factoring kernel on every device over its prime slice.
-    for (int g = 0; g < n_gpus; g++) {
+    for (int g = 0; g < n_gpus; g++)
+    {
         CUDA_CHECK(cudaSetDevice(g));
         CUDA_CHECK(cudaMemcpyToSymbol(d_y_limbs, y_limbs, sizeof(uint64_t) * MAX_LIMBS));
         CUDA_CHECK(cudaMemcpyToSymbol(d_y_nlimbs, &y_nl, sizeof(int)));
         CUDA_CHECK(cudaMemset(devs[g].d_out_count, 0, sizeof(int)));
         int64_t blocks = (devs[g].p_count + tpb - 1) / tpb;
-        if (blocks < 1) blocks = 1;
+        if (blocks < 1)
+            blocks = 1;
         factor_candidate_kernel<<<(unsigned)blocks, tpb>>>(devs[g].d_primes, devs[g].p_count,
                                                            devs[g].d_out_primes, devs[g].d_out_count, max_out);
         CUDA_CHECK(cudaGetLastError());
     }
 
     // Gather + merge the dividing primes from all devices (disjoint slices → no dups).
-    mpz_t t; mpz_init_set(t, y);
-    for (int g = 0; g < n_gpus; g++) {
+    mpz_t t;
+    mpz_init_set(t, y);
+    for (int g = 0; g < n_gpus; g++)
+    {
         CUDA_CHECK(cudaSetDevice(g));
         int h_count = 0;
         CUDA_CHECK(cudaMemcpy(&h_count, devs[g].d_out_count, sizeof(int), cudaMemcpyDeviceToHost));
-        if (h_count > max_out) {
+        if (h_count > max_out)
+        {
             // Overflow: more distinct factors on this device than the buffer holds.
             // Not silent — missing primes leave a composite cofactor, so the
             // downstream cofactor_ok check fails and the run is flagged unsolved.
@@ -239,15 +261,22 @@ static void gpu_factor_candidate(const mpz_t y, kfactor_list_t *found,
                     g, h_count, max_out);
             h_count = max_out;
         }
-        if (h_count <= 0) continue;
+        if (h_count <= 0)
+            continue;
         std::vector<uint32_t> h_primes(h_count);
         CUDA_CHECK(cudaMemcpy(h_primes.data(), devs[g].d_out_primes,
                               sizeof(uint32_t) * h_count, cudaMemcpyDeviceToHost));
-        for (int i = 0; i < h_count; i++) {
+        for (int i = 0; i < h_count; i++)
+        {
             unsigned long q = h_primes[i];
             int e = 0;
-            while (mpz_divisible_ui_p(t, q)) { mpz_divexact_ui(t, t, q); e++; }
-            if (e > 0) kfl_append_ul(found, q, e);
+            while (mpz_divisible_ui_p(t, q))
+            {
+                mpz_divexact_ui(t, t, q);
+                e++;
+            }
+            if (e > 0)
+                kfl_append_ul(found, q, e);
         }
     }
     mpz_clear(t);
@@ -262,17 +291,25 @@ static void gpu_factor_candidate(const mpz_t y, kfactor_list_t *found,
 // them — see wiki/planning/gap-analysis.md Gap 8).
 // ---------------------------------------------------------------------------
 
-static uint32_t *sieve_primes_u32(uint32_t lo, uint64_t hi, int64_t *out_count) {
+static uint32_t *sieve_primes_u32(uint32_t lo, uint64_t hi, int64_t *out_count)
+{
     std::vector<bool> is_composite(hi + 1, false);
-    for (uint64_t p = 2; p * p <= hi; p++) {
-        if (is_composite[p]) continue;
-        for (uint64_t m = p * p; m <= hi; m += p) is_composite[m] = true;
+    for (uint64_t p = 2; p * p <= hi; p++)
+    {
+        if (is_composite[p])
+            continue;
+        for (uint64_t m = p * p; m <= hi; m += p)
+            is_composite[m] = true;
     }
     int64_t count = 0;
-    for (uint64_t p = lo; p <= hi; p++) if (p >= 2 && !is_composite[p]) count++;
+    for (uint64_t p = lo; p <= hi; p++)
+        if (p >= 2 && !is_composite[p])
+            count++;
     uint32_t *primes = (uint32_t *)malloc(sizeof(uint32_t) * count);
     int64_t j = 0;
-    for (uint64_t p = lo; p <= hi; p++) if (p >= 2 && !is_composite[p]) primes[j++] = (uint32_t)p;
+    for (uint64_t p = lo; p <= hi; p++)
+        if (p >= 2 && !is_composite[p])
+            primes[j++] = (uint32_t)p;
     *out_count = count;
     return primes;
 }
@@ -281,7 +318,8 @@ static uint32_t *sieve_primes_u32(uint32_t lo, uint64_t hi, int64_t *out_count) 
 // main
 // ---------------------------------------------------------------------------
 
-static void print_usage(const char *prog) {
+static void print_usage(const char *prog)
+{
     fprintf(stderr,
             "Usage: %s <challenge_file> <modulo_file> [options]\n"
             "  --method {sieve|powm}  benchmark method (default: sieve)\n"
@@ -295,50 +333,74 @@ static void print_usage(const char *prog) {
             prog);
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     const char *challenge_file = nullptr;
-    const char *modulo_file    = nullptr;
-    const char *data_dir       = nullptr;
-    int size_bits              = 0;
-    int r_log2       = 20;
-    int bitbound     = 24;
+    const char *modulo_file = nullptr;
+    const char *data_dir = nullptr;
+    int size_bits = 0;
+    int r_log2 = 20;
+    int bitbound = 24;
     unsigned long exponent = 3;
-    int medium_bits  = 45;
+    int medium_bits = 45;
     int n_challenges = 10;
-    int n_gpus       = 1;
+    int n_gpus = 1;
     gpu_method_t method = GPU_METHOD_SIEVE;
     const char *json_path = nullptr;
 
-    for (int i = 1; i < argc; i++) {
-        if      (!strcmp(argv[i], "--data")         && i+1<argc) data_dir     = argv[++i];
-        else if (!strcmp(argv[i], "--size")         && i+1<argc) size_bits    = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--n-challenges") && i+1<argc) n_challenges = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--n-runs")       && i+1<argc) n_challenges = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--n-gpus")       && i+1<argc) n_gpus       = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--R")            && i+1<argc) r_log2       = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--bitbound")     && i+1<argc) bitbound     = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--exponent")     && i+1<argc) exponent     = strtoul(argv[++i], nullptr, 10);
-        else if (!strcmp(argv[i], "--medium-bits")  && i+1<argc) medium_bits  = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--method")       && i+1<argc) method       = gpu_parse_method(argv[++i]);
-        else if (!strcmp(argv[i], "--json")         && i+1<argc) json_path    = argv[++i];
-        else if (argv[i][0] != '-') {
-            if (!challenge_file) challenge_file = argv[i];
-            else if (!modulo_file) modulo_file  = argv[i];
+    for (int i = 1; i < argc; i++)
+    {
+        if (!strcmp(argv[i], "--data") && i + 1 < argc)
+            data_dir = argv[++i];
+        else if (!strcmp(argv[i], "--size") && i + 1 < argc)
+            size_bits = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--n-challenges") && i + 1 < argc)
+            n_challenges = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--n-runs") && i + 1 < argc)
+            n_challenges = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--n-gpus") && i + 1 < argc)
+            n_gpus = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--R") && i + 1 < argc)
+            r_log2 = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--bitbound") && i + 1 < argc)
+            bitbound = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--exponent") && i + 1 < argc)
+            exponent = strtoul(argv[++i], nullptr, 10);
+        else if (!strcmp(argv[i], "--medium-bits") && i + 1 < argc)
+            medium_bits = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--method") && i + 1 < argc)
+            method = gpu_parse_method(argv[++i]);
+        else if (!strcmp(argv[i], "--json") && i + 1 < argc)
+            json_path = argv[++i];
+        else if (argv[i][0] != '-')
+        {
+            if (!challenge_file)
+                challenge_file = argv[i];
+            else if (!modulo_file)
+                modulo_file = argv[i];
         }
     }
 
     // Derive paths from --data/--size when given
     static char _modu_buf[512], _chal_buf[512];
-    if (data_dir && size_bits > 0) {
-        snprintf(_modu_buf, sizeof(_modu_buf), "%s/modulo_alg3_%d.txt",      data_dir, size_bits);
+    if (data_dir && size_bits > 0)
+    {
+        snprintf(_modu_buf, sizeof(_modu_buf), "%s/modulo_alg3_%d.txt", data_dir, size_bits);
         snprintf(_chal_buf, sizeof(_chal_buf), "%s/challenge_0_alg3_%d.txt", data_dir, size_bits);
-        modulo_file    = _modu_buf;
+        modulo_file = _modu_buf;
         challenge_file = _chal_buf;
-    } else if (!challenge_file || !modulo_file) {
-        print_usage(argv[0]); return 1;
+    }
+    else if (!challenge_file || !modulo_file)
+    {
+        print_usage(argv[0]);
+        return 1;
     }
 
-    if (bitbound > 32) { fprintf(stderr, "Error: --bitbound > 32 not supported; clamping to 32\n"); bitbound = 32; }
+    if (bitbound > 32)
+    {
+        fprintf(stderr, "Error: --bitbound > 32 not supported; clamping to 32\n");
+        bitbound = 32;
+    }
     int64_t R = (int64_t)1 << r_log2;
     uint64_t B = (bitbound == 32) ? 0xFFFFFFFFULL : ((uint64_t)1 << bitbound);
 
@@ -356,7 +418,8 @@ int main(int argc, char **argv) {
     double powm_baseline_ms = gpu_measure_powm_baseline(challenge_mod, modulo, exponent);
     printf("  powm_baseline_ms = %.4f ms\n", powm_baseline_ms);
 
-    if (method == GPU_METHOD_POWM) {
+    if (method == GPU_METHOD_POWM)
+    {
         std::vector<double> empty;
         gpu_write_json_warm(json_path, "alg7", method, exponent, 32, challenge_bits,
                             powm_baseline_ms, 0.0, 0.0, empty, empty, 0);
@@ -364,8 +427,10 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if ((int)challenge_bits / 64 + 1 > MAX_LIMBS) {
-        fprintf(stderr, "Error: modulus too large for MAX_LIMBS=%d\n", MAX_LIMBS); return 1;
+    if ((int)challenge_bits / 64 + 1 > MAX_LIMBS)
+    {
+        fprintf(stderr, "Error: modulus too large for MAX_LIMBS=%d\n", MAX_LIMBS);
+        return 1;
     }
 
     // ---- Generate primes (host sieve) ----
@@ -373,14 +438,18 @@ int main(int argc, char **argv) {
     int64_t nprimes = 0;
     uint32_t *primes = sieve_primes_u32(65537, B, &nprimes);
     double sieve_ms = std::chrono::duration<double, std::milli>(
-        std::chrono::high_resolution_clock::now() - t_sieve0).count();
+                          std::chrono::high_resolution_clock::now() - t_sieve0)
+                          .count();
     printf("Generated %ld primes in (65536, 2^%d] in %.1f ms (host)\n", (long)nprimes, bitbound, sieve_ms);
 
     // ---- Clamp n_gpus to visible devices (mirrors alg2_k32_cuda.cu) ----
     {
-        int avail = 0; cudaGetDeviceCount(&avail);
-        if (n_gpus < 1) n_gpus = 1;
-        if (avail > 0 && n_gpus > avail) {
+        int avail = 0;
+        cudaGetDeviceCount(&avail);
+        if (n_gpus < 1)
+            n_gpus = 1;
+        if (avail > 0 && n_gpus > avail)
+        {
             fprintf(stderr, "Warning: requested %d GPUs but only %d visible; using %d\n",
                     n_gpus, avail, avail);
             n_gpus = avail;
@@ -412,11 +481,13 @@ int main(int argc, char **argv) {
     // order-independent, so the reordering does not affect correctness.
     std::vector<Alg7Dev> devs((size_t)n_gpus);
     {
-        for (int g = 0; g < n_gpus; g++) {
+        for (int g = 0; g < n_gpus; g++)
+        {
             CUDA_CHECK(cudaSetDevice(g));
             int64_t p_count = ((int64_t)g < nprimes)
-                              ? ((nprimes - g + n_gpus - 1) / n_gpus) : 0;
-            devs[g].p_lo    = g;              // stride start index (informational)
+                                  ? ((nprimes - g + n_gpus - 1) / n_gpus)
+                                  : 0;
+            devs[g].p_lo = g; // stride start index (informational)
             devs[g].p_count = p_count;
             // Gather this device's strided prime subset into a contiguous host buffer.
             std::vector<uint32_t> h_slice((size_t)p_count);
@@ -445,12 +516,15 @@ int main(int argc, char **argv) {
 
     // Helper: run Phase 1 on every device (each over its prime slice), sum the
     // partial log_sums into h_log_sum, and return the max kernel time across devices.
-    auto run_phase1 = [&]() -> float {
-        for (int g = 0; g < n_gpus; g++) {
+    auto run_phase1 = [&]() -> float
+    {
+        for (int g = 0; g < n_gpus; g++)
+        {
             CUDA_CHECK(cudaSetDevice(g));
             CUDA_CHECK(cudaMemset(devs[g].d_log_sum, 0, sizeof(float) * R));
             int64_t blocks = (devs[g].p_count + threads_per_block - 1) / threads_per_block;
-            if (blocks < 1) blocks = 1;
+            if (blocks < 1)
+                blocks = 1;
             CUDA_CHECK(cudaEventRecord(devs[g].ev0));
             inverted_sieve_kernel<<<(unsigned)blocks, threads_per_block>>>(
                 devs[g].d_primes, devs[g].p_count, R, devs[g].d_log_sum);
@@ -458,38 +532,50 @@ int main(int argc, char **argv) {
             CUDA_CHECK(cudaEventRecord(devs[g].ev1));
         }
         float km = 0;
-        for (int g = 0; g < n_gpus; g++) {
+        for (int g = 0; g < n_gpus; g++)
+        {
             CUDA_CHECK(cudaSetDevice(g));
             CUDA_CHECK(cudaEventSynchronize(devs[g].ev1));
-            float t = 0; CUDA_CHECK(cudaEventElapsedTime(&t, devs[g].ev0, devs[g].ev1));
-            if (t > km) km = t;
+            float t = 0;
+            CUDA_CHECK(cudaEventElapsedTime(&t, devs[g].ev0, devs[g].ev1));
+            if (t > km)
+                km = t;
         }
         // Combine: h_log_sum[r] = sum over devices of their partial log_sum[r].
         memset(h_log_sum.data(), 0, sizeof(float) * (size_t)R);
-        for (int g = 0; g < n_gpus; g++) {
+        for (int g = 0; g < n_gpus; g++)
+        {
             CUDA_CHECK(cudaSetDevice(g));
             CUDA_CHECK(cudaMemcpy(tmp_log_sum.data(), devs[g].d_log_sum,
                                   sizeof(float) * R, cudaMemcpyDeviceToHost));
-            for (int64_t r = 0; r < R; r++) h_log_sum[(size_t)r] += tmp_log_sum[(size_t)r];
+            for (int64_t r = 0; r < R; r++)
+                h_log_sum[(size_t)r] += tmp_log_sum[(size_t)r];
         }
         return km;
     };
 
     // ---- Discovery run: find best_r ----
-    float disc_km = run_phase1();   // fills h_log_sum (summed across all devices)
+    float disc_km = run_phase1(); // fills h_log_sum (summed across all devices)
 
     double total_bits = (double)challenge_bits + r_log2;
-    double threshold  = total_bits - medium_bits;
+    double threshold = total_bits - medium_bits;
     int64_t best_r = -1;
     float best_score = -1.0f;
-    for (int64_t r = 0; r < R; r++) {
-        if (h_log_sum[r] > best_score) { best_score = h_log_sum[r]; best_r = r; }
+    for (int64_t r = 0; r < R; r++)
+    {
+        if (h_log_sum[r] > best_score)
+        {
+            best_score = h_log_sum[r];
+            best_r = r;
+        }
     }
     printf("Phase 1: %.3f ms, best_r=%ld, log_sum=%.2f bits (threshold=%.2f)\n",
            disc_km, (long)best_r, best_score, threshold);
-    if (best_score < threshold) {
+    if (best_score < threshold)
+    {
         printf("Warning: no almost-smooth candidate found in R=2^%d window. "
-               "Try a larger --R or larger --bitbound.\n", r_log2);
+               "Try a larger --R or larger --bitbound.\n",
+               r_log2);
     }
 
     // ---- Build y = challenge_mod + best_r * modulo ----
@@ -514,7 +600,8 @@ int main(int argc, char **argv) {
     printf("Phase 2 (discovery): %d factors, cofactor %lu bits, ok=%d\n",
            found.count, cofactor_bits_ul, (int)cofactor_ok);
 
-    if (!cofactor_ok) {
+    if (!cofactor_ok)
+    {
         fprintf(stderr, "Warning: cofactor check failed — not smooth enough. Try larger --R.\n");
     }
 
@@ -530,14 +617,17 @@ int main(int argc, char **argv) {
 
     // Helper: run Phase 2 (trial div on y + reconstruction), return recon_ms.
     // Clears and rebuilds found each call so timing is stable across warm runs.
-    auto run_recon = [&]() -> double {
+    auto run_recon = [&]() -> double
+    {
         kfl_free(&found);
         kfl_init(&found);
         auto tr0 = std::chrono::high_resolution_clock::now();
         gpu_factor_candidate(y, &found, devs.data(), n_gpus, threads_per_block, MAX_OUT_FACTORS);
         kf_compute_cbrt_from_factors_omp(result, &found, modulo, &cache, &cache_dirty, exponent);
-        if (has_q0) {
-            mpz_t cbrt_q; mpz_init(cbrt_q);
+        if (has_q0)
+        {
+            mpz_t cbrt_q;
+            mpz_init(cbrt_q);
             compute_eth_root_mod_prime(cbrt_q, cofactor, modulo, exponent);
             mpz_mul(result, result, cbrt_q);
             mpz_mod(result, result, modulo);
@@ -545,13 +635,15 @@ int main(int argc, char **argv) {
         }
         // no r^{-1} unblinding: y_r ≡ x (mod M) for every r
         return std::chrono::duration<double, std::milli>(
-            std::chrono::high_resolution_clock::now() - tr0).count();
+                   std::chrono::high_resolution_clock::now() - tr0)
+            .count();
     };
 
     // ---- Cold run (warms cbrt cache) ----
     float cold_km = run_phase1();
     double cold_recon_ms = run_recon();
-    if (solved) verify_eth_root(result, challenge_mod, modulo, exponent);
+    if (solved)
+        verify_eth_root(result, challenge_mod, modulo, exponent);
     printf("Cold run: factor_ms=%.2f, recon_ms=%.4f\n", (double)cold_km, cold_recon_ms);
 
     // ---- Warm runs: one per challenge file (new x uploaded to constant memory each time) ----
@@ -562,14 +654,21 @@ int main(int argc, char **argv) {
     GpuTransferStats xfer;
     xfer.table_mb = (double)nprimes * 4.0 / (1024.0 * 1024.0);
 
-    for (int ci = 1; ci < n_challenges; ci++) {
-        mpz_t x_w; mpz_init(x_w);
-        if (data_dir && size_bits > 0) {
-            if (!gpu_load_challenge(x_w, data_dir, ci, "alg3", size_bits, modulo)) {
-                mpz_clear(x_w); continue;
+    for (int ci = 1; ci < n_challenges; ci++)
+    {
+        mpz_t x_w;
+        mpz_init(x_w);
+        if (data_dir && size_bits > 0)
+        {
+            if (!gpu_load_challenge(x_w, data_dir, ci, "alg3", size_bits, modulo))
+            {
+                mpz_clear(x_w);
+                continue;
             }
-        } else {
-            mpz_set(x_w, challenge_mod);  // single-challenge compat
+        }
+        else
+        {
+            mpz_set(x_w, challenge_mod); // single-challenge compat
         }
 
         // Upload new x_w to every device's constant memory
@@ -577,18 +676,25 @@ int main(int argc, char **argv) {
         size_t xl_cnt = 0;
         mpz_export(x_lims_w, &xl_cnt, -1, sizeof(uint64_t), 0, 0, x_w);
         auto t_h2d0 = std::chrono::high_resolution_clock::now();
-        for (int g = 0; g < n_gpus; g++) {
+        for (int g = 0; g < n_gpus; g++)
+        {
             CUDA_CHECK(cudaSetDevice(g));
             CUDA_CHECK(cudaMemcpyToSymbol(d_x_limbs, x_lims_w, sizeof(uint64_t) * MAX_LIMBS));
         }
         auto t_h2d1 = std::chrono::high_resolution_clock::now();
 
-        float km = run_phase1();   // fills h_log_sum (summed across all devices)
+        float km = run_phase1(); // fills h_log_sum (summed across all devices)
 
         // Find best_r for this x_w from the combined log-sum.
         auto t_d2h0 = std::chrono::high_resolution_clock::now();
-        int64_t br_w = 0; float bs_w = -1.0f;
-        for (int64_t r = 0; r < R; r++) if (h_log_sum[r] > bs_w) { bs_w = h_log_sum[r]; br_w = r; }
+        int64_t br_w = 0;
+        float bs_w = -1.0f;
+        for (int64_t r = 0; r < R; r++)
+            if (h_log_sum[r] > bs_w)
+            {
+                bs_w = h_log_sum[r];
+                br_w = r;
+            }
         auto t_d2h1 = std::chrono::high_resolution_clock::now();
         xfer.h2d_ms.push_back(std::chrono::duration<double, std::milli>(t_h2d1 - t_h2d0).count());
         xfer.d2h_ms.push_back(std::chrono::duration<double, std::milli>(t_d2h1 - t_d2h0).count());
@@ -602,18 +708,22 @@ int main(int argc, char **argv) {
 
         // Phase 2 (CPU): trial divide y_w, reconstruct
         auto tr0 = std::chrono::high_resolution_clock::now();
-        kfactor_list_t fl_w; kfl_init(&fl_w);
+        kfactor_list_t fl_w;
+        kfl_init(&fl_w);
         gpu_factor_candidate(y_w, &fl_w, devs.data(), n_gpus, threads_per_block, MAX_OUT_FACTORS);
-        mpz_t cof_w; mpz_init_set(cof_w, y_w);
+        mpz_t cof_w;
+        mpz_init_set(cof_w, y_w);
         for (int j = 0; j < fl_w.count; j++)
             for (int k = 0; k < fl_w.items[j].exponent; k++)
                 mpz_divexact(cof_w, cof_w, fl_w.items[j].prime);
         kf_compute_cbrt_from_factors_omp(result, &fl_w, modulo, &cache, &cache_dirty, exponent);
-        if (mpz_cmp_ui(cof_w, 1) != 0 && (long)mpz_sizeinbase(cof_w, 2) <= medium_bits
-                && mpz_probab_prime_p(cof_w, 25) > 0) {
-            mpz_t cbrt_q_w; mpz_init(cbrt_q_w);
+        if (mpz_cmp_ui(cof_w, 1) != 0 && (long)mpz_sizeinbase(cof_w, 2) <= medium_bits && mpz_probab_prime_p(cof_w, 25) > 0)
+        {
+            mpz_t cbrt_q_w;
+            mpz_init(cbrt_q_w);
             compute_eth_root_mod_prime(cbrt_q_w, cof_w, modulo, exponent);
-            mpz_mul(result, result, cbrt_q_w); mpz_mod(result, result, modulo);
+            mpz_mul(result, result, cbrt_q_w);
+            mpz_mod(result, result, modulo);
             mpz_clear(cbrt_q_w);
         }
         // no r_inv: alg7 additive lift y_r ≡ x (mod M)
@@ -622,9 +732,11 @@ int main(int argc, char **argv) {
         // alg7 finds one medium prime cofactor (same structure as alg3, type-1)
         {
             int h_type = 0, h_bits = 0, h_med = 0;
-            if (mpz_cmp_ui(cof_w, 1) != 0 && (long)mpz_sizeinbase(cof_w, 2) <= medium_bits
-                    && mpz_probab_prime_p(cof_w, 25) > 0) {
-                h_type = 1; h_bits = (int)mpz_sizeinbase(cof_w, 2); h_med = 1;
+            if (mpz_cmp_ui(cof_w, 1) != 0 && (long)mpz_sizeinbase(cof_w, 2) <= medium_bits && mpz_probab_prime_p(cof_w, 25) > 0)
+            {
+                h_type = 1;
+                h_bits = (int)mpz_sizeinbase(cof_w, 2);
+                h_med = 1;
             }
             hit_stats.hit_type.push_back(h_type);
             hit_stats.cofactor_bits.push_back(h_bits);
@@ -637,7 +749,8 @@ int main(int argc, char **argv) {
         mpz_clears(y_w, r_mpz_w, cof_w, x_w, nullptr);
     }
     // Restore original x to every device's constant memory for consistency
-    for (int g = 0; g < n_gpus; g++) {
+    for (int g = 0; g < n_gpus; g++)
+    {
         CUDA_CHECK(cudaSetDevice(g));
         CUDA_CHECK(cudaMemcpyToSymbol(d_x_limbs, x_limbs, sizeof(uint64_t) * MAX_LIMBS));
     }
@@ -649,13 +762,15 @@ int main(int argc, char **argv) {
                         n_gpus, hit_stats, xfer);
 
     // ---- Cleanup ----
-    if (cache_dirty) kf_cbrt_cache_save(&cache, cache_path);
+    if (cache_dirty)
+        kf_cbrt_cache_save(&cache, cache_path);
     kf_cbrt_cache_clear(&cache);
     kfl_free(&found);
     mpz_clears(y, r_mpz, cofactor, result, nullptr);
     mpz_clears(challenge, modulo, challenge_mod, nullptr);
     free(primes);
-    for (int g = 0; g < n_gpus; g++) {
+    for (int g = 0; g < n_gpus; g++)
+    {
         CUDA_CHECK(cudaSetDevice(g));
         CUDA_CHECK(cudaFree(devs[g].d_primes));
         CUDA_CHECK(cudaFree(devs[g].d_log_sum));
@@ -667,4 +782,3 @@ int main(int argc, char **argv) {
 
     return solved ? 0 : 2;
 }
-// Edit: 2026-07-23

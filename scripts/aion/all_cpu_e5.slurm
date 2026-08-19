@@ -179,4 +179,3 @@ echo "Join each timing JSON with its _powm_ sibling for the baseline (results-jo
 echo "Job finished  (Array: $SLURM_ARRAY_JOB_ID  Task: $SLURM_ARRAY_TASK_ID)"
 echo "============================================================"
 
-# Edit: 2026-07-22

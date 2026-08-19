@@ -2,10 +2,6 @@
 // =============================================================================
 // prefilter.h — Simple pre-filtering (paper Fig. 6 / Algorithm 5)
 //
-// Advisor todo 2026-06-29; |Re| sizing method fixed 2026-07-10 (benchmark the
-// pre-filter alone, size by the B - S budget). Design plan:
-//   wiki/planning/simple-prefilter-plan-2026-07-07.md
-//
 // Key realization: the existing blinding table IS the paper's Re/R1 table.
 //   blinding_pair_t.r_blind = r^e  mod M   ← Re[i]
 //   blinding_pair_t.r_inv   = r^-1 mod M   ← R1[i]
@@ -71,5 +67,3 @@ int prefilter_simple_select(mpz_t y_out, int *j_out,
                             int lo, int hi,
                             const mpz_t modulo,
                             int rank, int nranks);
-
-// Edit: 2026-07-12

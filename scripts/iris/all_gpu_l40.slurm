@@ -393,4 +393,3 @@ echo "Results in: $IRIS_BASE/alg{2,3,4,7}/G${N_GPUS}/l40/"
 find "$ALG2_DIR" "$ALG3_DIR" "$ALG4_DIR" "$ALG7_DIR" -name "*_${SLURM_JOB_ID}_*.json" 2>/dev/null | wc -l | xargs -I{} echo "  {} JSON files written"
 echo "Done — check all_gpu_l40_${SLURM_JOB_ID}.out"
 
-# Edit: 2026-07-23

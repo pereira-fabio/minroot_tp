@@ -122,21 +122,25 @@ static void find_prime_parallel(mpz_t result, mp_bitcnt_t bits, unsigned long ex
 		int tid = 0, nt = 1;
 #ifdef _OPENMP
 		tid = omp_get_thread_num();
-		nt  = omp_get_num_threads();
+		nt = omp_get_num_threads();
 #endif
 		mpz_t cand;
 		mpz_init(cand);
 		unsigned long offset = (unsigned long)(2 * tid + 1);
 
-		while (!found) {
+		while (!found)
+		{
 			mpz_add_ui(cand, base, offset);
 			/* Accept only primes where gcd(exponent, cand-1) = 1.
 			 * For prime exponent e: gcd(e, p-1) = 1  iff  p mod e != 1. */
-			if(mpz_tdiv_ui(cand, exponent) != 1){
-				if(mpz_probab_prime_p(cand, 20) > 0){
-					#pragma omp critical
+			if (mpz_tdiv_ui(cand, exponent) != 1)
+			{
+				if (mpz_probab_prime_p(cand, 20) > 0)
+				{
+#pragma omp critical
 					{
-						if(!found){
+						if (!found)
+						{
 							mpz_set(result, cand);
 							found = 1;
 						}
@@ -144,7 +148,7 @@ static void find_prime_parallel(mpz_t result, mp_bitcnt_t bits, unsigned long ex
 				}
 			}
 			offset += (unsigned long)(2 * nt);
-		 }
+		}
 
 		mpz_clear(cand);
 	}
@@ -180,14 +184,16 @@ static void generate_one_alg3_challenge(
 
 	mpz_set_ui(smooth, 1);
 	int smooth_count = 0;
-	do {
+	do
+	{
 		mpz_urandomb(tmp, rstate, B_BITS);
 		mpz_nextprime(tmp, tmp);
 		/* Skip if the product would overflow modulo. */
 		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(tmp, 2) >
-		    mpz_sizeinbase(modulo, 2))
+			mpz_sizeinbase(modulo, 2))
 			continue;
-		if (f) mpz_out_raw(f, tmp);
+		if (f)
+			mpz_out_raw(f, tmp);
 		mpz_mul(smooth, smooth, tmp);
 		smooth_count++;
 	} while ((long)mpz_sizeinbase(smooth, 2) < threshold);
@@ -199,35 +205,42 @@ static void generate_one_alg3_challenge(
 	 * large bittarget values this tool was originally tuned for (4096+ bits,
 	 * where 33..64 is a tiny fraction of the modulus) but frequently doesn't
 	 * fit at small bittarget values like 2048, where it's a much bigger
-	 * fraction -- see wiki/log.md 2026-06-25. */
+	 * fraction */
 	mp_bitcnt_t modulo_bits = mpz_sizeinbase(modulo, 2), smooth_bits = mpz_sizeinbase(smooth, 2);
 	mp_bitcnt_t headroom = modulo_bits > smooth_bits ? modulo_bits - smooth_bits : 0;
 	mp_bitcnt_t q0_min = 33;
 	mp_bitcnt_t q0_max = headroom < 64 ? headroom : 64;
-	if (q0_max < q0_min) q0_max = q0_min; /* not enough room; let the retry/fallback below handle it */
-	mpz_urandomb(tmp, rstate, 5);                      /* 0..31 */
+	if (q0_max < q0_min)
+		q0_max = q0_min;		  /* not enough room; let the retry/fallback below handle it */
+	mpz_urandomb(tmp, rstate, 5); /* 0..31 */
 	mp_bitcnt_t q0_bits = q0_min + (mp_bitcnt_t)(mpz_get_ui(tmp) % (q0_max - q0_min + 1));
 
 	int q0_ok = 0;
 	int q0_tries = 0;
-	while (!q0_ok && q0_tries < 100) {
+	while (!q0_ok && q0_tries < 100)
+	{
 		mpz_urandomb(q0, rstate, q0_bits);
 		mpz_setbit(q0, q0_bits - 1); /* ensure exactly q0_bits bits */
 		mpz_nextprime(q0, q0);
 		/* Reject if smooth * q0 would exceed modulo. */
 		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(q0, 2) <=
-		    mpz_sizeinbase(modulo, 2))
+			mpz_sizeinbase(modulo, 2))
 			q0_ok = 1;
 		q0_tries++;
 	}
-	if (!q0_ok) {
+	if (!q0_ok)
+	{
 		/* Fallback: use a 33-bit prime (smallest medium prime). */
 		mpz_set_ui(q0, 1UL << 31);
 		mpz_setbit(q0, 32);
 		mpz_nextprime(q0, q0);
 	}
 
-	if (f) { mpz_out_raw(f, q0); fclose(f); }
+	if (f)
+	{
+		mpz_out_raw(f, q0);
+		fclose(f);
+	}
 
 	mpz_mul(result, smooth, q0);
 	*count_out = smooth_count + 1;
@@ -262,13 +275,15 @@ static void generate_one_alg4_challenge(
 
 	mpz_set_ui(smooth, 1);
 	int smooth_count = 0;
-	do {
+	do
+	{
 		mpz_urandomb(tmp, rstate, B_BITS);
 		mpz_nextprime(tmp, tmp);
 		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(tmp, 2) >
-		    mpz_sizeinbase(modulo, 2))
+			mpz_sizeinbase(modulo, 2))
 			continue;
-		if (f) mpz_out_raw(f, tmp);
+		if (f)
+			mpz_out_raw(f, tmp);
 		mpz_mul(smooth, smooth, tmp);
 		smooth_count++;
 	} while ((long)mpz_sizeinbase(smooth, 2) < threshold);
@@ -280,29 +295,36 @@ static void generate_one_alg4_challenge(
 	mp_bitcnt_t headroom = modulo_bits > smooth_bits ? modulo_bits - smooth_bits : 0;
 	mp_bitcnt_t q0_min = 33;
 	mp_bitcnt_t q0_max = headroom < 63 ? headroom : 63;
-	if (q0_max < q0_min) q0_max = q0_min;
+	if (q0_max < q0_min)
+		q0_max = q0_min;
 	mpz_urandomb(tmp, rstate, 5);
 	mp_bitcnt_t q0_bits = q0_min + (mp_bitcnt_t)(mpz_get_ui(tmp) % (q0_max - q0_min + 1));
 
 	int q0_ok = 0;
 	int q0_tries = 0;
-	while (!q0_ok && q0_tries < 100) {
+	while (!q0_ok && q0_tries < 100)
+	{
 		mpz_urandomb(q0, rstate, q0_bits);
 		mpz_setbit(q0, q0_bits - 1);
 		mpz_nextprime(q0, q0);
 		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(q0, 2) <=
-		    mpz_sizeinbase(modulo, 2))
+			mpz_sizeinbase(modulo, 2))
 			q0_ok = 1;
 		q0_tries++;
 	}
-	if (!q0_ok) {
+	if (!q0_ok)
+	{
 		/* Fallback: use a 33-bit prime. */
 		mpz_set_ui(q0, 1UL << 31);
 		mpz_setbit(q0, 32);
 		mpz_nextprime(q0, q0);
 	}
 
-	if (f) { mpz_out_raw(f, q0); fclose(f); }
+	if (f)
+	{
+		mpz_out_raw(f, q0);
+		fclose(f);
+	}
 
 	mpz_mul(result, smooth, q0);
 	*count_out = smooth_count + 1;
@@ -338,18 +360,20 @@ static void generate_one_alg4_multi_challenge(
 
 	mpz_set_ui(smooth, 1);
 	int smooth_count = 0;
-	do {
+	do
+	{
 		mpz_urandomb(tmp, rstate, B_BITS);
 		mpz_nextprime(tmp, tmp);
 		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(tmp, 2) >
-		    mpz_sizeinbase(modulo, 2))
+			mpz_sizeinbase(modulo, 2))
 			continue;
-		if (f) mpz_out_raw(f, tmp);
+		if (f)
+			mpz_out_raw(f, tmp);
 		mpz_mul(smooth, smooth, tmp);
 		smooth_count++;
 	} while ((long)mpz_sizeinbase(smooth, 2) < threshold);
 
-		/* Step 2: two independent medium primes p1, p2 each in (2^32, 2^64].
+	/* Step 2: two independent medium primes p1, p2 each in (2^32, 2^64].
 	 * Bit-lengths are chosen independently (33..63 each) so challenges span
 	 * all cofactor-size combinations, exercising Pollard's rho at varying sizes.
 	 * Each is clamped to half the headroom smooth_base actually left, so
@@ -362,9 +386,11 @@ static void generate_one_alg4_multi_challenge(
 	mp_bitcnt_t headroom = modulo_bits > smooth_bits ? modulo_bits - smooth_bits : 0;
 	mp_bitcnt_t p_min = 33;
 	mp_bitcnt_t p_max = (headroom / 2) < 63 ? (headroom / 2) : 63;
-	if (p_max < p_min) p_max = p_min;
+	if (p_max < p_min)
+		p_max = p_min;
 
-	while (!pair_ok && pair_tries < 100) {
+	while (!pair_ok && pair_tries < 100)
+	{
 		mpz_urandomb(tmp, rstate, 5);
 		p1_bits = p_min + (mp_bitcnt_t)(mpz_get_ui(tmp) % (p_max - p_min + 1));
 		mpz_urandomb(tmp, rstate, 5);
@@ -379,12 +405,14 @@ static void generate_one_alg4_multi_challenge(
 		mpz_nextprime(p2, p2);
 
 		if (mpz_sizeinbase(smooth, 2) + mpz_sizeinbase(p1, 2) +
-		    mpz_sizeinbase(p2, 2) <= mpz_sizeinbase(modulo, 2))
+				mpz_sizeinbase(p2, 2) <=
+			mpz_sizeinbase(modulo, 2))
 			pair_ok = 1;
 		pair_tries++;
 	}
 
-	if (!pair_ok) {
+	if (!pair_ok)
+	{
 		/* Fallback: two smallest distinct 33-bit primes. */
 		mpz_set_ui(p1, (1UL << 31) | (1UL << 32));
 		mpz_nextprime(p1, p1);
@@ -392,7 +420,12 @@ static void generate_one_alg4_multi_challenge(
 		mpz_nextprime(p2, p2);
 	}
 
-	if (f) { mpz_out_raw(f, p1); mpz_out_raw(f, p2); fclose(f); }
+	if (f)
+	{
+		mpz_out_raw(f, p1);
+		mpz_out_raw(f, p2);
+		fclose(f);
+	}
 
 	mpz_mul(result, smooth, p1);
 	mpz_mul(result, result, p2);
@@ -438,13 +471,26 @@ int main(int argc, char **argv)
 				return EINVAL;
 			}
 		}
-		else if (strcmp(argv[i], "alg3")       == 0) { is_alg3       = 1; }
-		else if (strcmp(argv[i], "alg4")       == 0) { is_alg4       = 1; }
-		else if (strcmp(argv[i], "alg4_multi") == 0) { is_alg4_multi = 1; }
+		else if (strcmp(argv[i], "alg3") == 0)
+		{
+			is_alg3 = 1;
+		}
+		else if (strcmp(argv[i], "alg4") == 0)
+		{
+			is_alg4 = 1;
+		}
+		else if (strcmp(argv[i], "alg4_multi") == 0)
+		{
+			is_alg4_multi = 1;
+		}
 		else if (strcmp(argv[i], "--start") == 0 && i + 1 < argc)
 		{
 			start_index = (int)strtol(argv[++i], NULL, 10);
-			if (start_index < 0) { fprintf(stderr, "--start must be >= 0\n"); return EINVAL; }
+			if (start_index < 0)
+			{
+				fprintf(stderr, "--start must be >= 0\n");
+				return EINVAL;
+			}
 		}
 		else
 		{
@@ -578,22 +624,29 @@ int main(int argc, char **argv)
 						RANDSEED ^ ((unsigned long long)(global_i + 1) * 6364136223846793005ULL));
 
 		char fpath[256], cpath[256];
-		if (is_alg3) {
+		if (is_alg3)
+		{
 			snprintf(fpath, sizeof(fpath), "%sfactors_%d_alg3_%lu.txt",
 					 savefolder, global_i, (unsigned long)bittarget);
 			snprintf(cpath, sizeof(cpath), "%schallenge_%d_alg3_%lu.txt",
 					 savefolder, global_i, (unsigned long)bittarget);
-		} else if (is_alg4) {
+		}
+		else if (is_alg4)
+		{
 			snprintf(fpath, sizeof(fpath), "%sfactors_%d_alg4_%lu.txt",
 					 savefolder, global_i, (unsigned long)bittarget);
 			snprintf(cpath, sizeof(cpath), "%schallenge_%d_alg4_%lu.txt",
 					 savefolder, global_i, (unsigned long)bittarget);
-		} else if (is_alg4_multi) {
+		}
+		else if (is_alg4_multi)
+		{
 			snprintf(fpath, sizeof(fpath), "%sfactors_%d_alg4_multi_%lu.txt",
 					 savefolder, global_i, (unsigned long)bittarget);
 			snprintf(cpath, sizeof(cpath), "%schallenge_%d_alg4_multi_%lu.txt",
 					 savefolder, global_i, (unsigned long)bittarget);
-		} else {
+		}
+		else
+		{
 			snprintf(fpath, sizeof(fpath), "%sfactors_%d_%lu_%lu.txt",
 					 savefolder, global_i,
 					 (unsigned long)bitbound, (unsigned long)bittarget);
@@ -636,7 +689,7 @@ int main(int argc, char **argv)
 		 * generate_one_* functions bound bit-LENGTH, not value, so result can
 		 * occasionally be >= modulo (this is harmless: solvers always reduce
 		 * the challenge mod modulo before use, and the e-th-root homomorphism
-		 * holds regardless -- see wiki/log.md 2026-06-25). mpz_powm always
+		 * holds regardless. mpz_powm always
 		 * returns a value < modulo, so comparing against the *reduced*
 		 * result, not result itself, avoids a false "VERIFY FAILED" whenever
 		 * that happens. */
@@ -682,5 +735,3 @@ int main(int argc, char **argv)
 	mpz_clear(modulo);
 	return 0;
 }
-
-// Edit: 2026-06-03

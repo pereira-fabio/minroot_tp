@@ -246,11 +246,6 @@ static benchmark_results_t run_one(
     mpz_init(e_inv);
     ksc_compute_e_inv(e_inv, modulo, exponent);
 
-    // cbrt cache (M1, 2026-07-16): prefer the merged per-variant cache
-    // <cbrt_dir>/cbrt_<size>.cbrt — every rank loads the full set once, so all
-    // reconstruction lookups hit (no per-rank build, no cold-run warming).  If
-    // it is absent (a brand-new modulus), fall back to the per-rank build, which
-    // analysis/merge_cbrt_cache.py later consolidates.
     char cbrt_cache_path[KSC_CBRT_PATH_MAX];
     ksc_make_cbrt_cache_path(cbrt_cache_path, sizeof(cbrt_cache_path),
                              cbrt_dir, modulo_file, ".cbrt", rank); // per-rank fallback
@@ -312,8 +307,6 @@ static benchmark_results_t run_one(
                          have_delta ? &delta_slice : NULL};
     ksc_factor_strategy_t strategy = {k32_factor_fn, NULL, false, &k32_ctx};
 
-    // Reset AFTER cache setup (ksc_ensure_cbrt_cache does its own lookups) so the
-    // counters describe the benchmark loop only — advisor request 2026-07-29.
     kf_cbrt_stats_reset();
     kf_recon_prof_reset();
 
@@ -738,10 +731,6 @@ int main(int argc, char *argv[])
             }
             else
             {
-                // Plan A (2026-07-17): every challenge 0..n_challenges-1 is a timed
-                // warm run — no separate cold run.  The merged cbrt cache (M1) makes
-                // challenge_0 statistically identical to the rest (cbrt_misses=0 for
-                // all runs), so there is nothing to warm and no cold_run section.
                 benchmark_results_t combined;
                 bool has_data = false;
                 for (int ci = 0; ci < n_challenges; ci++)
@@ -797,4 +786,3 @@ int main(int argc, char *argv[])
     MPI_Finalize();
     return 0;
 }
-// Edit: 2026-07-30

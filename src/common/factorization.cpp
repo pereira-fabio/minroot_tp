@@ -788,7 +788,8 @@ static inline kf_cbrt_stat_t *kf_cbrt_slot(void)
 {
 #ifdef _OPENMP
     int t = omp_get_thread_num();
-    if (t < 0 || t >= KF_CBRT_MAX_THREADS) t = 0;
+    if (t < 0 || t >= KF_CBRT_MAX_THREADS)
+        t = 0;
     return &g_cbrt_stats[t];
 #else
     return &g_cbrt_stats[0];
@@ -809,16 +810,20 @@ void kf_cbrt_stats_total(long *hits, long *misses, long *probes)
         m += g_cbrt_stats[i].misses;
         p += g_cbrt_stats[i].probes;
     }
-    if (hits)   *hits   = h;
-    if (misses) *misses = m;
-    if (probes) *probes = p;
+    if (hits)
+        *hits = h;
+    if (misses)
+        *misses = m;
+    if (probes)
+        *probes = p;
 }
 
 int kf_cbrt_stats_threads_used(void)
 {
     int n = 0;
     for (int i = 0; i < KF_CBRT_MAX_THREADS; i++)
-        if (g_cbrt_stats[i].hits || g_cbrt_stats[i].misses) n++;
+        if (g_cbrt_stats[i].hits || g_cbrt_stats[i].misses)
+            n++;
     return n;
 }
 
@@ -842,7 +847,8 @@ void kf_cbrt_stats_report(const char *tag)
     for (int i = 0; i < KF_CBRT_MAX_THREADS; i++)
     {
         long th = g_cbrt_stats[i].hits, tm = g_cbrt_stats[i].misses;
-        if (th == 0 && tm == 0) continue;
+        if (th == 0 && tm == 0)
+            continue;
         long tt = th + tm;
         printf("  %-8d %12ld %12ld %12ld %9.2f%% %12ld\n",
                i, tt, th, tm, 100.0 * (double)th / (double)tt,
@@ -857,7 +863,8 @@ void kf_cbrt_stats_report(const char *tag)
     for (int i = 0; i < KF_CBRT_MAX_THREADS; i++)
     {
         long th = g_cbrt_stats[i].hits, tm = g_cbrt_stats[i].misses;
-        if (th == 0 && tm == 0) continue;
+        if (th == 0 && tm == 0)
+            continue;
         printf("CBRTSTAT|%s|%d|%ld|%ld|%ld\n",
                tag ? tag : "", i, th, tm, g_cbrt_stats[i].probes);
     }
@@ -868,9 +875,9 @@ void kf_cbrt_stats_report(const char *tag)
 void kf_recon_prof_reset(void)
 {
     g_recon_prof.parallel_ms = 0.0;
-    g_recon_prof.serial_ms   = 0.0;
-    g_recon_prof.factors     = 0;
-    g_recon_prof.calls       = 0;
+    g_recon_prof.serial_ms = 0.0;
+    g_recon_prof.factors = 0;
+    g_recon_prof.calls = 0;
 }
 
 const kf_recon_prof_t *kf_recon_prof_get(void) { return &g_recon_prof; }
@@ -1047,7 +1054,8 @@ void kf_compute_cbrt_from_factors(mpz_t result,
 static int ksc_available_cpus(void)
 {
     static int cached = 0;
-    if (cached > 0) return cached;
+    if (cached > 0)
+        return cached;
     int n = 0;
 #if defined(__linux__)
     cpu_set_t set;
@@ -1056,9 +1064,11 @@ static int ksc_available_cpus(void)
         n = CPU_COUNT(&set);
 #endif
 #ifdef _OPENMP
-    if (n <= 0) n = omp_get_num_procs();
+    if (n <= 0)
+        n = omp_get_num_procs();
 #endif
-    if (n <= 0) n = 1;
+    if (n <= 0)
+        n = 1;
     cached = n;
     return n;
 }
@@ -1096,23 +1106,27 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
     mpz_clears(phi, e_base, NULL);
 
     int n = found->count;
-    if (n <= 0) { mpz_set_ui(result, 1); mpz_clear(e_inv); return; }
+    if (n <= 0)
+    {
+        mpz_set_ui(result, 1);
+        mpz_clear(e_inv);
+        return;
+    }
 
     // Per-factor base cube root cbrt(p_i); miss[i] flags a cache miss.
-    mpz_t *cbrts = (mpz_t *) malloc((size_t) n * sizeof(mpz_t));
-    char  *miss  = (char *)  calloc((size_t) n, 1);
+    mpz_t *cbrts = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
+    char *miss = (char *)calloc((size_t)n, 1);
 
     // Use exactly the cores this process was granted; never more threads than
     // there are factors to root.
     int nthreads = ksc_available_cpus();
-    if (nthreads > n) nthreads = n;
+    if (nthreads > n)
+        nthreads = n;
 
-    // Phase boundaries are timed for the reconstruction profile (advisor request
-    // 2026-07-29): phase 1 is the only parallel work, phase 2 is strictly serial.
     auto t_p0 = std::chrono::high_resolution_clock::now();
 
-    // Parallel: compute each factor's cube root. Cache access is read-only here.
-    #pragma omp parallel for schedule(dynamic) num_threads(nthreads)
+// Parallel: compute each factor's cube root. Cache access is read-only here.
+#pragma omp parallel for schedule(dynamic) num_threads(nthreads)
     for (int i = 0; i < n; i++)
     {
         mpz_init(cbrts[i]);
@@ -1126,7 +1140,7 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
         {
             mpz_t p_mpz;
             mpz_init_set_ui(p_mpz, p);
-            mpz_powm(cbrts[i], p_mpz, e_inv, modulo);   // p^(e_inv) mod M
+            mpz_powm(cbrts[i], p_mpz, e_inv, modulo); // p^(e_inv) mod M
             mpz_clear(p_mpz);
             miss[i] = 1;
         }
@@ -1143,7 +1157,7 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
             mpz_t powered;
             mpz_init(powered);
             mpz_powm_ui(powered, cbrts[i],
-                        (unsigned long) found->items[i].exponent, modulo);
+                        (unsigned long)found->items[i].exponent, modulo);
             mpz_mul(result, result, powered);
             mpz_clear(powered);
         }
@@ -1157,7 +1171,8 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
         {
             unsigned long p = mpz_get_ui(found->items[i].prime);
             kf_cbrt_cache_append(cache, p, cbrts[i]);
-            if (cache_dirty) *cache_dirty = true;
+            if (cache_dirty)
+                *cache_dirty = true;
         }
         mpz_clear(cbrts[i]);
     }
@@ -1205,7 +1220,7 @@ blinding_pair_t *kf_blinding_table_alloc(int count, const mpz_t modulo,
 
         mpz_set(table[i].r, r);
         mpz_powm_ui(table[i].r_blind, r, exponent, modulo); // r^e mod M
-        mpz_invert(table[i].r_inv, r, modulo);  // r^{-1} mod M
+        mpz_invert(table[i].r_inv, r, modulo);              // r^{-1} mod M
     }
 
     mpz_clear(r);
@@ -1734,7 +1749,11 @@ bool kf_convert_prime_table_to_delta(const char *flat_path, const char *delta_pa
 {
     const char *lp = log_prefix ? log_prefix : "";
     FILE *in = fopen(flat_path, "rb");
-    if (!in) { fprintf(stderr, "%sCannot open %s\n", lp, flat_path); return false; }
+    if (!in)
+    {
+        fprintf(stderr, "%sCannot open %s\n", lp, flat_path);
+        return false;
+    }
 
     uint64_t magic, count;
     if (fread(&magic, 8, 1, in) != 1 || magic != KF_PRIME_TABLE_MAGIC ||
@@ -1746,7 +1765,12 @@ bool kf_convert_prime_table_to_delta(const char *flat_path, const char *delta_pa
     }
 
     FILE *out = fopen(delta_path, "wb");
-    if (!out) { fprintf(stderr, "%sCannot create %s\n", lp, delta_path); fclose(in); return false; }
+    if (!out)
+    {
+        fprintf(stderr, "%sCannot create %s\n", lp, delta_path);
+        fclose(in);
+        return false;
+    }
 
     uint64_t dmagic = KF_DELTA_MAGIC_U32;
     uint32_t B = KF_DELTA_BLOCK, width = 4;
@@ -1763,7 +1787,11 @@ bool kf_convert_prime_table_to_delta(const char *flat_path, const char *delta_pa
     while (written < count)
     {
         size_t want = (size_t)((count - written < B) ? (count - written) : B);
-        if (fread(buf, 4, want, in) != want) { ok = false; break; }
+        if (fread(buf, 4, want, in) != want)
+        {
+            ok = false;
+            break;
+        }
         fwrite(&buf[0], 4, 1, out); // anchor
         for (size_t i = 1; i < want; i++)
         {
@@ -1777,17 +1805,24 @@ bool kf_convert_prime_table_to_delta(const char *flat_path, const char *delta_pa
                 break;
             }
             gb[i - 1] = (uint8_t)gh;
-            if (gh > maxgh) maxgh = gh;
+            if (gh > maxgh)
+                maxgh = gh;
         }
-        if (!ok) break;
-        if (want > 1) fwrite(gb, 1, want - 1, out);
+        if (!ok)
+            break;
+        if (want > 1)
+            fwrite(gb, 1, want - 1, out);
         written += want;
     }
     free(buf);
     free(gb);
     fclose(in);
     fclose(out);
-    if (!ok) { remove(delta_path); return false; }
+    if (!ok)
+    {
+        remove(delta_path);
+        return false;
+    }
     printf("%sConverted %s (%" PRIu64 " primes) -> %s  [1 byte/prime, max gap/2=%u, ~%.0f MB]\n",
            lp, flat_path, count, delta_path, maxgh,
            (double)(KF_DELTA_HDR + count) / 1e6);
@@ -1799,7 +1834,11 @@ bool kf_convert_prime_table_to_delta_u64(const char *flat_path, const char *delt
 {
     const char *lp = log_prefix ? log_prefix : "";
     FILE *in = fopen(flat_path, "rb");
-    if (!in) { fprintf(stderr, "%sCannot open %s\n", lp, flat_path); return false; }
+    if (!in)
+    {
+        fprintf(stderr, "%sCannot open %s\n", lp, flat_path);
+        return false;
+    }
 
     uint64_t magic, count;
     if (fread(&magic, 8, 1, in) != 1 || magic != K35U_PRIME_TABLE_MAGIC ||
@@ -1811,7 +1850,12 @@ bool kf_convert_prime_table_to_delta_u64(const char *flat_path, const char *delt
     }
 
     FILE *out = fopen(delta_path, "wb");
-    if (!out) { fprintf(stderr, "%sCannot create %s\n", lp, delta_path); fclose(in); return false; }
+    if (!out)
+    {
+        fprintf(stderr, "%sCannot create %s\n", lp, delta_path);
+        fclose(in);
+        return false;
+    }
 
     uint64_t dmagic = KF_DELTA_MAGIC_U64;
     uint32_t B = KF_DELTA_BLOCK, width = 8;
@@ -1828,7 +1872,11 @@ bool kf_convert_prime_table_to_delta_u64(const char *flat_path, const char *delt
     while (written < count)
     {
         size_t want = (size_t)((count - written < B) ? (count - written) : B);
-        if (fread(buf, 8, want, in) != want) { ok = false; break; }
+        if (fread(buf, 8, want, in) != want)
+        {
+            ok = false;
+            break;
+        }
         fwrite(&buf[0], 8, 1, out); // anchor
         for (size_t i = 1; i < want; i++)
         {
@@ -1836,24 +1884,30 @@ bool kf_convert_prime_table_to_delta_u64(const char *flat_path, const char *delt
             uint64_t gh = gap >> 1;
             if ((gap & 1ull) || gh > 255)
             {
-                fprintf(stderr, "%sgap/2=%" PRIu64 " at prime %" PRIu64
-                                " exceeds one byte — delta scheme invalid\n",
+                fprintf(stderr, "%sgap/2=%" PRIu64 " at prime %" PRIu64 " exceeds one byte — delta scheme invalid\n",
                         lp, gh, buf[i]);
                 ok = false;
                 break;
             }
             gb[i - 1] = (uint8_t)gh;
-            if ((unsigned)gh > maxgh) maxgh = (unsigned)gh;
+            if ((unsigned)gh > maxgh)
+                maxgh = (unsigned)gh;
         }
-        if (!ok) break;
-        if (want > 1) fwrite(gb, 1, want - 1, out);
+        if (!ok)
+            break;
+        if (want > 1)
+            fwrite(gb, 1, want - 1, out);
         written += want;
     }
     free(buf);
     free(gb);
     fclose(in);
     fclose(out);
-    if (!ok) { remove(delta_path); return false; }
+    if (!ok)
+    {
+        remove(delta_path);
+        return false;
+    }
     printf("%sConverted %s (%" PRIu64 " primes) -> %s  [1 byte/prime, max gap/2=%u, ~%.0f MB]\n",
            lp, flat_path, count, delta_path, maxgh,
            (double)(KF_DELTA_HDR + count) / 1e6);
@@ -1897,7 +1951,8 @@ bool kf_load_delta_slice(kf_delta_slice_t *out, const char *path,
 {
     memset(out, 0, sizeof(*out));
     FILE *f = fopen(path, "rb");
-    if (!f) return false;
+    if (!f)
+        return false;
 
     uint64_t magic, count;
     uint32_t B, width;
@@ -1927,7 +1982,8 @@ bool kf_load_delta_slice(kf_delta_slice_t *out, const char *path,
 
     // Block g_start possibly contains range_lo; block g_end possibly contains range_hi.
     uint64_t g_start = kf_delta_first_gt(f, width, B, n_blocks_total, range_lo);
-    if (g_start > 0) g_start--; // step back to the block that may hold range_lo
+    if (g_start > 0)
+        g_start--; // step back to the block that may hold range_lo
     uint64_t first_gt_hi = kf_delta_first_gt(f, width, B, n_blocks_total, range_hi);
 
     if (first_gt_hi == 0 || first_gt_hi <= g_start)
@@ -1951,7 +2007,11 @@ bool kf_load_delta_slice(kf_delta_slice_t *out, const char *path,
         bytes_len = (size_t)nb * full;
 
     uint8_t *bytes = (uint8_t *)malloc(bytes_len);
-    if (!bytes) { fclose(f); return false; }
+    if (!bytes)
+    {
+        fclose(f);
+        return false;
+    }
     fseeko(f, (off_t)KF_DELTA_HDR + (off_t)g_start * (off_t)full, SEEK_SET);
     if (fread(bytes, 1, bytes_len, f) != bytes_len)
     {
@@ -2033,8 +2093,18 @@ void kf_trial_divide_delta(const mpz_t n, const kf_delta_slice_t *slice,
             uint32_t len = (base + B <= total) ? B : (uint32_t)(total - base);
             const uint8_t *r = slice->bytes + (size_t)j * full;
             uint64_t cur;
-            if (width == 8) { memcpy(&cur, r, 8); r += 8; }
-            else { uint32_t c32; memcpy(&c32, r, 4); cur = c32; r += 4; }
+            if (width == 8)
+            {
+                memcpy(&cur, r, 8);
+                r += 8;
+            }
+            else
+            {
+                uint32_t c32;
+                memcpy(&c32, r, 4);
+                cur = c32;
+                r += 4;
+            }
             buf[0] = cur;
             for (uint32_t k = 1; k < len; k++)
             {
@@ -2083,27 +2153,46 @@ void kf_trial_divide_delta(const mpz_t n, const kf_delta_slice_t *slice,
             uint32_t len = (base + B <= total) ? B : (uint32_t)(total - base);
             const uint8_t *r = slice->bytes + (size_t)j * full;
             uint64_t cur;
-            if (width == 8) { memcpy(&cur, r, 8); r += 8; }
-            else { uint32_t c32; memcpy(&c32, r, 4); cur = c32; r += 4; }
+            if (width == 8)
+            {
+                memcpy(&cur, r, 8);
+                r += 8;
+            }
+            else
+            {
+                uint32_t c32;
+                memcpy(&c32, r, 4);
+                cur = c32;
+                r += 4;
+            }
             buf[0] = cur;
-            for (uint32_t k = 1; k < len; k++) { cur += (uint64_t)(*r++) << 1; buf[k] = cur; }
+            for (uint32_t k = 1; k < len; k++)
+            {
+                cur += (uint64_t)(*r++) << 1;
+                buf[k] = cur;
+            }
             for (uint32_t k = 0; k < len; k++)
             {
                 uint64_t p = buf[k];
-                if (p < lo || p > hi) continue;
-                if (thread_tested && t < nthreads_out) thread_tested[t]++;
-                if (mpz_tdiv_ui(cofactor, (unsigned long)p) != 0) continue;
+                if (p < lo || p > hi)
+                    continue;
+                if (thread_tested && t < nthreads_out)
+                    thread_tested[t]++;
+                if (mpz_tdiv_ui(cofactor, (unsigned long)p) != 0)
+                    continue;
                 int e = 0;
                 while (mpz_divisible_ui_p(cofactor, (unsigned long)p))
                 {
                     mpz_divexact_ui(cofactor, cofactor, (unsigned long)p);
                     e++;
                 }
-                if (mpz_cmp_ui(cofactor, 1) == 0) done = 1;
+                if (mpz_cmp_ui(cofactor, 1) == 0)
+                    done = 1;
                 if (e > 0)
                 {
                     kfl_append_ul(&tf[t], p, e);
-                    if (thread_found && t < nthreads_out) thread_found[t]++;
+                    if (thread_found && t < nthreads_out)
+                        thread_found[t]++;
                 }
             }
         }
@@ -2122,4 +2211,3 @@ void kf_trial_divide_delta(const mpz_t n, const kf_delta_slice_t *slice,
     }
     free(tf);
 }
-// Edit: 2026-07-30

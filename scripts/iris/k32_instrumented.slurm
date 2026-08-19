@@ -9,7 +9,6 @@
 #SBATCH --error=k32_instrumented_%j.err
 
 # ---------------------------------------------------------------------------
-# k32 instrumented run (advisor meeting 2026-07-29)
 #
 # Answers three questions with one job. k32 is deliberately the ONLY variant
 # here: its Amdahl ceiling for device reconstruction is 1.45x (recon is 30.8%
@@ -137,5 +136,3 @@ grep '^CBRTSTAT|.*warm|ALL|' "$LOG" 2>/dev/null | tail -20
 echo ""
 rm -rf "$BINDIR"
 echo "Done — full detail in $LOG"
-
-# Edit: 2026-07-30

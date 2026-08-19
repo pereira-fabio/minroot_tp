@@ -40,6 +40,7 @@ build/
 # Python virtual environment
 analysis/env/
 analysis/venv/
+tests/
 
 # ── Project-specific generated files ─────────────────────
 # Generated benchmark figures

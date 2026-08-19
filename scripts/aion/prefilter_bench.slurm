@@ -124,5 +124,3 @@ echo "         change with np."
 echo "PHASE 2: C_pf/C_s is now a MATCHED ratio. Pre-filtering is"
 echo "         profitable wherever that column stays below ~3."
 echo "============================================================"
-
-# Edit: 2026-07-27

@@ -8,12 +8,14 @@
 #include <time.h>
 
 /* Generate a prime of exactly `bits` bits with gcd(e, p-1) = 1. */
-static void gen_prime(mpz_t p, unsigned long e, int bits, gmp_randstate_t rng) {
+static void gen_prime(mpz_t p, unsigned long e, int bits, gmp_randstate_t rng)
+{
     mpz_t g, phi;
     mpz_init(g);
     mpz_init(phi);
 
-    while (1) {
+    while (1)
+    {
         mpz_urandomb(p, rng, (mp_bitcnt_t)bits);
         mpz_setbit(p, (mp_bitcnt_t)(bits - 1)); /* force correct bit length */
         mpz_nextprime(p, p);
@@ -33,7 +35,8 @@ static void gen_prime(mpz_t p, unsigned long e, int bits, gmp_randstate_t rng) {
 }
 
 int cmd_generate(int bits, unsigned long e, unsigned long T,
-                 const char *message, const char *outpath) {
+                 const char *message, const char *outpath)
+{
     gmp_randstate_t rng;
     gmp_randinit_default(rng);
     gmp_randseed_ui(rng, (unsigned long)time(NULL) ^ (unsigned long)clock());
@@ -61,11 +64,15 @@ int cmd_generate(int bits, unsigned long e, unsigned long T,
      *    So choose the end state and walk back to the start.
      */
     mpz_t x_T, y_T, xc, yc, x_prev, y_prev;
-    mpz_init(x_T); mpz_init(y_T);
-    mpz_init(xc);  mpz_init(yc);
-    mpz_init(x_prev); mpz_init(y_prev);
+    mpz_init(x_T);
+    mpz_init(y_T);
+    mpz_init(xc);
+    mpz_init(yc);
+    mpz_init(x_prev);
+    mpz_init(y_prev);
 
-    do {
+    do
+    {
         mpz_urandomm(x_T, rng, pz.p);
     } while (mpz_cmp_ui(x_T, 0) == 0);
     mpz_urandomm(y_T, rng, pz.p);
@@ -84,10 +91,11 @@ int cmd_generate(int bits, unsigned long e, unsigned long T,
     printf("Walking %lu MinRoot rounds backwards (e-th powers, cheap) ...\n", T);
     mpz_set(xc, x_T);
     mpz_set(yc, y_T);
-    for (unsigned long i = T; i-- > 0; ) {
-        mpz_sub_ui(x_prev, yc, i);              /* x_i = y_{i+1} - i        */
+    for (unsigned long i = T; i-- > 0;)
+    {
+        mpz_sub_ui(x_prev, yc, i); /* x_i = y_{i+1} - i        */
         mpz_mod(x_prev, x_prev, pz.p);
-        mpz_powm_ui(y_prev, xc, e, pz.p);       /* y_i = x_{i+1}^e - x_i    */
+        mpz_powm_ui(y_prev, xc, e, pz.p); /* y_i = x_{i+1}^e - x_i    */
         mpz_sub(y_prev, y_prev, x_prev);
         mpz_mod(y_prev, y_prev, pz.p);
         mpz_set(xc, x_prev);
@@ -102,37 +110,42 @@ int cmd_generate(int bits, unsigned long e, unsigned long T,
 
     /* 5. Random IV from /dev/urandom */
     FILE *ur = fopen("/dev/urandom", "rb");
-    if (!ur || fread(pz.iv, 1, 16, ur) != 16) {
+    if (!ur || fread(pz.iv, 1, 16, ur) != 16)
+    {
         fprintf(stderr, "Error: could not read /dev/urandom\n");
-        if (ur) fclose(ur);
+        if (ur)
+            fclose(ur);
         return 1;
     }
     fclose(ur);
 
     /* 6. Encrypt message */
     size_t msg_len = strlen(message);
-    pz.ciphertext  = aes256_encrypt(
+    pz.ciphertext = aes256_encrypt(
         (const unsigned char *)message, msg_len, key, pz.iv, &pz.ciphertext_len);
 
     /* 7. Write puzzle file */
-    if (puzzle_write(&pz, outpath) != 0) {
+    if (puzzle_write(&pz, outpath) != 0)
+    {
         fprintf(stderr, "Error: could not write to %s\n", outpath);
         return 1;
     }
 
     printf("\nPuzzle written to: %s\n", outpath);
-    printf("  Prime bits   : %d\n",   bits);
-    printf("  Exponent e   : %lu\n",  e);
-    printf("  Iterations T : %lu\n",  T);
+    printf("  Prime bits   : %d\n", bits);
+    printf("  Exponent e   : %lu\n", e);
+    printf("  Iterations T : %lu\n", T);
     printf("  Message len  : %zu bytes\n", msg_len);
-    printf("\nSolve sequentially : minroot-timelock solve %s\n",  outpath);
+    printf("\nSolve sequentially : minroot-timelock solve %s\n", outpath);
     printf("Solve via attack   : minroot-timelock attack %s\n", outpath);
 
-    mpz_clear(x_T); mpz_clear(y_T); mpz_clear(xc); mpz_clear(yc);
-    mpz_clear(x_prev); mpz_clear(y_prev);
+    mpz_clear(x_T);
+    mpz_clear(y_T);
+    mpz_clear(xc);
+    mpz_clear(yc);
+    mpz_clear(x_prev);
+    mpz_clear(y_prev);
     puzzle_free(&pz);
     gmp_randclear(rng);
     return 0;
 }
-
-// Edit: 2026-07-28

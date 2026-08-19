@@ -155,26 +155,26 @@ void kf_trial_divide_table_u64(const mpz_t n,
 
 #define KF_DELTA_MAGIC_U32 0x4B3332444C544131ULL // "K32DLTA1"
 #define KF_DELTA_MAGIC_U64 0x4B3335444C544131ULL // "K35DLTA1"
-#define KF_DELTA_BLOCK 1024                       // primes per block (0.4% overhead)
-#define KF_DELTA_HDR 24                           // header bytes
+#define KF_DELTA_BLOCK 1024                      // primes per block (0.4% overhead)
+#define KF_DELTA_HDR 24                          // header bytes
 
 // A loaded (sub-)range of a delta table, ready for trial division.
 typedef struct
 {
-    uint8_t *bytes;             // owned: concatenated blocks for the loaded slice
-    uint64_t total_count;       // primes in the whole file (for last-block length)
-    uint64_t first_block_index; // global index of the first block in `bytes`
-    uint32_t n_blocks;          // number of blocks held in `bytes`
-    uint32_t block_size;        // primes per full block (B)
-    int width;                  // anchor width in bytes: 4 (k32) or 8 (k35 upper)
-    uint64_t range_lo, range_hi;// inclusive prime-value bounds this slice serves
+    uint8_t *bytes;              // owned: concatenated blocks for the loaded slice
+    uint64_t total_count;        // primes in the whole file (for last-block length)
+    uint64_t first_block_index;  // global index of the first block in `bytes`
+    uint32_t n_blocks;           // number of blocks held in `bytes`
+    uint32_t block_size;         // primes per full block (B)
+    int width;                   // anchor width in bytes: 4 (k32) or 8 (k35 upper)
+    uint64_t range_lo, range_hi; // inclusive prime-value bounds this slice serves
 } kf_delta_slice_t;
 
 // One-time conversion: flat prime table -> delta table. Returns false (and
 // removes the output) on I/O error or if any gap/2 exceeds 255 (which would
 // break the 1-byte scheme — a hard correctness guard, never expected to fire).
 bool kf_convert_prime_table_to_delta(const char *flat_path, const char *delta_path,
-                                     const char *log_prefix);     // u32 (k32)
+                                     const char *log_prefix); // u32 (k32)
 bool kf_convert_prime_table_to_delta_u64(const char *flat_path, const char *delta_path,
                                          const char *log_prefix); // u64 (k35 upper)
 
@@ -239,9 +239,6 @@ bool kf_cbrt_cache_load(cbrt_cache_t *cache, const char *path);
 bool kf_cbrt_cache_save(const cbrt_cache_t *cache, const char *path);
 
 // ---------------------------------------------------------------------------
-// cbrt cache instrumentation (advisor request 2026-07-29: "how often is the
-// cached cbrt read, per core?").
-//
 // Every lookup goes through kf_cbrt_cache_find, which is a LINEAR scan, so a
 // lookup costs O(cache->count) comparisons. Counting probes as well as hits
 // exposes that cost: a challenge with n distinct prime factors performs ~n
@@ -285,8 +282,8 @@ typedef struct
 {
     double parallel_ms; // phase 1: per-factor cbrt across threads
     double serial_ms;   // phase 2: serial product mod M + cache append
-    long   factors;     // total factors processed
-    long   calls;       // number of reconstruction calls accumulated
+    long factors;       // total factors processed
+    long calls;         // number of reconstruction calls accumulated
 } kf_recon_prof_t;
 
 void kf_recon_prof_reset(void);
@@ -396,4 +393,3 @@ bool kf_load_cbrt_table_k16(mpz_t *cbrt_table, int prime_count, const char *file
 void kf_compute_cube_root_from_factors_k16(mpz_t result, const int *exponents,
                                            const mpz_t *cbrt_table, int prime_count,
                                            const mpz_t modulo);
-// Edit: 2026-07-30

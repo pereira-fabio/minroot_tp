@@ -2,7 +2,7 @@
 # Makefile — GPU build for alg7_cuda (Algorithm 7 inverted sieve on CUDA)
 #
 # IRIS GPU cluster — module setup (run once per shell session, before `make`):
-#   module load system/CUDA/12.6.0   # confirmed on IRIS 2026-06-25
+#   module load system/CUDA/12.6.0   
 #   # Note: GCC/GMP module names on IRIS may differ from AION — confirm with
 #   # `module spider GCC` / `module spider GMP` if the link step fails.
 #

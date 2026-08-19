@@ -121,4 +121,3 @@ done
 echo "=== done ==="
 echo "Analyse with:  python3 analysis/thesis_figures.py content/figures/"
 
-# Edit: 2026-08-12
