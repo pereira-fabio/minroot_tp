@@ -183,9 +183,7 @@ Prerequisites, install commands per platform and disk/RAM needs are in
 [REQUIREMENTS.md](REQUIREMENTS.md). In short: an MPI compiler, GMP and OpenMP
 for the CPU solvers; CUDA only for the GPU ones.
 
-To check a machine end to end, `make test` builds everything, runs every solver
-once and reports which produced a correct root — CPU and GPU, e=3 and e=5. It is
-the test for this project; run it after any change.
+To check a machine end to end, run `make test` — see [Testing](#testing) below.
 
 ### CPU (AION)
 
@@ -310,6 +308,56 @@ The time-lock demo is `tools/timelock/timelock_demo.slurm`.
 - **`alg3` / `alg4`** read `data/challenges/alg3` and `data/challenges/alg4`.
 - **Delta tables** are built with the `delta_convert` tool, not by a solver flag:
   `./delta_convert data/k32_primes.bin`, or `--u64` for the k35 upper table.
+
+---
+
+## Testing
+
+```bash
+make test
+```
+
+Two minutes, no cluster. Builds what is missing, generates small challenges,
+runs every solver once and prints a pass/fail table — using the GPU when `nvcc`
+and a card are present, and skipping that half cleanly when they are not.
+
+```
+  PASS cpu k16   sieve    correctness gate passed
+  PASS cpu alg3  sieve    correctness gate passed
+  PASS cpu k32   e5       correctness gate passed
+  PASS gpu alg4  sieve    correctness gate passed
+  PASS gpu alg3  q0       warm cache; recon 0.0536 vs k32 0.0458 ms, powm 0.309 ms
+  SKIP cpu k35   sieve    1.4 B primes per run — use --slow
+  ...
+  15 passed, 0 failed, 4 skipped
+```
+
+Fifteen checks run by default, four more behind `--slow`: the correctness gate
+on k16, k32, Algorithm 3 and Algorithm 4 across both CPU and GPU, the same at
+exponent 5 against moduli where `gcd(5, M-1) = 1`, the sequential baseline, and
+that `cbrt(q0)` stays out of the timed region for the two cofactor algorithms.
+
+Two of those are worth knowing about.
+
+**The correctness gate is printed, not enforced.** `verify_eth_root` prints
+`FAILURE` and continues — exit code 0, JSON still written. The test therefore
+classifies on output, not exit status, so a wrong root fails even when the
+solver believed it succeeded.
+
+**The cofactor rows measure rather than look for a log line.** `cbrt(q0)` is a
+full-width modular exponentiation whose cost is set by the modulus size, not by
+q0, and it must stay outside the timed region. Algorithm 3 and k32 reconstruct a
+comparable set of small primes and differ in exactly that fold, so the gap
+between their `recon_ms` is the cofactor's cost — weighed against one measured
+`powm` at the same size, which needs no hardcoded threshold and holds on any
+hardware.
+
+`--slow` adds k35 and Algorithm 7, both slow regardless of challenge size
+because the sieve range follows the smoothness bound rather than the modulus.
+`./tools/smoke_test.sh --help` lists the rest.
+
+Verified on an RTX 2080 Super (sm_75) with GCC 15.2.0 and MPICH 4.3.2, and on
+the AION and IRIS clusters with GCC 13.2.0 and Open MPI 4.1.6.
 
 ---
 

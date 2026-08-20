@@ -255,20 +255,50 @@ its own right, not an oversight.
 make test
 ```
 
-Builds what is missing, generates small challenges, runs every solver once and
-checks each result against the correctness gate, then prints a pass/fail table.
-It uses the GPU too if `nvcc` and a card are present, and skips that half
-cleanly if not, and it covers both exponents — e=5 needs its own moduli, where
-gcd(5, M-1) = 1.
+Builds what is missing, generates small challenges, runs every solver once, and
+prints a pass/fail table. Roughly two minutes; it needs no cluster, and it uses
+the GPU when `nvcc` and a card are present and skips that half cleanly when they
+are not.
 
-For the options, call the script directly: `./tools/smoke_test.sh --help`.
-`--slow` adds k35 and alg7, which are slow for a reason the script explains;
-`--cpu` / `--gpu` / `--size N` narrow it down.
+**What it checks — 15 by default, 4 more behind `--slow`:**
 
-A failing row shows why — a wrong root, a signal, a missing file — rather than
-just a non-zero exit.
+| | |
+|---|---|
+| Correctness, CPU | k16, k32, Algorithm 3, Algorithm 4 — every computed root must satisfy `result^e mod M == challenge` |
+| Correctness, GPU | the same four |
+| Exponent 5 | k32 and Algorithm 3 on both halves, against the `_e5` moduli where `gcd(5, M-1) = 1` |
+| Baseline | the sequential `mpz_powm` measurement every speedup divides by |
+| Cofactor precompute | that `cbrt(q0)` is outside the timed region for Algorithms 3 and 4 (see below) |
+| `--slow` | k35 and Algorithm 7, on both halves |
 
-### Or by hand
+`--slow` adds k35 and Algorithm 7; the script explains why those are slow
+regardless of challenge size. `--cpu`, `--gpu` and `--size N` narrow it down;
+`./tools/smoke_test.sh --help` lists everything.
+
+A failing row says why — a wrong root, a signal number, a missing file — rather
+than only a non-zero exit. Two of the rows deserve explanation:
+
+**The correctness gate is printed, not enforced.** `verify_eth_root` prints
+`FAILURE` and carries on: the exit code stays 0 and the JSON is still written.
+So the test classifies on output rather than exit status, and a wrong root fails
+even though the solver thought it succeeded.
+
+**The cofactor rows measure, they do not just look for a log line.**
+`cbrt(q0)` is a full-width modular exponentiation whose cost is set by the
+modulus size, not by q0, and Algorithms 3 and 4 must keep it out of the timed
+region. Algorithm 3 and k32 reconstruct a comparable set of small primes and
+differ in exactly that fold, so the gap between their `recon_ms` is what the
+cofactor costs — compared against one measured `powm` at the same size, which
+means no hardcoded threshold and the check stays valid on any hardware:
+
+```
+PASS gpu alg3  q0    warm cache; recon 0.0536 vs k32 0.0458 ms, powm 0.309 ms
+```
+
+0.0078 ms of cofactor against a 0.309 ms exponentiation. Left in the timed
+region it would read ~0.355 ms.
+
+### Or by hand### Or by hand
 
 No cluster, no GPU, about a minute:
 
