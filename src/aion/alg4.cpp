@@ -878,7 +878,11 @@ int main(int argc, char *argv[])
     const char *challenge_file = NULL;
     const char *modulo_file = NULL;
     const char *data_dir = "data/challenges/alg4";
-    const char *primes_file = "k32_primes.bin";
+    // Must match ksc_ensure_k32_primes and the CUDA solvers, which both use
+    // data/k32_primes.bin. Defaulting to the repo root here made
+    // `--precompute` write a table that `--method table` then ignored and
+    // regenerated, costing a second 813 MB copy.
+    const char *primes_file = "data/k32_primes.bin";
     const char *json_file = NULL;
     const char *modulo_suffix = "";
     const char *cbrt_dir = KSC_CBRT_DIR;
