@@ -81,6 +81,26 @@ check() {  # check <name> <command...>
     fi
 }
 
+# The powm method is the sequential baseline: it times mpz_powm and reconstructs
+# nothing, so it prints no correctness line and `check` cannot be used on it.
+# What matters is that it produced a positive measurement -- every speedup in
+# this project is that number divided by an attack time.
+check_baseline() {  # check_baseline <name> <command...>
+    local name="$1"; shift
+    local out rc ms
+    out=$("$@" 2>&1); rc=$?
+    ms=$(echo "$out" | sed -n 's/.*powm (sequential baseline):[^=]*= *\([0-9.][0-9.]*\) ms.*/\1/p' | head -1)
+    if [ -n "$ms" ] && awk -v m="$ms" 'BEGIN{exit !(m+0>0)}'; then
+        record PASS "$name" "baseline ${ms} ms"
+    elif [ $rc -ne 0 ]; then
+        local why="exit $rc"
+        [ $rc -gt 128 ] && why="$why (signal $((rc-128)))"
+        record FAIL "$name" "$why"
+    else
+        record FAIL "$name" "no baseline measurement in output"
+    fi
+}
+
 echo "============================================================"
 echo " minroot_tp smoke test — ${SIZE}-bit, ${NCH} challenges"
 echo "============================================================"
@@ -128,7 +148,7 @@ if [ "$RUN_CPU" = 1 ]; then
     check "cpu k32   sieve" M ./alg2_k32 $K32/challenge_0_32_$SIZE.txt   $K32/modulo_32_$SIZE.txt   --method sieve
     check "cpu alg3  sieve" M ./alg3     $A3/challenge_0_alg3_$SIZE.txt  $A3/modulo_alg3_$SIZE.txt  --method sieve
     check "cpu alg4  sieve" M ./alg4     $A4/challenge_0_alg4_$SIZE.txt  $A4/modulo_alg4_$SIZE.txt  --method sieve
-    check "cpu k16   powm"  M ./alg2_k16 $K16/challenge_0_16_$SIZE.txt   $K16/modulo_16_$SIZE.txt   --method powm
+    check_baseline "cpu k16  powm" M ./alg2_k16 $K16/challenge_0_16_$SIZE.txt $K16/modulo_16_$SIZE.txt --method powm
     if [ "$SLOW" = 1 ]; then
         check "cpu k35   sieve" M ./alg2_k35 $K35/challenge_0_35_$SIZE.txt  $K35/modulo_35_$SIZE.txt  --method sieve
         check "cpu alg7  sieve" M ./alg7     $A3/challenge_0_alg3_$SIZE.txt $A3/modulo_alg3_$SIZE.txt --method sieve --R 1048576
