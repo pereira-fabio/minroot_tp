@@ -22,7 +22,7 @@
 #include <vector>
 
 // Primes in [lo, hi] as uint32_t. Caller frees the returned array.
-static uint32_t *sieve_primes_u32(uint64_t lo, uint64_t hi, int64_t *out_count)
+static inline uint32_t *sieve_primes_u32(uint64_t lo, uint64_t hi, int64_t *out_count)
 {
     int n_small = 0;
     unsigned long *small = generate_primes_up_to((uint64_t)(sqrt((double)hi)) + 2, &n_small);
@@ -73,7 +73,7 @@ static uint32_t *sieve_primes_u32(uint64_t lo, uint64_t hi, int64_t *out_count)
 
 // Primes in [lo, hi] as uint64_t, for ranges above 2^32 (k35 upper table).
 // Caller frees the returned array.
-static uint64_t *sieve_primes_u64_range(uint64_t lo, uint64_t hi, int64_t *out_count)
+static inline uint64_t *sieve_primes_u64_range(uint64_t lo, uint64_t hi, int64_t *out_count)
 {
     int n_small = 0;
     unsigned long *small = generate_primes_up_to((uint64_t)(sqrt((double)hi)) + 2, &n_small);

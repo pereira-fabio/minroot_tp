@@ -415,7 +415,11 @@ int main(int argc, char **argv)
     cbrt_cache_t cbrt_cache;
     kf_cbrt_cache_init(&cbrt_cache);
     bool cache_dirty = false;
-    char cache_path[512];
+    // Room for a 512-byte modulo path plus the ".cbrt_algN" suffix. Sized to
+    // 512 a long path truncates, and two moduli differing only past the cut
+    // would share one cache file. Matches KSC_CBRT_PATH_MAX on the CPU side,
+    // which cannot be included here (it lives in the MPI header).
+    char cache_path[600];
     snprintf(cache_path, sizeof(cache_path), "%s.cbrt_alg3", modulo_file);
     kf_cbrt_cache_load(&cbrt_cache, cache_path);
 
