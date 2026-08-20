@@ -13,6 +13,15 @@ make experiments                # CPU: alg_crt, cpu_scale_sim, delta_convert, pr
 make gpu-experiments            # GPU: alg_crt_cuda, alg2_ksweep_cuda, gpu_scale_sim_cuda
 ```
 
+Each directory holds its own SLURM job script, so an experiment is code, job and
+write-up in one place. Submit from the repository root:
+
+```bash
+sbatch experiments/ksweep/ksweep.slurm
+```
+
+`scripts/` holds only the sweeps that reproduce the thesis results.
+
 ---
 
 ## `delta/` — delta-encoded prime table
@@ -120,3 +129,34 @@ called by **no solver** — Algorithm 4 carries its own inline pre-filter
 (`ALG4_B0`, `b0_residue_bits`), and there is no `--prefilter` flag. This code
 exists because it produced the thesis figures; wiring it into the bench loop was
 never done.
+
+---
+
+## `reconstruction/` — could a device port of reconstruction pay?
+
+**Question.** k16 factors ~43,000x faster on a GPU than the sequential baseline
+and still only reaches 11.7x end to end, because reconstruction runs on the host.
+Would writing multi-precision arithmetic for the device fix that?
+
+**Method.** `k32_instrumented.slurm` runs one job that answers three things at
+once, on k32 only — deliberately, because k32 has the *cheapest* recon share
+(30.8% of total at 24576 bits, an Amdahl ceiling of 1.45x), so a negative answer
+there generalises downward to every variant with a cheaper sieve and thus a
+higher recon share.
+
+| output | what it measures |
+|---|---|
+| `CBRTSTAT\|` | cbrt cache hits/misses/probes per thread |
+| `RECONPROF\|` | reconstruction split into parallel (per-factor cbrt) and serial (product mod M) |
+| `XFERPROF\|` | H2D/D2H transfer cost, which the `factor_ms` event bracket excludes |
+
+**Result: no.** In the warm steady state the cache hits ~100%, so reconstruction
+performs no exponentiation at all — it is cache lookups plus a serial product,
+and a GPU accelerates neither. Whatever sits in the serial column cannot be
+parallelised on a device at any width. The instrumentation itself lives in
+`src/common/factorization.cpp` and `src/common/gpu/gpu_common.h`, compiled into
+every solver; this directory holds only the job that exercises it.
+
+The cache lookup is also where the O(n^2) shows up: `kf_cbrt_cache_find` is a
+linear scan, so ~802 factors against an ~802-entry cache is ~322,000 comparisons
+per reconstruction.

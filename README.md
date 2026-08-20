@@ -50,14 +50,18 @@ experiments/                 research code that is NOT part of the attack
   scale_sim/                 strong-scaling simulators (CPU and GPU)
   crt/                       CRT exponentiation (negative result)
   prefilter/                 B0 threshold pre-filter cost
+  reconstruction/            Amdahl analysis: would a device port pay? (no)
+                             each holds its own SLURM job script
 
 tools/
   challenges.c               challenge generator
   gen_prime_table.c          prime table for an arbitrary bound 2^k
-  timelock/                  standalone time-lock puzzle demo
+  timelock/                  standalone time-lock puzzle demo, with its jobs
 
-scripts/aion/                SLURM jobs for the CPU cluster
-scripts/iris/                SLURM jobs for the GPU cluster
+scripts/                     the sweeps that reproduce the results, nothing else
+  aion/                        all_cpu, all_cpu_e5, challenge_gen, challenge_gen_e5
+  iris/                        all_gpu, all_gpu_l40
+
 analysis/                    Python plotting and analysis
 
 Makefile                     all builds, CPU and CUDA
@@ -273,6 +277,10 @@ sbatch scripts/aion/all_cpu.slurm      # every CPU variant, N1..N64
 sbatch scripts/iris/all_gpu.slurm      # every GPU variant, V100
 sbatch scripts/iris/all_gpu_l40.slurm  # L40 partition
 ```
+
+Experiment jobs live with their experiment, not here — e.g.
+`sbatch experiments/ksweep/ksweep.slurm`. See `experiments/README.md`.
+The time-lock demo is `tools/timelock/timelock_demo.slurm`.
 
 ### Per-algorithm notes
 

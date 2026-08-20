@@ -33,7 +33,7 @@
 # modulus needs a 192-bit device mulmod for the blinding step; attack_cuda.cu
 # refuses such a puzzle rather than truncating it. See its header.
 #
-# Submit with:  sbatch scripts/iris/timelock_gpu.slurm
+# Submit with:  sbatch tools/timelock/timelock_gpu.slurm
 # Output lands in: data/timelock/gpu_<jobid>/
 # ---------------------------------------------------------------------------
 
@@ -90,7 +90,7 @@ PUZZLE="$OUT/puzzle_64b.mrt"
 MESSAGE="MinRoot time-lock: GPU batched search"
 
 # ---------------------------------------------------------------------------
-# Puzzle — same configuration as scripts/aion/timelock_demo.slurm Config A,
+# Puzzle — same configuration as tools/timelock/timelock_demo.slurm Config A,
 # so the CPU numbers there are directly comparable.
 #   64-bit p, T=5000, e=5, B=65536  ->  u = 4, rho(4) ~ 1/200
 # ---------------------------------------------------------------------------

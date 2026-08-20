@@ -205,5 +205,5 @@ done
 echo "========================================"
 echo "DONE — analyse with:"
 echo "  python3 analysis/cache_residency.py --measured $OUTDIR"
-echo "  (N-GPU scaling is a separate job: scripts/iris/gpu_scale_sim.slurm)"
+echo "  (N-GPU scaling is a separate job: experiments/scale_sim/gpu_scale_sim.slurm)"
 echo "========================================"

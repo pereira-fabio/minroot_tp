@@ -20,7 +20,7 @@
 # Reuses the alg3 challenge/modulo files (CRT works for any challenge). Copy them
 # from AION first (same as all_gpu.slurm prerequisites).
 #
-#   Override the alpha list:  sbatch --export=ALL,ALPHAS="4 16" scripts/iris/alg_crt_gpu.slurm
+#   Override the alpha list:  sbatch --export=ALL,ALPHAS="4 16" experiments/crt/alg_crt_gpu.slurm
 #   WALL TIME: runtime ~x(#alphas); large moduli at small alpha are the slow
 #   corner (~|M|/log2(alpha) steps, each a host reconstruction). Trim ALPHAS /
 #   N_CHALLENGES / SIZES or raise --time if it times out.

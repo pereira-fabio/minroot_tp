@@ -37,7 +37,7 @@ Sizes and residency are arithmetic and need no cluster. Whether residency makes
 the sieve FASTER does not follow from arithmetic and is the part worth measuring:
 sub6:delta already showed that making k32's table L2-resident by delta encoding
 bought only 1.10x, so residency is necessary for the k16-style collapse but not
-sufficient. Pass --measured to overlay real timings from scripts/iris/ksweep.slurm
+sufficient. Pass --measured to overlay real timings from experiments/ksweep/ksweep.slurm
 and see whether the predicted boundary is visible in ns-per-prime.
 
 Usage:
@@ -197,7 +197,7 @@ def main():
 
     if not a.measured:
         print()
-        print("Everything above is arithmetic. Run scripts/iris/ksweep.slurm and re-run with")
+        print("Everything above is arithmetic. Run experiments/ksweep/ksweep.slurm and re-run with")
         print("  --measured results/results/iris/ksweep/G4   to test it against real timings.")
         return
 

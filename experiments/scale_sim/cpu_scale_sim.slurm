@@ -24,8 +24,8 @@
 # correctness gate applies (see the .cpp header). Run the real solver for that.
 #
 # Usage:
-#   sbatch scripts/aion/cpu_scale_sim.slurm
-#   sbatch --export=ALL,VARIANTS="k35",SIZES="24576" scripts/aion/cpu_scale_sim.slurm
+#   sbatch experiments/scale_sim/cpu_scale_sim.slurm
+#   sbatch --export=ALL,VARIANTS="k35",SIZES="24576" experiments/scale_sim/cpu_scale_sim.slurm
 # ---------------------------------------------------------------------------
 
 module load compiler/GCC/13.2.0
@@ -54,7 +54,7 @@ REPS=${REPS:-3}
 # k35 run (the first version of this script) asks for challenge_0_35_* inside
 # the k32 directory, which does not exist.
 # The repo is inconsistent about where prime tables live -- alg2_k32.cpp defaults
-# to "k32_primes.bin" (submit dir) while scripts/iris/ksweep.slurm uses
+# to "k32_primes.bin" (submit dir) while experiments/ksweep/ksweep.slurm uses
 # "data/k32_primes.bin" -- so resolve it rather than assume, and say so if it is
 # missing instead of launching sixteen jobs that each discover it separately.
 find_table () {

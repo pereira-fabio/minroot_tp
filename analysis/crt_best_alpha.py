@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """crt_best_alpha.py — pick the best per-step exponent alpha for the CRT solver.
 
-Reads the alg_crt alpha-sweep JSONs produced by scripts/aion/alg_crt.slurm
+Reads the alg_crt alpha-sweep JSONs produced by experiments/crt/alg_crt.slurm
 (files named  alg_crt_a<ALPHA>_crt_<JOBID>_<size>.json)  and, for each
 (modulus size, node count), reports the alpha with the highest speedup_total.
 
