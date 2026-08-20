@@ -74,6 +74,15 @@ void ksc_print_challenge_header(const mpz_t challenge, const mpz_t modulo,
 // Rank 0 reads files; all ranks receive via Bcast.
 // Returns true on success, calls MPI_Abort + returns false on failure.
 // ---------------------------------------------------------------------------
+// Does an input file exist? Rank 0 checks and the answer is broadcast, so every
+// rank takes the same branch -- a collective decision, since a rank that carried
+// on alone would hang the others at the next barrier.
+//
+// Used by --all to skip a size whose files are absent. Without it a missing
+// input reaches ksc_broadcast_challenge_modulo, which calls MPI_Abort and takes
+// the whole sweep down on the first gap.
+bool ksc_input_exists(const char *path, int rank);
+
 bool ksc_broadcast_challenge_modulo(
     mpz_t challenge, mpz_t modulo,
     const char *challenge_file, const char *modulo_file,

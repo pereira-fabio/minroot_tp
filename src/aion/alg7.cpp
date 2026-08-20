@@ -771,6 +771,12 @@ int main(int argc, char *argv[])
             char cf[512], mf[512], jf[600];
             const char *jf_ptr = NULL;
             snprintf(mf, sizeof(mf), "%s/modulo_alg3_%s.txt", data_dir, sizes[s]);
+            if (!ksc_input_exists(mf, rank))
+            {
+                if (rank == 0)
+                    printf("  [SKIP] size %s: no modulus at %s\n", sizes[s], mf);
+                continue;
+            }
             if (json_file)
             {
                 snprintf(jf, sizeof(jf), "%s_%s.json", json_file, sizes[s]);
@@ -779,6 +785,12 @@ int main(int argc, char *argv[])
             if (n_challenges == 1)
             {
                 snprintf(cf, sizeof(cf), "%s/challenge_0_alg3_%s.txt", data_dir, sizes[s]);
+                if (!ksc_input_exists(cf, rank))
+                {
+                    if (rank == 0)
+                        printf("  [SKIP] size %s: no challenge at %s\n", sizes[s], cf);
+                    continue;
+                }
                 solve_one(rank, nranks, cf, mf,
                           sp_count, sp, my_lo, my_hi, method, exponent, R, cbrt_dir, jf_ptr,
                           skip_powm);

@@ -80,6 +80,22 @@ void ksc_print_challenge_header(const mpz_t challenge, const mpz_t modulo,
 // ksc_broadcast_challenge_modulo
 // ---------------------------------------------------------------------------
 
+bool ksc_input_exists(const char *path, int rank)
+{
+    int exists = 0;
+    if (rank == 0)
+    {
+        FILE *f = fopen(path, "rb");
+        if (f)
+        {
+            fclose(f);
+            exists = 1;
+        }
+    }
+    MPI_Bcast(&exists, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    return exists != 0;
+}
+
 bool ksc_broadcast_challenge_modulo(
     mpz_t challenge, mpz_t modulo,
     const char *challenge_file, const char *modulo_file,

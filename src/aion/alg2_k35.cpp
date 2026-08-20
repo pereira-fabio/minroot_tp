@@ -710,6 +710,12 @@ int main(int argc, char *argv[])
         {
             char cf[512], mf[512], jf[768];
             snprintf(mf, sizeof(mf), "%s/modulo_35_%s%s.txt", data_dir, sizes[s], modulo_suffix);
+            if (!ksc_input_exists(mf, rank))
+            {
+                if (rank == 0)
+                    printf("  [SKIP] size %s: no modulus at %s\n", sizes[s], mf);
+                continue;
+            }
             const char *jf_ptr = NULL;
             if (json_file)
             {
@@ -719,6 +725,12 @@ int main(int argc, char *argv[])
             if (n_challenges == 1)
             {
                 snprintf(cf, sizeof(cf), "%s/challenge_0_35_%s.txt", data_dir, sizes[s]);
+                if (!ksc_input_exists(cf, rank))
+                {
+                    if (rank == 0)
+                        printf("  [SKIP] size %s: no challenge at %s\n", sizes[s], cf);
+                    continue;
+                }
                 solve_one(rank, nranks, cf, mf,
                           sp_count, sp, my_lo, my_hi, method, k35u_p2, exponent,
                           jf_ptr, cbrt_dir, skip_powm);
