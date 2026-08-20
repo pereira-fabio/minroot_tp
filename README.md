@@ -60,7 +60,7 @@ tools/
 
 scripts/                     the sweeps that reproduce the results, nothing else
   aion/                        all_cpu, all_cpu_e5, challenge_gen, challenge_gen_e5
-  iris/                        all_gpu, all_gpu_l40
+  iris/                        all_gpu, all_gpu_e5, all_gpu_l40, all_gpu_l40_e5
 
 analysis/                    Python plotting and analysis
 
@@ -273,10 +273,16 @@ sequential baseline the speedups are divided by.
 ### The whole study
 
 ```bash
-sbatch scripts/aion/all_cpu.slurm      # every CPU variant, N1..N64
-sbatch scripts/iris/all_gpu.slurm      # every GPU variant, V100
-sbatch scripts/iris/all_gpu_l40.slurm  # L40 partition
+sbatch scripts/aion/all_cpu.slurm         # every CPU variant, N1..N64, e=3
+sbatch scripts/aion/all_cpu_e5.slurm      # the same at e=5
+sbatch scripts/iris/all_gpu.slurm         # every GPU variant, V100, e=3
+sbatch scripts/iris/all_gpu_e5.slurm      # the same at e=5
+sbatch scripts/iris/all_gpu_l40.slurm     # L40 partition, e=3
+sbatch scripts/iris/all_gpu_l40_e5.slurm  # L40 partition, e=5
 ```
+
+Each sweep is one exponent, so e=3 and e=5 submit and fail independently.
+Algorithm 7 runs at e=3 only, on both clusters.
 
 Experiment jobs live with their experiment, not here — e.g.
 `sbatch experiments/ksweep/ksweep.slurm`. See `experiments/README.md`.

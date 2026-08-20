@@ -15,6 +15,10 @@
 # ---------------------------------------------------------------------------
 # IRIS GPU — all CUDA prototypes, all canonical sizes, multi-challenge
 #
+# EXPONENT 3. The e=5 companion is all_gpu_e5.slurm, split out so the two
+# sweeps submit and fail independently, matching the AION pair
+# (scripts/aion/all_cpu.slurm and all_cpu_e5.slurm).
+#
 # Each binary is called ONCE per (algorithm, method, size, exponent).
 # It loads challenge_0 (cold run) then challenges 1..N-1 (warm runs)
 # internally and writes ONE JSON — matching the CPU benchmark structure.
@@ -70,6 +74,9 @@ nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv,noheader
 # SLURM sets SLURM_GPUS_ON_NODE from --gres=gpu:N (header or sbatch command-line override).
 # Using it directly is simpler and faster than spawning nvidia-smi.
 N_GPUS=${SLURM_GPUS_ON_NODE:-1}
+
+# Exponent for this sweep. The e=5 companion is all_gpu_e5.slurm.
+EXPONENT=3
 
 # Results go into per-algorithm subdirs (data/results/iris/alg2/G1, alg3/G2 ...)
 IRIS_BASE="data/results/iris"
@@ -131,7 +138,7 @@ section() { echo ""; echo "========================================"; echo "$1";
 section "ALG7 CUDA — all sizes, $N_CHALLENGES challenges, $N_GPUS GPU(s)"
 
 if [ -x "$BINDIR/alg7_cuda" ]; then
-  for EXP in 3 5; do
+  for EXP in $EXPONENT; do
     for SIZE in $SIZES; do
       echo "--- alg7 e=${EXP} size=${SIZE}: powm ---"
       "$BINDIR/alg7_cuda" \
@@ -163,7 +170,7 @@ fi
 section "ALG2 k16 CUDA — all sizes, $N_CHALLENGES challenges, $N_GPUS GPU(s)"
 
 if [ -x "$BINDIR/alg2_k16_cuda" ]; then
-  for EXP in 3 5; do
+  for EXP in $EXPONENT; do
     for SIZE in $SIZES; do
       echo "--- k16 e=${EXP} size=${SIZE}: powm ---"
       "$BINDIR/alg2_k16_cuda" \
@@ -195,7 +202,7 @@ fi
 section "ALG2 k32 CUDA — all sizes, $N_CHALLENGES challenges, $N_GPUS GPU(s)"
 
 if [ -x "$BINDIR/alg2_k32_cuda" ] && [ -f data/k32_primes.bin ]; then
-  for EXP in 3 5; do
+  for EXP in $EXPONENT; do
     for SIZE in $SIZES; do
       echo "--- k32 e=${EXP} size=${SIZE}: powm ---"
       "$BINDIR/alg2_k32_cuda" \
@@ -243,7 +250,7 @@ fi
 section "ALG2 k35 CUDA — all sizes, $N_CHALLENGES challenges, $N_GPUS GPU(s)"
 
 if [ -x "$BINDIR/alg2_k35_cuda" ]; then
-  for EXP in 3 5; do
+  for EXP in $EXPONENT; do
     for SIZE in $SIZES; do
       echo "--- k35 e=${EXP} size=${SIZE}: powm ---"
       "$BINDIR/alg2_k35_cuda" \
@@ -294,7 +301,7 @@ fi
 section "ALG3 CUDA — all sizes, $N_CHALLENGES challenges, $N_GPUS GPU(s)"
 
 if [ -x "$BINDIR/alg3_cuda" ]; then
-  for EXP in 3 5; do
+  for EXP in $EXPONENT; do
     for SIZE in $SIZES; do
       echo "--- alg3 e=${EXP} size=${SIZE}: powm ---"
       "$BINDIR/alg3_cuda" \
@@ -341,7 +348,7 @@ fi
 section "ALG4 CUDA — all sizes, $N_CHALLENGES challenges, $N_GPUS GPU(s)"
 
 if [ -x "$BINDIR/alg4_cuda" ]; then
-  for EXP in 3 5; do
+  for EXP in $EXPONENT; do
     for SIZE in $SIZES; do
       echo "--- alg4 e=${EXP} size=${SIZE}: powm ---"
       "$BINDIR/alg4_cuda" \
