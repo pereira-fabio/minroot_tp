@@ -29,6 +29,10 @@ src/
     factorization.h/.cpp       sieve, trial division, Pollard's rho, cbrt cache, blinding
     solver_common.h/.cpp       MPI+OpenMP scaffolding (broadcast, gather, bench loop)
     sizes.h                    canonical challenge sizes
+    gpu/                       shared CUDA code
+      gpu_common.h               device helpers, JSON, per-run stats
+      gpu_k32_kernels.cuh        k32 trial-division kernel, shared by k32/k35/alg3/alg4
+      gpu_sieve.h                host-side segmented sieve for --method sieve
   aion/                      MPI+OpenMP solvers (CPU cluster)
     alg2_k16.cpp               Algorithm 2, B = 2^16
     alg2_k32.cpp               Algorithm 2, B = 2^32
@@ -37,9 +41,6 @@ src/
     alg4.cpp                   Algorithm 4, composite cofactor
     alg7.cpp                   Algorithm 7, inverted sieve
   iris/                      CUDA solvers (GPU cluster)
-    gpu_common.h               device helpers, JSON, per-run stats
-    gpu_k32_kernels.cuh        the k32 trial-division kernel, shared by k32/k35/alg3/alg4
-    gpu_sieve.h                host-side segmented sieve for --method sieve
     alg2_k16_cuda.cu  alg2_k32_cuda.cu  alg2_k35_cuda.cu
     alg3_cuda.cu      alg4_cuda.cu      alg7_cuda.cu
 
@@ -59,7 +60,7 @@ scripts/aion/                SLURM jobs for the CPU cluster
 scripts/iris/                SLURM jobs for the GPU cluster
 analysis/                    Python plotting and analysis
 
-Makefile                     CPU builds; src/iris/Makefile builds the CUDA targets
+Makefile                     all builds, CPU and CUDA
 ```
 
 See `experiments/README.md` for what each experiment asked and what it found.
@@ -193,9 +194,9 @@ module load math/GMP/6.3.0-GCCcore-13.2.0
 
 ```bash
 module load system/CUDA/12.6.0
-make -C src/iris                       # the six CUDA solvers
-make -C src/iris experiments           # alg_crt_cuda, alg2_ksweep_cuda, gpu_scale_sim_cuda
-make -C src/iris ARCH=sm_89            # L40 instead of the V100 default (sm_70)
+make gpu                  # the six CUDA solvers
+make gpu-experiments      # alg_crt_cuda, alg2_ksweep_cuda, gpu_scale_sim_cuda
+make gpu ARCH=sm_89       # L40 instead of the V100 default (sm_70)
 ```
 
 ### Manual compilation

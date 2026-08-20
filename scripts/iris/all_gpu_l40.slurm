@@ -83,7 +83,7 @@ mkdir -p "$ALG2_DIR" "$ALG3_DIR" "$ALG4_DIR" "$ALG7_DIR"
 
 # Job-private build directory: prevents concurrent G1/G2/G4 jobs from overwriting
 # each other's binaries when running in the same working directory simultaneously.
-BINDIR="src/iris/build_${SLURM_JOB_ID}"
+BINDIR="build/gpu_${SLURM_JOB_ID}"
 mkdir -p "$BINDIR"
 
 echo "SLURM_JOB_ID: $SLURM_JOB_ID"
@@ -101,7 +101,7 @@ echo "========================================"
 
 # -arch=sm_70 embeds compute_70 PTX, which JITs fine on the L40 (sm_89) — this is
 # how the existing L40 results were produced. For native Ada codegen switch to sm_89.
-NVCC_FLAGS="-arch=sm_70 -std=c++17 -O3 -I src/common -I experiments/delta -Xcompiler -fopenmp"
+NVCC_FLAGS="-arch=sm_70 -std=c++17 -O3 -I src/common -I src/common/gpu -I experiments/delta -Xcompiler -fopenmp"
 COMMON="src/common/common.cpp src/common/factorization.cpp experiments/delta/delta_table.cpp"
 LIBS="-lgmp -lgomp"
 

@@ -53,7 +53,7 @@ cd "$SLURM_SUBMIT_DIR" || exit 1
 
 # Paths follow all_gpu_l40.slurm:
 #   results ->  data/results/iris/<alg>/G<n>/l40
-#   builds  ->  src/iris/build_<jobid>
+#   builds  ->  build/gpu_<jobid>
 #   inputs  ->  data/challenges/k<K>/
 #
 # The k32 challenge set is used for EVERY table bound. That is deliberate: a
@@ -66,7 +66,7 @@ cd "$SLURM_SUBMIT_DIR" || exit 1
 N_GPUS=${SLURM_GPUS_ON_NODE:-4}
 CHAL="data/challenges/k32"
 OUTDIR="data/results/iris/ksweep/G${N_GPUS}/l40"
-BINDIR="src/iris/build_${SLURM_JOB_ID}"
+BINDIR="build/gpu_${SLURM_JOB_ID}"
 mkdir -p "$OUTDIR" "$BINDIR"
 
 echo "Job:          $SLURM_JOB_ID"
@@ -80,7 +80,7 @@ echo ""
 CHAL_SIZES="24576"
 
 # ---- Build ----------------------------------------------------------------
-NVCC_FLAGS="-arch=sm_89 -std=c++17 -O3 -I src/common -I experiments/delta -Xcompiler -fopenmp"
+NVCC_FLAGS="-arch=sm_89 -std=c++17 -O3 -I src/common -I src/common/gpu -I experiments/delta -Xcompiler -fopenmp"
 COMMON="src/common/common.cpp src/common/factorization.cpp experiments/delta/delta_table.cpp"
 LIBS="-lgmp -lgomp"
 

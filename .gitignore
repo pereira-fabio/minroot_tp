@@ -28,7 +28,16 @@ alg2_k35
 alg3
 alg4
 alg7
+alg2_k16_cuda
+alg2_k32_cuda
+alg2_k35_cuda
+alg3_cuda
+alg4_cuda
+alg7_cuda
 alg_crt
+alg_crt_cuda
+alg2_ksweep_cuda
+gpu_scale_sim_cuda
 cpu_scale_sim
 challenges
 gen_prime_table
@@ -62,6 +71,9 @@ data/cbrt/
 
 # ── HPC / SLURM ──────────────────────────────────────────
 slurm-*.out
+
+# Job-private build directories (scripts/iris/*.slurm)
+build/
 
 # ── Editor / OS ──────────────────────────────────────────
 .DS_Store

@@ -51,10 +51,11 @@ echo ""
 
 # ---- Build (direct nvcc — same flags as all_gpu.slurm; no make) ----
 # Self-contained CRT context; links common + factorization only (MPI-free).
-NVCC_FLAGS="-arch=sm_70 -std=c++17 -O3 -I src/common -I experiments/delta -Xcompiler -fopenmp"
+NVCC_FLAGS="-arch=sm_70 -std=c++17 -O3 -I src/common -I src/common/gpu -I experiments/delta -Xcompiler -fopenmp"
 COMMON="src/common/common.cpp src/common/factorization.cpp experiments/delta/delta_table.cpp"
 LIBS="-lgmp -lgomp"
-BIN=experiments/crt/alg_crt_cuda
+BIN=build/alg_crt_cuda
+mkdir -p build
 echo -n "Building alg_crt_cuda ... "
 nvcc experiments/crt/alg_crt_cuda.cu $COMMON $NVCC_FLAGS $LIBS -o "$BIN"
 if [ $? -ne 0 ]; then echo "FAILED"; exit 1; fi

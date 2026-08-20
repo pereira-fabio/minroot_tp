@@ -61,7 +61,7 @@ N_GPUS=${SLURM_GPUS_ON_NODE:-1}
 OUT_DIR="data/results/iris/alg2/G${N_GPUS}/l40"
 mkdir -p "$OUT_DIR"
 
-BINDIR="src/iris/build_${SLURM_JOB_ID}"
+BINDIR="build/gpu_${SLURM_JOB_ID}"
 mkdir -p "$BINDIR"
 
 echo "SLURM_JOB_ID: $SLURM_JOB_ID"
@@ -74,7 +74,7 @@ echo ""
 echo "========================================"
 echo "BUILD PHASE"
 echo "========================================"
-NVCC_FLAGS="-arch=sm_70 -std=c++17 -O3 -I src/common -I experiments/delta -Xcompiler -fopenmp"
+NVCC_FLAGS="-arch=sm_70 -std=c++17 -O3 -I src/common -I src/common/gpu -I experiments/delta -Xcompiler -fopenmp"
 COMMON="src/common/common.cpp src/common/factorization.cpp experiments/delta/delta_table.cpp"
 LIBS="-lgmp -lgomp"
 

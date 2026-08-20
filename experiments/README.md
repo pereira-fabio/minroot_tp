@@ -10,7 +10,7 @@ algorithms the thesis measures. Everything here still builds and runs:
 
 ```bash
 make experiments                # CPU: alg_crt, cpu_scale_sim, delta_convert, prefilter_bench
-make -C src/iris experiments    # GPU: alg_crt_cuda, alg2_ksweep_cuda, gpu_scale_sim_cuda
+make gpu-experiments            # GPU: alg_crt_cuda, alg2_ksweep_cuda, gpu_scale_sim_cuda
 ```
 
 ---
