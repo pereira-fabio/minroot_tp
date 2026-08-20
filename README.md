@@ -232,45 +232,46 @@ Substitute any of `alg2_k16`, `alg2_k32`, `alg2_k35`, `alg3`, `alg4`, `alg7`.
 
 ## Usage
 
-All six solvers share one interface. The binaries are `alg2_k16`, `alg2_k32`,
-`alg2_k35`, `alg3`, `alg4` and `alg7`.
-
-| flag | meaning |
-|------|---------|
-| `--all --data DIR` | run every canonical challenge size in one MPI execution |
-| `--method sieve\|table\|powm` | factoring strategy; `powm` is the sequential baseline |
-| `--table-format flat\|delta\|auto` | prime table encoding (`auto` detects by file magic) |
-| `--n-challenges N` | challenges to solve; each is one timed run |
-| `--exponent E` | root exponent (default 3) |
-| `--cbrt-dir DIR` | where to keep the cube-root cache |
-| `--json PREFIX` | write results as `PREFIX_<size>.json` |
-| `--skip-powm-baseline` | skip the baseline (already measured by the `powm` pass) |
-| `--primes FILE` | prime table for `--method table` |
-
-There is no `--bench` flag: one challenge is one timed run, and `--n-challenges`
-sets how many are averaged.
-
 ### Generate challenges first
+
+Nothing runs without them. No cluster needed:
+
+```bash
+./challenges 3 1024 16          # 3 challenges, 1024-bit modulus, B = 2^16
+./challenges 3 1024 32          # B = 2^32   (k32)
+./challenges 3 1024 32 alg3     # + one medium prime cofactor
+./challenges 3 1024 32 alg4     # + a cofactor Algorithm 4 will accept
+./challenges 3 1024 32 --exponent 5        # a modulus with gcd(5, M-1) = 1
+./challenges 3 1024 32 alg3 --exponent 5  # the same for Algorithm 3
+```
+
+Files land in `data/challenges/<variant>/`. On a cluster, the SLURM equivalents
+generate every canonical size at once:
 
 ```bash
 sbatch scripts/aion/challenge_gen.slurm        # e = 3
 sbatch scripts/aion/challenge_gen_e5.slurm     # e = 5
 ```
 
-### Single challenge
+### CPU solvers
+
+`alg2_k16`, `alg2_k32`, `alg2_k35`, `alg3`, `alg4`, `alg7` — MPI programs, so
+they run under `mpirun` locally or `srun` on a cluster.
 
 ```bash
-srun --mpi=pmix ./alg2_k32 \
-    data/challenges/k32/challenge_0_32_2048.txt \
-    data/challenges/k32/modulo_32_2048.txt --method sieve
-```
+# one challenge, 2 ranks, on any machine
+mpirun -n 2 ./alg2_k32 \
+    data/challenges/k32/challenge_0_32_1024.txt \
+    data/challenges/k32/modulo_32_1024.txt \
+    --method sieve
 
-The first run for a given modulus precomputes and saves a `.cbrt` cache under
-`data/cbrt/`; later runs load it from disk.
+# the fifth root, against the modulus generated for it
+mpirun -n 2 ./alg3 \
+    data/challenges/alg3/challenge_0_alg3_1024.txt \
+    data/challenges/alg3/modulo_alg3_1024_e5.txt \
+    --method sieve --exponent 5
 
-### Full sweep (what the results above were produced by)
-
-```bash
+# every canonical size in one execution, on a cluster
 srun --mpi=pmix -N 64 --ntasks=128 ./alg2_k32 \
     --all --data data/challenges/k32 \
     --method table --skip-powm-baseline \
@@ -278,8 +279,56 @@ srun --mpi=pmix -N 64 --ntasks=128 ./alg2_k32 \
     --json out/alg2_k32_table
 ```
 
-Run the `powm` pass once per variant without `--skip-powm-baseline` to get the
-sequential baseline the speedups are divided by.
+| flag | meaning |
+|------|---------|
+| `--method sieve\|table\|powm` | factoring strategy; `powm` is the sequential baseline |
+| `--all --data DIR` | run every canonical challenge size in one execution |
+| `--n-challenges N` | challenges to solve; each is one timed run |
+| `--exponent E` | root exponent (default 3) |
+| `--modulo-suffix S` | e.g. `_e5`, to select the exponent-5 moduli |
+| `--table-format flat\|delta\|auto` | prime table encoding (`auto` detects by file magic) |
+| `--primes FILE` | prime table for `--method table` |
+| `--cbrt-dir DIR` | where to keep the cube-root cache |
+| `--json PREFIX` | write results as `PREFIX_<size>.json` |
+| `--skip-powm-baseline` | skip the baseline (the `powm` pass already measured it) |
+
+There is no `--bench` flag: one challenge is one timed run, and `--n-challenges`
+sets how many are averaged.
+
+### GPU solvers
+
+`alg2_k16_cuda`, `alg2_k32_cuda`, `alg2_k35_cuda`, `alg3_cuda`, `alg4_cuda`,
+`alg7_cuda` — **no MPI**, so no `mpirun`. One process drives every device.
+
+```bash
+# positional, one device
+./alg2_k16_cuda \
+    data/challenges/k16/challenge_0_16_1024.txt \
+    data/challenges/k16/modulo_16_1024.txt \
+    --method sieve
+
+# by directory and size, splitting the prime range over 4 devices
+./alg2_k32_cuda --data data/challenges/k32 --size 1024 \
+    --method sieve --n-challenges 10 --n-gpus 4
+
+# the fifth root
+./alg3_cuda --data data/challenges/alg3 --size 1024 \
+    --method sieve --exponent 5 --modulo-suffix _e5
+```
+
+Same flags as the CPU solvers, minus `--all`, `--cbrt-dir` and
+`--skip-powm-baseline`, plus:
+
+| flag | meaning |
+|------|---------|
+| `--size N` | challenge size, with `--data`, instead of naming both files |
+| `--n-gpus N` | split the prime range across N devices |
+| `--n-runs N` | warm runs to average |
+
+**Do not trust `speedup_total` from a GPU run.** Its `powm_baseline_ms` measures
+the forward `y^e` with a small exponent and comes out a few hundred times too
+small. Every GPU figure in this README divides by the AION baseline for the
+matching size instead.
 
 ### The whole study
 
@@ -302,10 +351,13 @@ The time-lock demo is `tools/timelock/timelock_demo.slurm`.
 ### Per-algorithm notes
 
 - **`alg2_k35 --method table`** generates `data/k35_upper_primes.bin` (~10 GB) on
-  first use.
+  first use, and needs ~9.6 GB of VRAM on the GPU. Use `--method sieve` on a
+  consumer card.
 - **`alg7`** takes `--R <range>` (the study used `--R 1048576`) and reads the
   Algorithm 3 challenge set.
 - **`alg3` / `alg4`** read `data/challenges/alg3` and `data/challenges/alg4`.
+- **The first run** for a given modulus precomputes and saves a `.cbrt` cache;
+  later runs load it from disk.
 - **Delta tables** are built with the `delta_convert` tool, not by a solver flag:
   `./delta_convert data/k32_primes.bin`, or `--u64` for the k35 upper table.
 
