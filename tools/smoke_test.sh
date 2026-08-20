@@ -221,6 +221,7 @@ if [ "$RUN_GPU" = 1 ]; then
     check "gpu alg3  sieve" G alg3     "$A3"  sieve
     Q0_R3=$(recon_of "$LAST_OUT"); Q0_OUT="$LAST_OUT"
     check "gpu alg4  sieve" G alg4     "$A4"  sieve
+    Q0_R4=$(recon_of "$LAST_OUT"); Q0_OUT4="$LAST_OUT"
 
     # Exponent 5 against the _e5 moduli. Before --modulo-suffix existed these
     # read the e3 modulus and failed whenever 5 divided M-1.
@@ -230,13 +231,18 @@ if [ "$RUN_GPU" = 1 ]; then
     check "gpu alg3  e5"    E5 alg3     "$A3"
 
     # The q0 precompute: is cbrt(q0) out of the timed region on the GPU path?
+    # Both cofactor solvers carry it. Algorithm 3 accepts one medium prime;
+    # Algorithm 4 accepts a composite and splits it with Pollard's rho, caching
+    # a root per medium prime. The challenges generated here give Algorithm 4 a
+    # single prime cofactor, so its composite branch is not exercised.
     if [ "$RUN_CPU" = 1 ]; then
         Q0_POWM=$(mpirun -n 1 ./alg3 $A3/challenge_0_alg3_$SIZE.txt $A3/modulo_alg3_$SIZE.txt \
                     --method powm 2>&1 | sed -n 's/.*powm (sequential baseline):[^=]*= *\([0-9.][0-9.]*\) ms.*/\1/p' | head -1)
     else
         Q0_POWM=""
     fi
-    check_q0 "gpu alg3  q0" "$Q0_R32" "$Q0_R3" "$Q0_OUT" "$Q0_POWM"
+    check_q0 "gpu alg3  q0" "$Q0_R32" "$Q0_R3" "$Q0_OUT"  "$Q0_POWM"
+    check_q0 "gpu alg4  q0" "$Q0_R32" "$Q0_R4" "$Q0_OUT4" "$Q0_POWM"
 
     if [ "$SLOW" = 1 ]; then
         check "gpu alg7  sieve" G alg7 "$A3" sieve
