@@ -119,25 +119,72 @@ make INCLUDE="-I src/common -I experiments/delta -I /opt/gmp/include" \
 
 ## 2. Optional — the GPU solvers
 
-| | Minimum | Used in this study |
+| | Minimum | Verified with |
 |---|---|---|
-| CUDA toolkit (`nvcc`) | 11.0 (sm_70) · 11.8 for sm_89 | 12.6.0 |
-| NVIDIA GPU | compute capability 7.0 | V100 (sm_70), L40 (sm_89) |
+| CUDA toolkit (`nvcc`) | 11.0 | 12.6.0 |
+| NVIDIA GPU | any card this nvcc still targets | V100 (sm_70), L40 (sm_89) |
+
+**No particular architecture is required.** The kernels use no warp intrinsics,
+no tensor cores and no half or double atomics — only `__uint128_t`, which nvcc
+lowers everywhere. The `sm_70` that appears throughout is the V100's number, not
+a floor.
+
+### Installing CUDA without a module system
+
+`module load` exists only on the clusters. On your own machine:
 
 ```bash
-module load system/CUDA/12.6.0
-make gpu                  # V100, sm_70 (the default)
-make gpu ARCH=sm_89       # L40
-make gpu ARCH=sm_80       # A100
+# Ubuntu/Debian, from the distro (simplest; may lag the current CUDA release)
+sudo apt install nvidia-cuda-toolkit
+
+# or NVIDIA's own repository, for a current toolkit
+# https://developer.nvidia.com/cuda-downloads -> deb (network)
 ```
 
-`ARCH` must match your card or the binaries will not launch. `nvidia-smi
---query-gpu=compute_cap --format=csv` tells you what to pass.
+Check it took: `nvcc --version` and `nvidia-smi`. The driver must be at least as
+new as the toolkit.
+
+### Picking the architecture
+
+`make gpu` reads the compute capability off the local card with `nvidia-smi` and
+targets exactly that, so it normally needs no argument. It prints what it chose:
+
+```
+$ make gpu
+CUDA architecture: detected sm_75
+```
+
+Two overrides:
+
+```bash
+make gpu ARCH=sm_75       # force one architecture
+make gpu ARCH=portable    # fatbinary: Volta..Hopper + PTX, runs on any of them
+```
+
+`ARCH=portable` is also what a build with no visible GPU falls back to, which is
+the usual case on a cluster login node. It compiles slower and produces larger
+binaries, but one build runs anywhere.
+
+Common cards: 2080/2080 Super/Titan RTX `sm_75`, 3080/3090 `sm_86`,
+4080/4090/L40 `sm_89`, V100 `sm_70`, A100 `sm_80`, H100 `sm_90`.
+
+### VRAM
+
+This is the real constraint on a consumer card, not the architecture.
+
+| Variant | Device memory | 8 GB card (e.g. 2080 Super) |
+|---|---|---|
+| k16 | a few MB | fine |
+| k32 `--method sieve` | a few MB | fine |
+| k32 `--method table` | 813 MB | fine |
+| k35 `--method table` | ~9.6 GB on one GPU | **will not fit** — use `--method sieve` |
+
+k35's table method also wants ~9.6 GB of *host* RAM for the full upper table
+before it slices it. On one 8 GB card, run k35 with `--method sieve`, which
+generates primes on the fly and uploads nothing.
 
 Nothing in the CPU build depends on CUDA — `make` and `make gpu` are
 independent, and you can ignore the GPU half entirely.
-
----
 
 ## 3. Optional — analysis and plots
 

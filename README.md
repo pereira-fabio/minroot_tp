@@ -199,13 +199,16 @@ module load mpi/OpenMPI/4.1.6-GCC-13.2.0
 module load math/GMP/6.3.0-GCCcore-13.2.0
 ```
 
-### GPU (IRIS)
+### GPU (any NVIDIA card, or IRIS)
 
 ```bash
-module load system/CUDA/12.6.0
-make gpu                  # the six CUDA solvers
+make gpu                  # detects the local card; prints what it chose
 make gpu-experiments      # alg_crt_cuda, alg2_ksweep_cuda, gpu_scale_sim_cuda
-make gpu ARCH=sm_89       # L40 instead of the V100 default (sm_70)
+make gpu ARCH=sm_75       # force one architecture (2080/2080 Super)
+make gpu ARCH=portable    # one fatbinary for any Volta-or-newer card
+
+# on a cluster, load the toolkit first:
+module load system/CUDA/12.6.0
 ```
 
 ### Manual compilation
