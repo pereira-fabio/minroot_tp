@@ -249,6 +249,23 @@ its own right, not an oversight.
 
 ## 6. Smallest thing that proves the install works
 
+### Everything at once
+
+```bash
+./tools/smoke_test.sh
+```
+
+Builds what is missing, generates small challenges, runs every solver once and
+checks each result against the correctness gate, then prints a pass/fail table.
+It uses the GPU too if `nvcc` and a card are present, and skips that half
+cleanly if not. `--slow` adds k35 and alg7, which are slow for a reason the
+script explains; `--cpu` / `--gpu` / `--size N` narrow it down.
+
+A failing row shows why — a wrong root, a signal, a missing file — rather than
+just a non-zero exit.
+
+### Or by hand
+
 No cluster, no GPU, about a minute:
 
 ```bash
