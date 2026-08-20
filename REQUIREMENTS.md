@@ -187,23 +187,37 @@ Expect `SUCCESS: 3-th root is correct!`. That line is the correctness gate —
 every timing in this project is only meaningful when it passes. Note that it is
 printed, not enforced: a run that prints `FAILURE` still writes its JSON.
 
-**If the solver aborts instead**, try the sweep form, which is the path the
-published results were produced with and the one the job scripts use:
+Paths are relative to the repository root — run from there, and pass the files
+under `data/challenges/k16/`, not bare filenames.
 
-```bash
-mpirun -n 2 ./alg2_k16 --all --data data/challenges/k16 \
-    --n-challenges 3 --method sieve
-```
+### If it aborts
 
-The two-positional-file form above is a convenience path and is exercised far
-less. If `mpirun` swallows the error behind a `prun:proc-aborted-strsignal`
-message about missing help files, run the binary directly — MPI initialises in
-singleton mode and the real message reaches your terminal:
+**Any missing input file aborts the job**, via `MPI_Abort`. Some MPI builds
+report that as `prun:proc-aborted-strsignal`, often alongside a complaint about
+a missing help file, which tells you nothing about the cause. Two things it is
+usually not, and one it usually is:
 
-```bash
-./alg2_k16 data/challenges/k16/challenge_0_16_1024.txt \
-           data/challenges/k16/modulo_16_1024.txt --method sieve
-```
+1. **Check MPI itself first.** `mpirun -n 2 hostname` should print your hostname
+   twice. If that fails, the problem is the MPI installation, not this code.
+2. **`--all` needs every canonical size.** It iterates
+   {256, 384, 512, 768, 1024, 2048, 4096, 8192, 16384, 24576} and aborts on the
+   first one it cannot find, so generating only 1024 bits is not enough:
+
+   ```bash
+   for S in 256 384 512 768 1024 2048; do ./challenges 3 $S 16; done
+   mpirun -n 2 ./alg2_k16 --all --data data/challenges/k16 \
+       --n-challenges 3 --method sieve
+   ```
+
+   The four largest sizes take substantially longer to generate; leave them out
+   unless you want them.
+3. **A stale `data/cbrt/` cache.** The cube-root cache is keyed by modulus
+   filename, not by content, so regenerating a modulus at the same size leaves a
+   cache that no longer matches. `rm -rf data/cbrt` if results look wrong.
+
+The single-challenge form above has been run under AddressSanitizer at one rank
+and is clean, so an abort there points at inputs or the MPI installation rather
+than at the solver.
 
 k16 is the right smoke test because its prime table is 6542 primes (~26 KB) and
 needs no precomputation. To go further locally:
