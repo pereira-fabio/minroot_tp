@@ -21,11 +21,7 @@
 // cbrt cache:      <modulo_stem>.cbrt_alg4  (isolated from alg3 cache)
 //
 // Build (from project root):
-//   cd src/iris && make alg4_cuda
-// Or manually:
-//   nvcc alg4_cuda.cu ../common/common.cpp ../common/factorization.cpp \
-//       -arch=sm_70 -std=c++17 -O3 -I ../common -lgmp -lgomp -Xcompiler -fopenmp \
-//       -o alg4_cuda
+//   make gpu             (or: make alg4_cuda ARCH=sm_89)
 //
 // Usage:
 //   ./alg4_cuda <challenge> <modulo> [--exponent E] [--n-gpus N] [--primes FILE]

@@ -57,9 +57,7 @@
 //     --json FILE      write the projection table as JSON
 //
 // Build:
-//   nvcc src/iris/gpu_scale_sim_cuda.cu src/common/common.cpp \
-//        src/common/factorization.cpp -arch=sm_89 -std=c++17 -O3 \
-//        -I src/common -Xcompiler -fopenmp -lgmp -lgomp -o gpu_scale_sim_cuda
+//   make gpu-experiments      (or: make gpu_scale_sim_cuda ARCH=sm_89)
 // =============================================================================
 
 #include "gpu_common.h"

@@ -29,9 +29,7 @@
 // only.  No solver is rebuilt and no benchmark result can change.
 //
 // Build:
-//   mpicxx -O3 -std=c++17 -fopenmp -Wall -I src/common tests/prefilter_bench.cpp \
-//          src/common/prefilter.cpp src/common/factorization.cpp \
-//          src/common/common.cpp -lgmp -o prefilter_bench
+//   make prefilter_bench
 // Run:
 //   mpirun -np 4 ./prefilter_bench [--bits 256] [--trials 20] [--sieve-ms 790]
 // =============================================================================

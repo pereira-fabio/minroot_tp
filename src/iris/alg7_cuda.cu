@@ -31,7 +31,7 @@
 // SAME challenge/modulo file format already produced by tools/challenges.c
 // (GMP mpz_out_raw binary), so it can be pointed directly at real generated
 // files, e.g.:
-//     ./alg7_cuda data/challenges/alg3/challenge_0_alg3_1024.txt \
+//     ./alg7_cuda data/challenges/alg3/challenge_0_alg3_1024.txt
 //                 data/challenges/alg3/modulo_alg3_1024.txt
 // (Algorithm 7 reuses alg3-style "smooth_base * q0" challenges, same as the
 // existing CPU alg7.cpp -- see wiki/algorithms/algorithm3.md.)

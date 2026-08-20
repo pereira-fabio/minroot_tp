@@ -187,6 +187,24 @@ Expect `SUCCESS: 3-th root is correct!`. That line is the correctness gate —
 every timing in this project is only meaningful when it passes. Note that it is
 printed, not enforced: a run that prints `FAILURE` still writes its JSON.
 
+**If the solver aborts instead**, try the sweep form, which is the path the
+published results were produced with and the one the job scripts use:
+
+```bash
+mpirun -n 2 ./alg2_k16 --all --data data/challenges/k16 \
+    --n-challenges 3 --method sieve
+```
+
+The two-positional-file form above is a convenience path and is exercised far
+less. If `mpirun` swallows the error behind a `prun:proc-aborted-strsignal`
+message about missing help files, run the binary directly — MPI initialises in
+singleton mode and the real message reaches your terminal:
+
+```bash
+./alg2_k16 data/challenges/k16/challenge_0_16_1024.txt \
+           data/challenges/k16/modulo_16_1024.txt --method sieve
+```
+
 k16 is the right smoke test because its prime table is 6542 primes (~26 KB) and
 needs no precomputation. To go further locally:
 
