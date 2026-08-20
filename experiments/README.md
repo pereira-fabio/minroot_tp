@@ -9,7 +9,7 @@ It lives here rather than in `src/` so that `src/` contains only the six
 algorithms the thesis measures. Everything here still builds and runs:
 
 ```bash
-make experiments                # CPU: alg_crt, cpu_scale_sim, delta_convert
+make experiments                # CPU: alg_crt, cpu_scale_sim, delta_convert, prefilter_bench
 make -C src/iris experiments    # GPU: alg_crt_cuda, alg2_ksweep_cuda, gpu_scale_sim_cuda
 ```
 
@@ -93,3 +93,30 @@ baseline on its own. Free reconstruction and free residues would still cap the
 method at 0.999x. The alpha-ary loop parallelises the squaring half of
 square-and-multiply and replicates the multiplying half, and a method that
 parallelises half an algorithm is bounded by the half it kept.
+
+---
+
+## `prefilter/` — is the pre-filter worth its cost?
+
+**Question.** Before sieving a candidate, you can spend a little time choosing a
+*better* candidate: strip its small factors up to some B0 and discard it if the
+residue is too large. That costs `C_pf` per candidate and saves sieve work by
+raising the chance the candidate is smooth. When does it pay?
+
+**Method.** `prefilter_bench` measures `C_pf` directly across moduli and rank
+counts, against a sieve cost `C_sieve` imported from the Algorithm 2 k32 batch —
+a different job, so the two are not measured together.
+
+**Result.** It pays when `C_pf < (2^b - 1) * C_sieve`, where `b` is the bit
+saving the filter buys. The counter-intuitive part is the direction: **larger
+moduli benefit more**, not less. The more expensive the sieve, the more you can
+afford to spend choosing what to feed it.
+
+`C_pf` turns out not to depend on which sieve it is paired with, which is what
+makes importing `C_sieve` from another batch legitimate.
+
+**Note on status.** The selection primitive here (`prefilter_simple_select`) is
+called by **no solver** — Algorithm 4 carries its own inline pre-filter
+(`ALG4_B0`, `b0_residue_bits`), and there is no `--prefilter` flag. This code
+exists because it produced the thesis figures; wiring it into the bench loop was
+never done.

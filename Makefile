@@ -8,17 +8,15 @@ COMMON_SRC = src/common/common.cpp \
              src/common/solver_common.cpp \
              experiments/delta/delta_table.cpp
 
-.PHONY: all experiments tools tests clean
+.PHONY: all experiments tools clean
 
 # The four algorithms the thesis measures.
 all: alg2_k16 alg2_k32 alg2_k35 alg3 alg4 alg7 challenges
 
 # Research code that is not part of the attack — see experiments/README.md.
-experiments: alg_crt cpu_scale_sim delta_convert
+experiments: alg_crt cpu_scale_sim delta_convert prefilter_bench
 
 tools: challenges gen_prime_table
-
-tests: prefilter_test prefilter_bench
 
 # --- algorithms --------------------------------------------------------------
 
@@ -50,6 +48,13 @@ alg_crt: experiments/crt/alg_crt.cpp experiments/crt/crt_common.cpp $(COMMON_SRC
 cpu_scale_sim: experiments/scale_sim/cpu_scale_sim.cpp $(COMMON_SRC)
 	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
+# B0 threshold pre-filter cost. No solver calls this primitive; Algorithm 4 has
+# its own inline pre-filter. Kept because it produced the thesis C_pf figures.
+prefilter_bench: experiments/prefilter/prefilter_bench.cpp \
+                 experiments/prefilter/prefilter.cpp \
+                 src/common/common.cpp src/common/factorization.cpp
+	mpicxx $(CXXFLAGS) $(INCLUDE) -I experiments/prefilter $^ $(LIBS) -o $@
+
 # Flat prime table -> delta table. Replaces the old `--convert-delta` mode.
 delta_convert: experiments/delta/delta_convert.cpp experiments/delta/delta_table.cpp \
                src/common/common.cpp src/common/factorization.cpp
@@ -63,17 +68,7 @@ challenges: tools/challenges.c
 gen_prime_table: tools/gen_prime_table.c
 	gcc $(CFLAGS) $^ $(LIBS) -o $@
 
-# --- tests -------------------------------------------------------------------
-
-prefilter_test: tests/prefilter_test.cpp src/common/prefilter.cpp \
-                src/common/common.cpp src/common/factorization.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
-
-prefilter_bench: tests/prefilter_bench.cpp src/common/prefilter.cpp \
-                 src/common/common.cpp src/common/factorization.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
-
 clean:
 	rm -f alg2_k16 alg2_k32 alg2_k35 alg3 alg4 alg7 \
 	      alg_crt cpu_scale_sim delta_convert \
-	      challenges gen_prime_table prefilter_test prefilter_bench
+	      challenges gen_prime_table prefilter_bench

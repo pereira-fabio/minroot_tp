@@ -76,7 +76,7 @@ mpicxx -O3 -std=c++17 -fopenmp -Wall \
     experiments/scale_sim/cpu_scale_sim.cpp src/common/solver_common.cpp \
     src/common/common.cpp src/common/factorization.cpp \
     experiments/delta/delta_table.cpp \
-    src/common/prefilter.cpp experiments/crt/crt_common.cpp \
+    experiments/crt/crt_common.cpp \
     -lgmp -o $BINARY
 
 if [ $? -ne 0 ]; then echo "Compilation failed"; exit 1; fi

@@ -28,7 +28,6 @@ src/
     common.h/.cpp              file I/O, sieve, GMP helpers, timing, JSON output
     factorization.h/.cpp       sieve, trial division, Pollard's rho, cbrt cache, blinding
     solver_common.h/.cpp       MPI+OpenMP scaffolding (broadcast, gather, bench loop)
-    prefilter.h/.cpp           B0 threshold pre-filter (Algorithm 4)
     sizes.h                    canonical challenge sizes
   aion/                      MPI+OpenMP solvers (CPU cluster)
     alg2_k16.cpp               Algorithm 2, B = 2^16
@@ -49,15 +48,12 @@ experiments/                 research code that is NOT part of the attack
   ksweep/                    smoothness-bound sweep
   scale_sim/                 strong-scaling simulators (CPU and GPU)
   crt/                       CRT exponentiation (negative result)
+  prefilter/                 B0 threshold pre-filter cost
 
 tools/
   challenges.c               challenge generator
   gen_prime_table.c          prime table for an arbitrary bound 2^k
   timelock/                  standalone time-lock puzzle demo
-
-tests/
-  prefilter_test.cpp         correctness of the B0 pre-filter
-  prefilter_bench.cpp        pre-filter cost measurement
 
 scripts/aion/                SLURM jobs for the CPU cluster
 scripts/iris/                SLURM jobs for the GPU cluster
@@ -180,9 +176,8 @@ lifts `y = x + r*M` for one that is smooth, inverting the loop nesting. Reaches
 
 ```bash
 make                  # the six solvers + the challenge generator
-make experiments      # alg_crt, cpu_scale_sim, delta_convert
+make experiments      # alg_crt, cpu_scale_sim, delta_convert, prefilter_bench
 make tools            # challenges, gen_prime_table
-make tests            # prefilter_test, prefilter_bench
 make clean
 ```
 

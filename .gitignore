@@ -32,7 +32,6 @@ alg_crt
 cpu_scale_sim
 challenges
 gen_prime_table
-prefilter_test
 prefilter_bench
 
 # ── Python ───────────────────────────────────────────────

@@ -80,9 +80,9 @@ TABLE_FORMAT=""                          #     default: flat (uint32/uint64 tabl
 # ===========================================================================
 # NOTE — the pre-filter (paper Algorithm 5) is NOT toggled here (no flag yet).
 # ---------------------------------------------------------------------------
-# It is Phase 0 only: the selection primitive src/common/prefilter.{h,cpp}
-# (prefilter_simple_select), exercised solely by tests/prefilter_test.cpp and
-# gated separately by:   sbatch scripts/aion/prefilter_test.slurm
+# It is Phase 0 only: the selection primitive now lives in
+# experiments/prefilter/ and is called by no solver; Algorithm 4 carries its
+# own inline pre-filter. See experiments/prefilter/README.md.
 # There is no --prefilter solver flag yet — the bench-loop hook (Phase 1) is
 # pending. Once it lands, add a PREFILTER toggle here just like TABLE_FORMAT.
 # The pre-filter raises the smoothness HIT RATE, not speedup_total.

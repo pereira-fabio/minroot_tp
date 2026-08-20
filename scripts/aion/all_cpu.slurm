@@ -86,9 +86,9 @@ TABLE_FORMAT=""                          #     default: flat (uint32/uint64 tabl
 # ===========================================================================
 # NOTE — the pre-filter (paper Algorithm 5) is NOT toggled here (no flag yet).
 # ---------------------------------------------------------------------------
-# It is Phase 0 only: the selection primitive src/common/prefilter.{h,cpp}
-# (prefilter_simple_select), exercised solely by tests/prefilter_test.cpp and
-# gated separately by:   sbatch scripts/aion/prefilter_test.slurm
+# It is Phase 0 only: the selection primitive now lives in
+# experiments/prefilter/ and is called by no solver; Algorithm 4 carries its
+# own inline pre-filter. See experiments/prefilter/README.md.
 # There is no --prefilter solver flag yet — wiring it into the bench loop (a
 # `--prefilter simple` hook that swaps attempt-0 blinding for the parallel
 # argmin) is Phase 1, still pending. Once Phase 1 lands, add a PREFILTER toggle

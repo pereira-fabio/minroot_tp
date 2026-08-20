@@ -13,7 +13,8 @@ mkdir -p results/prefilter/aion
 # ===========================================================================
 # Is the simple pre-filter PROFITABLE?  (thesis sub4:prefilter)
 #
-# prefilter_test answers "is the parallel selection CORRECT?".  This answers
+# The companion correctness test has been removed (no solver calls the
+# primitive it exercised).  This script answers
 # the question the thesis needs: does one selection round cost less than the
 # sieving it saves?
 #
@@ -56,9 +57,9 @@ set -e
 cd "$SLURM_SUBMIT_DIR"
 
 echo "=== building prefilter_bench (direct mpicxx, no make) ==="
-mpicxx -O3 -std=c++17 -fopenmp -Wall -I src/common \
-       tests/prefilter_bench.cpp \
-       src/common/prefilter.cpp \
+mpicxx -O3 -std=c++17 -fopenmp -Wall -I src/common -I experiments/prefilter \
+       experiments/prefilter/prefilter_bench.cpp \
+       experiments/prefilter/prefilter.cpp \
        src/common/factorization.cpp \
        src/common/common.cpp \
        -lgmp -o prefilter_bench

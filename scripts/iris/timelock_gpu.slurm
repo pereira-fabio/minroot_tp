@@ -139,7 +139,7 @@ done
 # ---------------------------------------------------------------------------
 # Reproducibility gate — a fixed seed must reproduce a run exactly.
 #
-# This is here because tests/prefilter_test.cpp once claimed a cross-rank
+# This is here because the old prefilter test once claimed a cross-rank
 # invariant it could not actually check, having reseeded per rank. The counter
 # based RNG in attack_cuda.cu (splitmix64 over seed + batch counter + thread id)
 # is deliberately independent of scheduling, so the two runs below MUST report
