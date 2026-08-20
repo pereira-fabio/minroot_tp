@@ -120,17 +120,20 @@ check_q0() {  # check_q0 <name> <k32 recon> <alg3 recon> <alg3 output> <powm ms>
         record FAIL "$name" "no 'Cofactor precompute' line — the pre-pass did not run"
         return
     fi
-    if [ "$n" -lt 1 ]; then
-        record FAIL "$name" "precompute cached 0 roots — nothing was precomputed"
-        return
-    fi
+    # n = 0 is correct on a warm cache. tools/challenges.c seeds deterministically,
+    # so a rerun produces the same q0s, and the .cbrt_alg3 file on disk already
+    # holds their roots -- the pre-pass finds them present and computes nothing.
+    # Either way they are out of the timed region, which is what the timing check
+    # below actually measures.
+    local how="$n cached"
+    [ "$n" -eq 0 ] && how="warm cache"
     if [ -z "$r32" ] || [ -z "$r3" ] || [ -z "$powm" ]; then
         record SKIP "$name" "could not read recon_ms/baseline from the runs"
         return
     fi
     # Fail if the cofactor cost even half an exponentiation.
     if awk -v a="$r3" -v b="$r32" -v p="$powm" 'BEGIN{exit !((a-b) < p/2)}'; then
-        record PASS "$name" "$n cached; recon ${r3} vs k32 ${r32} ms, powm ${powm} ms"
+        record PASS "$name" "$how; recon ${r3} vs k32 ${r32} ms, powm ${powm} ms"
     else
         record FAIL "$name" "recon ${r3} ms exceeds k32 ${r32} by ~one powm (${powm} ms) — q0 not cached"
     fi
