@@ -271,7 +271,7 @@ mpirun -n 2 ./alg3 \
     data/challenges/alg3/modulo_alg3_1024_e5.txt \
     --method sieve --exponent 5
 
-# every canonical size in one execution, on a cluster
+# every canonical size in one execution — cluster only, srun is SLURM's
 srun --mpi=pmix -N 64 --ntasks=128 ./alg2_k32 \
     --all --data data/challenges/k32 \
     --method table --skip-powm-baseline \
@@ -308,6 +308,7 @@ sets how many are averaged.
     --method sieve
 
 # by directory and size, splitting the prime range over 4 devices
+# (--n-gpus above what you have warns and falls back)
 ./alg2_k32_cuda --data data/challenges/k32 --size 1024 \
     --method sieve --n-challenges 10 --n-gpus 4
 
@@ -324,6 +325,18 @@ Same flags as the CPU solvers, minus `--all`, `--cbrt-dir` and
 | `--size N` | challenge size, with `--data`, instead of naming both files |
 | `--n-gpus N` | split the prime range across N devices |
 | `--n-runs N` | warm runs to average |
+
+Two things worth knowing before the first k32 or k35 run:
+
+**`--method sieve` generates the primes every time.** For k32 that is 203
+million primes and about 35 seconds before any work starts, and the solver says
+so. `--method table` reads them from disk instead, but needs the 813 MB table
+built once with `mpirun -n 1 ./alg2_k32 --precompute`. Sieve is the zero-setup
+option; table is the one to use if you are running more than a couple of times.
+
+**`--n-challenges` above the number you generated is not an error on the GPU.**
+Missing files are skipped with a warning and the run continues on what exists.
+The CPU solvers' `--all` does the opposite and aborts on the first missing size.
 
 **Do not trust `speedup_total` from a GPU run.** Its `powm_baseline_ms` measures
 the forward `y^e` with a small exponent and comes out a few hundred times too
