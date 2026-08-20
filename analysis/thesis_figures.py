@@ -956,5 +956,3 @@ if __name__ == "__main__":
     fig_gap1()
     for _a in VAR_ALGS:
         fig_variability(_a)
-
-# Edit: 2026-07-31

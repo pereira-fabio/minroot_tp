@@ -27,6 +27,9 @@
 #include "gpu_common.h"
 #include "common.h"
 #include "factorization.h"
+#include "gpu_k32_kernels.cuh"
+#include "delta_table_gpu.cuh" // experiments/delta — L2-residency experiment
+#include "gpu_sieve.h"
 
 #include <gmp.h>
 #include <stdio.h>
@@ -36,149 +39,6 @@
 #include <inttypes.h>
 #include <chrono>
 #include <vector>
-// ---------------------------------------------------------------------------
-// Parallel segmented sieve helper for --method sieve.
-// Each OpenMP thread owns its own is_comp[] segment and output vector.
-// Results are merged in order after the parallel section.
-// Requires -Xcompiler -fopenmp at build time.
-// ---------------------------------------------------------------------------
-
-static uint32_t *sieve_primes_u32(uint64_t lo, uint64_t hi, int64_t *out_count)
-{
-    int n_small = 0;
-    unsigned long *small = generate_primes_up_to((uint64_t)(sqrt((double)hi)) + 2, &n_small);
-
-    const uint64_t SEG = (uint64_t)1 << 22; // 4M candidates per segment (4 MB bool vec)
-    int64_t n_segs = (int64_t)((hi - lo + SEG) / SEG);
-    std::vector<std::vector<uint32_t>> seg_out((size_t)n_segs);
-
-#pragma omp parallel for schedule(dynamic)
-    for (int64_t s = 0; s < n_segs; s++)
-    {
-        uint64_t seg_lo = lo + (uint64_t)s * SEG;
-        uint64_t seg_hi = seg_lo + SEG - 1;
-        if (seg_hi > hi)
-            seg_hi = hi;
-        uint64_t seg_sz = seg_hi - seg_lo + 1;
-
-        std::vector<bool> is_comp(seg_sz, false);
-        for (int i = 0; i < n_small; i++)
-        {
-            uint64_t p = (uint64_t)small[i];
-            if (p * p > seg_hi)
-                break;
-            uint64_t r = seg_lo % p;
-            uint64_t start = r ? (seg_lo + p - r) : seg_lo;
-            for (uint64_t m = start; m <= seg_hi; m += p)
-                is_comp[(size_t)(m - seg_lo)] = true;
-        }
-        for (uint64_t i = 0; i < seg_sz; i++)
-            if (!is_comp[i])
-                seg_out[s].push_back((uint32_t)(seg_lo + i));
-    }
-
-    free(small);
-    int64_t total = 0;
-    for (auto &v : seg_out)
-        total += (int64_t)v.size();
-    uint32_t *arr = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)total);
-    int64_t j = 0;
-    for (auto &v : seg_out)
-    {
-        memcpy(arr + j, v.data(), v.size() * sizeof(uint32_t));
-        j += (int64_t)v.size();
-    }
-    *out_count = total;
-    return arr;
-}
-
-// ---------------------------------------------------------------------------
-// GPU constant memory: current blinded value y
-// ---------------------------------------------------------------------------
-__constant__ uint64_t d_y_limbs[MAX_LIMBS];
-__constant__ int d_nlimbs;
-
-// ---------------------------------------------------------------------------
-// k32 trial-division kernel (identical to alg2_k32_cuda)
-// ---------------------------------------------------------------------------
-__global__ void k32_trial_divide_kernel(
-    const uint32_t *__restrict__ primes, int64_t nprimes,
-    uint64_t *out_factors, int *out_count)
-{
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t stride = (int64_t)gridDim.x * blockDim.x;
-    int nl = d_nlimbs;
-
-    for (int64_t i = idx; i < nprimes; i += stride)
-    {
-        uint64_t p = (uint64_t)primes[i];
-        uint64_t rem = mod_big_by_u32(d_y_limbs, nl, p);
-        if (rem == 0)
-        {
-            int slot = atomicAdd(out_count, 1);
-            if (slot < MAX_GPU_FACTORS)
-                out_factors[slot] = p;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// k32 DELTA trial-division kernel (identical to alg2_k32_cuda's delta kernel;
-// Algorithm 3 shares the same k32 table, so the byte layout is the same).
-// One CUDA block per 1024-prime delta block, grid-stride over blocks. Thread 0
-// decodes the block (anchor + running gap-half sum) into shared memory, then
-// all threads trial-divide with the SAME mod_big_by_u32 as the flat kernel.
-// Block layout (width=4): [uint32 anchor][uint8 gaphalf[len-1]];
-//   p[0]=anchor, p[k]=p[k-1]+2*gaphalf[k-1].
-// d_delta points at THIS device's contiguous block range; local block j is at
-// byte j*FULL. first_block_index is the GLOBAL index of local block 0 (needed
-// only to size the last, possibly-short block of the whole file).
-// ---------------------------------------------------------------------------
-#define K32_DELTA_FULL ((size_t)4 + (KF_DELTA_BLOCK - 1)) // 1027 bytes / full block
-
-__global__ void k32_trial_divide_delta_kernel(
-    const uint8_t *__restrict__ d_delta, uint32_t n_blocks,
-    uint64_t first_block_index, uint64_t total_count,
-    uint64_t *out_factors, int *out_count)
-{
-    __shared__ uint32_t s_primes[KF_DELTA_BLOCK]; // 4 KB
-    const int nlimbs = d_nlimbs;
-
-    for (uint32_t j = blockIdx.x; j < n_blocks; j += gridDim.x)
-    {
-        uint64_t g = first_block_index + j;
-        uint64_t base = g * (uint64_t)KF_DELTA_BLOCK;
-        uint32_t len = (base + KF_DELTA_BLOCK <= total_count)
-                           ? (uint32_t)KF_DELTA_BLOCK
-                           : (uint32_t)(total_count - base);
-        const uint8_t *r = d_delta + (size_t)j * K32_DELTA_FULL;
-
-        if (threadIdx.x == 0)
-        {
-            uint32_t cur = (uint32_t)r[0] | ((uint32_t)r[1] << 8) | ((uint32_t)r[2] << 16) | ((uint32_t)r[3] << 24);
-            s_primes[0] = cur;
-            const uint8_t *gh = r + 4;
-            for (uint32_t k = 1; k < len; k++)
-            {
-                cur += (uint32_t)gh[k - 1] << 1;
-                s_primes[k] = cur;
-            }
-        }
-        __syncthreads();
-
-        for (uint32_t k = threadIdx.x; k < len; k += blockDim.x)
-        {
-            uint64_t p = s_primes[k];
-            if (mod_big_by_u32(d_y_limbs, nlimbs, p) == 0)
-            {
-                int slot = atomicAdd(out_count, 1);
-                if (slot < MAX_GPU_FACTORS)
-                    out_factors[slot] = p;
-            }
-        }
-        __syncthreads(); // reuse s_primes next iteration
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Medium-prime cofactor root
@@ -877,5 +737,3 @@ cleanup:
 
     return solved_attempt >= 0 ? 0 : 2;
 }
-
-// Edit: 2026-08-20

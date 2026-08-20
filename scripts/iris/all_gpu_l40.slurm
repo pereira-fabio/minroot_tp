@@ -101,8 +101,8 @@ echo "========================================"
 
 # -arch=sm_70 embeds compute_70 PTX, which JITs fine on the L40 (sm_89) — this is
 # how the existing L40 results were produced. For native Ada codegen switch to sm_89.
-NVCC_FLAGS="-arch=sm_70 -std=c++17 -O3 -I src/common -Xcompiler -fopenmp"
-COMMON="src/common/common.cpp src/common/factorization.cpp"
+NVCC_FLAGS="-arch=sm_70 -std=c++17 -O3 -I src/common -I experiments/delta -Xcompiler -fopenmp"
+COMMON="src/common/common.cpp src/common/factorization.cpp experiments/delta/delta_table.cpp"
 LIBS="-lgmp -lgomp"
 
 build_one() {
@@ -223,7 +223,7 @@ if [ -x "$BINDIR/alg2_k32_cuda" ] && [ -f data/k32_primes.bin ]; then
           --json "$ALG2_DIR"/alg2_k32_table_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
 
       # Delta table (the L40 L2-residency experiment) — only if the .dlt has been
-      # built (on AION: ./alg2_k32 --convert-delta) and rsync'd here alongside .bin.
+      # built (make delta_convert && ./delta_convert data/k32_primes.bin) and rsync'd here alongside .bin.
       if [ -f data/k32_primes.dlt ]; then
         echo "--- k32 e=${EXP} size=${SIZE}: table (delta) ---"
         "$BINDIR/alg2_k32_cuda" \

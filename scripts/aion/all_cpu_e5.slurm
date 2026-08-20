@@ -70,7 +70,7 @@ export OMP_WAIT_POLICY=active
 #          --n-challenges 50 --cbrt-dir data/cbrt/alg2_k32_e5 --json out/k32
 #
 #   Optional — pre-build the .dlt yourself instead of the auto-build:
-#     srun -N1 --ntasks=2 ./alg2_k32 --convert-delta     # writes k32_primes.dlt
+#     ./delta_convert data/k32_primes.bin                # writes k32_primes.dlt
 #     # (the .dlt tables are exponent-independent — shared by the e3 and e5 runs)
 #
 # TABLE_FORMAT="--table-format delta"    # <-- UNCOMMENT this for the delta table
@@ -126,7 +126,7 @@ run_variant() {
     echo "============================================================"
 
     mpicxx -O3 -std=c++17 -fopenmp -Wall \
-        -I src/common \
+        -I src/common -I experiments/delta \
         src/aion/${SRC} src/common/solver_common.cpp \
         src/common/common.cpp src/common/factorization.cpp \
         -lgmp -o "$BIN"

@@ -72,10 +72,10 @@ BINARY=./cpu_scale_sim_${SLURM_JOB_ID}
 trap 'rm -f $BINARY' EXIT
 
 mpicxx -O3 -std=c++17 -fopenmp -Wall \
-    -I src/common \
-    src/aion/cpu_scale_sim.cpp src/common/solver_common.cpp \
+    -I src/common -I experiments/delta \
+    experiments/scale_sim/cpu_scale_sim.cpp src/common/solver_common.cpp \
     src/common/common.cpp src/common/factorization.cpp \
-    src/common/prefilter.cpp src/common/crt_common.cpp \
+    src/common/prefilter.cpp experiments/crt/crt_common.cpp \
     -lgmp -o $BINARY
 
 if [ $? -ne 0 ]; then echo "Compilation failed"; exit 1; fi

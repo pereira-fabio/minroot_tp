@@ -38,6 +38,7 @@
 
 #include "common.h"
 #include "factorization.h"
+#include "delta_table.h" // experiments/delta — L2-residency experiment
 #include "solver_common.h"
 #include "sizes.h"
 
@@ -456,7 +457,6 @@ int main(int argc, char *argv[])
     const char *cbrt_dir = KSC_CBRT_DIR;
     int run_all = 0;
     int do_precompute = 0;
-    int do_convert_delta = 0; // --convert-delta: build k32_primes.dlt and exit
     bool use_delta = false;   // --table-format delta: use the delta-encoded table
     bool primes_user_set = false;
     int n_challenges = 1;
@@ -524,10 +524,6 @@ int main(int argc, char *argv[])
         {
             do_precompute = 1;
         }
-        else if (strcmp(argv[argi], "--convert-delta") == 0)
-        {
-            do_convert_delta = 1;
-        }
         else if (strcmp(argv[argi], "--exponent") == 0 && argi + 1 < argc)
         {
             exponent = (unsigned long)atol(argv[++argi]);
@@ -575,15 +571,14 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (!run_all && !do_precompute && !do_convert_delta &&
+    if (!run_all && !do_precompute &&
         (!challenge_file || !modulo_file))
     {
         if (rank == 0)
             fprintf(stderr,
                     "Usage: k32_mpi <challenge> <modulo> [--method sieve|table] [--table-format flat|delta]\n"
                     "       k32_mpi --all [--data DIR] [--method sieve|table] [--table-format flat|delta]\n"
-                    "       k32_mpi --precompute [--primes FILE]\n"
-                    "       k32_mpi --convert-delta   (build k32_primes.dlt from k32_primes.bin, then exit)\n");
+                    "       k32_mpi --precompute [--primes FILE]\n");
         MPI_Finalize();
         return 1;
     }
@@ -648,29 +643,6 @@ int main(int argc, char *argv[])
             unsigned *sp2_arr = kf_generate_small_primes(&sp2);
             kf_generate_and_save_prime_table(primes_file, sp2, sp2_arr, "[rank 0] ");
             free(sp2_arr);
-        }
-        free(sp);
-        MPI_Finalize();
-        return 0;
-    }
-
-    // --convert-delta: rank 0 builds the delta table (k32_primes.dlt) from the
-    // flat table (~813 MB -> ~204 MB, 1 byte/prime), then all ranks exit.
-    if (do_convert_delta)
-    {
-        if (rank == 0)
-        {
-            const char *flat = ksc_ensure_k32_primes(sp_count, sp, rank);
-            char dpath[512];
-            if (primes_user_set)
-                snprintf(dpath, sizeof(dpath), "%s", primes_file);
-            else
-                k32_delta_path(dpath, sizeof(dpath), flat);
-            if (!kf_convert_prime_table_to_delta(flat, dpath, "[rank 0] "))
-            {
-                free(sp);
-                MPI_Abort(MPI_COMM_WORLD, 1);
-            }
         }
         free(sp);
         MPI_Finalize();

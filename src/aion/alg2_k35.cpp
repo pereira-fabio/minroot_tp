@@ -36,6 +36,7 @@
 
 #include "common.h"
 #include "factorization.h"
+#include "delta_table.h" // experiments/delta — L2-residency experiment
 #include "solver_common.h"
 #include "sizes.h"
 
@@ -524,7 +525,6 @@ int main(int argc, char *argv[])
     const char *modulo_suffix = "";
     const char *cbrt_dir = KSC_CBRT_DIR;
     int run_all = 0;
-    int do_convert_delta = 0; // --convert-delta: build both .dlt tables and exit
     bool use_delta = false;   // --table-format delta: use delta-encoded tables
     int n_challenges = 1;
     bool skip_powm = false;
@@ -578,10 +578,6 @@ int main(int argc, char *argv[])
                 return 1;
             }
         }
-        else if (strcmp(argv[argi], "--convert-delta") == 0)
-        {
-            do_convert_delta = 1;
-        }
         else if (strcmp(argv[argi], "--json") == 0 && argi + 1 < argc)
         {
             json_file = argv[++argi];
@@ -633,13 +629,12 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (!run_all && !do_convert_delta && (!challenge_file || !modulo_file))
+    if (!run_all && (!challenge_file || !modulo_file))
     {
         if (rank == 0)
             fprintf(stderr,
                     "Usage: k35_mpi <challenge> <modulo> [--method sieve|table] [--table-format flat|delta]\n"
-                    "       k35_mpi --all [--data DIR] [--method sieve|table] [--table-format flat|delta]\n"
-                    "       k35_mpi --convert-delta   (build k32_primes.dlt + k35_upper_primes.dlt, then exit)\n");
+                    "       k35_mpi --all [--data DIR] [--method sieve|table] [--table-format flat|delta]\n");
         MPI_Finalize();
         return 1;
     }
@@ -704,15 +699,6 @@ int main(int argc, char *argv[])
     for (int i = 0; i < omp_get_max_threads(); i++)
         (void)i;
 #endif
-
-    // --convert-delta: rank 0 builds both delta tables from the flat tables, exit.
-    if (do_convert_delta)
-    {
-        k35_ensure_delta(sp_count, sp, rank);
-        free(sp);
-        MPI_Finalize();
-        return 0;
-    }
 
     if (run_all)
     {

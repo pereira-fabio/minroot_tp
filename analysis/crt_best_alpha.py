@@ -121,5 +121,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# Edit: 2026-07-13

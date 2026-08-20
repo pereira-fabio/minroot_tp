@@ -97,8 +97,8 @@ echo "========================================"
 echo "BUILD PHASE"
 echo "========================================"
 
-NVCC_FLAGS="-arch=sm_70 -std=c++17 -O3 -I src/common -Xcompiler -fopenmp"
-COMMON="src/common/common.cpp src/common/factorization.cpp"
+NVCC_FLAGS="-arch=sm_70 -std=c++17 -O3 -I src/common -I experiments/delta -Xcompiler -fopenmp"
+COMMON="src/common/common.cpp src/common/factorization.cpp experiments/delta/delta_table.cpp"
 LIBS="-lgmp -lgomp"
 
 build_one() {
@@ -219,7 +219,7 @@ if [ -x "$BINDIR/alg2_k32_cuda" ] && [ -f data/k32_primes.bin ]; then
           --json "$ALG2_DIR"/alg2_k32_table_${SLURM_JOB_ID}_${SIZE}_e${EXP}.json
 
       # Delta table (L2-residency experiment) — only if the .dlt has been built
-      # (on AION: ./alg2_k32 --convert-delta) and rsync'd here alongside the .bin.
+      # (make delta_convert && ./delta_convert data/k32_primes.bin) and rsync'd here alongside the .bin.
       if [ -f data/k32_primes.dlt ]; then
         echo "--- k32 e=${EXP} size=${SIZE}: table (delta) ---"
         "$BINDIR/alg2_k32_cuda" \
@@ -270,7 +270,7 @@ if [ -x "$BINDIR/alg2_k35_cuda" ]; then
       fi
 
       # k35 delta: BOTH tables must be delta (width 4 lower + width 8 upper).
-      # Built on AION with ./k35_mpi --convert-delta, then rsync'd here.
+      # Built with ./delta_convert (add --u64 for the upper table), then rsync'd here.
       # 9.6 GB -> ~1.2 GB (8x) on the upper range — the largest compression in the study.
       if [ -f data/k32_primes.dlt ] && [ -f data/k35_upper_primes.dlt ]; then
         echo "--- k35 e=${EXP} size=${SIZE}: table (delta) ---"

@@ -24,31 +24,49 @@ modular exponentiation on the full challenge.
 
 ```
 src/
-  common/
-    k_common.h/.cpp          shared utilities: file I/O, sieve, GMP helpers, timing, JSON output
-    k_factorization.h/.cpp   factorization stack: sieve, trial division, Pollard's rho, cbrt cache, blinding tables
-    k_solver_common.h/.cpp   MPI+OpenMP shared infrastructure (broadcast, gather, precomputation)
-  solvers/
-    k16_mpi.cpp              Algorithm 2 solver — B = 2^16 prime factors
-    k32_mpi.cpp              Algorithm 2 solver — B = 2^32 prime factors
-    k35_mpi.cpp              Algorithm 2 solver — B = 2^35 (paper's concrete parameters)
+  common/                    shared infrastructure
+    common.h/.cpp              file I/O, sieve, GMP helpers, timing, JSON output
+    factorization.h/.cpp       sieve, trial division, Pollard's rho, cbrt cache, blinding
+    solver_common.h/.cpp       MPI+OpenMP scaffolding (broadcast, gather, bench loop)
+    prefilter.h/.cpp           B0 threshold pre-filter (Algorithm 4)
+    sizes.h                    canonical challenge sizes
+  aion/                      MPI+OpenMP solvers (CPU cluster)
+    alg2_k16.cpp               Algorithm 2, B = 2^16
+    alg2_k32.cpp               Algorithm 2, B = 2^32
+    alg2_k35.cpp               Algorithm 2, B = 2^35 (paper's concrete parameters)
+    alg3.cpp                   Algorithm 3, one medium prime cofactor
+    alg4.cpp                   Algorithm 4, composite cofactor
+    alg7.cpp                   Algorithm 7, inverted sieve
+  iris/                      CUDA solvers (GPU cluster)
+    gpu_common.h               device helpers, JSON, per-run stats
+    gpu_k32_kernels.cuh        the k32 trial-division kernel, shared by k32/k35/alg3/alg4
+    gpu_sieve.h                host-side segmented sieve for --method sieve
+    alg2_k16_cuda.cu  alg2_k32_cuda.cu  alg2_k35_cuda.cu
+    alg3_cuda.cu      alg4_cuda.cu      alg7_cuda.cu
+
+experiments/                 research code that is NOT part of the attack
+  delta/                     delta-encoded prime table (L2-residency experiment)
+  ksweep/                    smoothness-bound sweep
+  scale_sim/                 strong-scaling simulators (CPU and GPU)
+  crt/                       CRT exponentiation (negative result)
 
 tools/
-  challenges.c               challenge generator: produces B-smooth numbers mod a random prime
+  challenges.c               challenge generator
+  gen_prime_table.c          prime table for an arbitrary bound 2^k
+  timelock/                  standalone time-lock puzzle demo
 
-scripts/
-  challenge_gen.slurm        SLURM job: generate all challenge/modulo files
-  k16.slurm                  SLURM job array: k16_mpi scaling study
-  k32.slurm                  SLURM job array: k32_mpi scaling study
-  k35.slurm                  SLURM job array: k35_mpi scaling study
+tests/
+  prefilter_test.cpp         correctness of the B0 pre-filter
+  prefilter_bench.cpp        pre-filter cost measurement
 
-Makefile                     builds all targets (k16_mpi, k32_mpi, k35_mpi, challenges)
+scripts/aion/                SLURM jobs for the CPU cluster
+scripts/iris/                SLURM jobs for the GPU cluster
+analysis/                    Python plotting and analysis
 
-data/challenges/
-  k16/                       challenge and modulo files with 16-bit prime factors
-  k32/                       challenge and modulo files with 32-bit prime factors
-  k35/                       challenge and modulo files with 35-bit prime factors
+Makefile                     CPU builds; src/iris/Makefile builds the CUDA targets
 ```
+
+See `experiments/README.md` for what each experiment asked and what it found.
 
 ---
 
@@ -126,18 +144,13 @@ pattern is identical to k32_mpi.
 
 ## Build
 
-### Using Make (recommended)
+### CPU (AION)
 
 ```bash
-# Build all targets
-make
-
-# Build individual targets
-make k16_mpi
-make k32_mpi
-make k35_mpi
-make challenges
-
+make                  # the six solvers + the challenge generator
+make experiments      # alg_crt, cpu_scale_sim, delta_convert
+make tools            # challenges, gen_prime_table
+make tests            # prefilter_test, prefilter_bench
 make clean
 ```
 
@@ -149,32 +162,30 @@ module load mpi/OpenMPI/4.1.6-GCC-13.2.0
 module load math/GMP/6.3.0-GCCcore-13.2.0
 ```
 
-### Manual compilation
+### GPU (IRIS)
 
 ```bash
-# challenge generator
-gcc -O2 -fopenmp tools/challenges.c -lgmp -o challenges
-
-# k16_mpi
-mpicxx -O3 -std=c++17 -fopenmp -Wall -I src/common \
-    src/solvers/k16_mpi.cpp src/common/k_solver_common.cpp \
-    src/common/k_common.cpp src/common/k_factorization.cpp \
-    -lgmp -o k16_mpi
-
-# k32_mpi
-mpicxx -O3 -std=c++17 -fopenmp -Wall -I src/common \
-    src/solvers/k32_mpi.cpp src/common/k_solver_common.cpp \
-    src/common/k_common.cpp src/common/k_factorization.cpp \
-    -lgmp -o k32_mpi
-
-# k35_mpi
-mpicxx -O3 -std=c++17 -fopenmp -Wall -I src/common \
-    src/solvers/k35_mpi.cpp src/common/k_solver_common.cpp \
-    src/common/k_common.cpp src/common/k_factorization.cpp \
-    -lgmp -o k35_mpi
+module load system/CUDA/12.6.0
+make -C src/iris                       # the six CUDA solvers
+make -C src/iris experiments           # alg_crt_cuda, alg2_ksweep_cuda, gpu_scale_sim_cuda
+make -C src/iris ARCH=sm_89            # L40 instead of the V100 default (sm_70)
 ```
 
----
+### Manual compilation
+
+Every CPU solver takes the same three shared sources plus the delta module, and
+needs both include paths:
+
+```bash
+mpicxx -O3 -std=c++17 -fopenmp -Wall \
+    -I src/common -I experiments/delta \
+    src/aion/alg2_k32.cpp \
+    src/common/common.cpp src/common/factorization.cpp src/common/solver_common.cpp \
+    experiments/delta/delta_table.cpp \
+    -lgmp -o alg2_k32
+```
+
+Substitute any of `alg2_k16`, `alg2_k32`, `alg2_k35`, `alg3`, `alg4`, `alg7`.
 
 ## Usage
 

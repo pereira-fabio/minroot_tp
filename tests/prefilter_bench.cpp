@@ -205,5 +205,3 @@ int main(int argc, char **argv)
     MPI_Finalize();
     return 0;
 }
-
-// Edit: 2026-07-27

@@ -80,8 +80,8 @@ echo ""
 CHAL_SIZES="24576"
 
 # ---- Build ----------------------------------------------------------------
-NVCC_FLAGS="-arch=sm_89 -std=c++17 -O3 -I src/common -Xcompiler -fopenmp"
-COMMON="src/common/common.cpp src/common/factorization.cpp"
+NVCC_FLAGS="-arch=sm_89 -std=c++17 -O3 -I src/common -I experiments/delta -Xcompiler -fopenmp"
+COMMON="src/common/common.cpp src/common/factorization.cpp experiments/delta/delta_table.cpp"
 LIBS="-lgmp -lgomp"
 
 # ---- Challenge set ---------------------------------------------------------
@@ -112,7 +112,7 @@ gcc -O2 tools/gen_prime_table.c -o "$BINDIR/gen_prime_table" \
     && echo "OK" || { echo "FAILED"; exit 1; }
 
 echo -n "Building alg2_ksweep_cuda ... "
-nvcc src/iris/alg2_ksweep_cuda.cu $COMMON $NVCC_FLAGS $LIBS -o "$BINDIR/alg2_ksweep_cuda" \
+nvcc experiments/ksweep/alg2_ksweep_cuda.cu $COMMON $NVCC_FLAGS $LIBS -o "$BINDIR/alg2_ksweep_cuda" \
     && echo "OK" || { echo "FAILED"; exit 1; }
 echo ""
 

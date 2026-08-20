@@ -22,10 +22,18 @@
 *.dwo
 
 # Project executables (built by make)
-k16_mpi
-k32_mpi
-k35_mpi
+alg2_k16
+alg2_k32
+alg2_k35
+alg3
+alg4
+alg7
+alg_crt
+cpu_scale_sim
 challenges
+gen_prime_table
+prefilter_test
+prefilter_bench
 
 # ── Python ───────────────────────────────────────────────
 __pycache__/
@@ -40,7 +48,6 @@ build/
 # Python virtual environment
 analysis/env/
 analysis/venv/
-tests/
 
 # ── Project-specific generated files ─────────────────────
 # Generated benchmark figures
@@ -52,6 +59,7 @@ data/cbrt/
 
 # Large precomputed prime table files (can be 800 MB – 10 GB)
 *.bin
+*.dlt
 
 # ── HPC / SLURM ──────────────────────────────────────────
 slurm-*.out

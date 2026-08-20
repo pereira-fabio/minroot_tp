@@ -375,5 +375,3 @@ print()
 print("B=2^32: P(k32 hit at n bits) = ρ(n/32)")
 print("B=2^35: P(k35 hit at n bits) = ρ(n/35)  [paper's primary Algo2]")
 print()
-
-# Edit: 2026-07-07

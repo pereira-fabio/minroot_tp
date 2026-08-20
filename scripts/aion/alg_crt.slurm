@@ -74,10 +74,10 @@ BINARY=./alg_crt_N${N_NODES}
 trap 'rm -f $BINARY' EXIT
 
 mpicxx -O3 -std=c++17 -fopenmp -Wall \
-    -I src/common \
-    src/aion/alg_crt.cpp src/common/solver_common.cpp \
+    -I src/common -I experiments/delta \
+    experiments/crt/alg_crt.cpp src/common/solver_common.cpp \
     src/common/common.cpp src/common/factorization.cpp \
-    src/common/prefilter.cpp src/common/crt_common.cpp \
+    src/common/prefilter.cpp experiments/crt/crt_common.cpp \
     -lgmp -o alg_crt_N${N_NODES}
 
 if [ $? -ne 0 ]; then echo "Compilation failed"; exit 1; fi

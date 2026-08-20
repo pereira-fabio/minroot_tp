@@ -1244,8 +1244,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# Edit: 2026-06-12  (new-schema support; is_alg3 trusts algorithm field [alg7 no longer
 # misclassified]; identity-based k16/32/35 selection [no k_size=32 collision with
 # alg3/4/7]; inject_powm_baselines joins the skipped sieve/table baseline for speedup plots;
 # fig 08 cold-vs-warm overlay [additive, no-op when no cold_run present])

@@ -29,6 +29,7 @@
 
 #include "common.h"
 #include "factorization.h"
+#include "delta_table.h" // experiments/delta — L2-residency experiment
 #include "solver_common.h"
 #include "sizes.h"
 
@@ -426,7 +427,6 @@ int main(int argc, char *argv[])
     const char *modulo_suffix = "";
     const char *cbrt_dir = KSC_CBRT_DIR;
     int run_all = 0;
-    int do_convert_delta = 0; // --convert-delta: build k32_primes.dlt and exit
     bool use_delta = false;   // --table-format delta: use the delta-encoded table
     bool primes_user_set = false;
     int n_challenges = 1;
@@ -487,10 +487,6 @@ int main(int argc, char *argv[])
                 return 1;
             }
         }
-        else if (strcmp(argv[argi], "--convert-delta") == 0)
-        {
-            do_convert_delta = 1;
-        }
         else if (strcmp(argv[argi], "--json") == 0 && argi + 1 < argc)
         {
             json_file = argv[++argi];
@@ -542,13 +538,12 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (!run_all && !do_convert_delta && (!challenge_file || !modulo_file))
+    if (!run_all && (!challenge_file || !modulo_file))
     {
         if (rank == 0)
             fprintf(stderr,
                     "Usage: alg3_mpi <challenge> <modulo> [--method sieve|table|powm] [--table-format flat|delta]\n"
                     "       alg3_mpi --all [--data DIR] [--method sieve|table|powm] [--table-format flat|delta]\n"
-                    "       alg3_mpi --convert-delta   (build k32_primes.dlt from k32_primes.bin, then exit)\n"
                     "       (--primes FILE defaults to k32_primes.bin; only used with --method table)\n");
         MPI_Finalize();
         return 1;
@@ -579,28 +574,6 @@ int main(int argc, char *argv[])
 
     int sp_count;
     unsigned *sp = kf_generate_small_primes(&sp_count);
-
-    // --convert-delta: rank 0 builds k32_primes.dlt from k32_primes.bin, then exit.
-    if (do_convert_delta)
-    {
-        if (rank == 0)
-        {
-            const char *flat = ksc_ensure_k32_primes(sp_count, sp, rank);
-            char dpath[512];
-            if (primes_user_set)
-                snprintf(dpath, sizeof(dpath), "%s", primes_file);
-            else
-                alg3_delta_path(dpath, sizeof(dpath), flat);
-            if (!kf_convert_prime_table_to_delta(flat, dpath, "[rank 0] "))
-            {
-                free(sp);
-                MPI_Abort(MPI_COMM_WORLD, 1);
-            }
-        }
-        free(sp);
-        MPI_Finalize();
-        return 0;
-    }
 
     if (method == METHOD_TABLE)
     {

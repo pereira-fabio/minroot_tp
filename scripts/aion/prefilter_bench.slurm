@@ -56,7 +56,7 @@ set -e
 cd "$SLURM_SUBMIT_DIR"
 
 echo "=== building prefilter_bench (direct mpicxx, no make) ==="
-mpicxx -O3 -std=c++17 -fopenmp -Wall -I src/common \
+mpicxx -O3 -std=c++17 -fopenmp -Wall -I src/common -I experiments/delta -I experiments/delta \
        tests/prefilter_bench.cpp \
        src/common/prefilter.cpp \
        src/common/factorization.cpp \

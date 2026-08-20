@@ -88,5 +88,3 @@ for ext in ("pdf", "png"):
 print("wrote dickman_rho.pdf and dickman_rho.png")
 print(f"check: rho(2)={rho_at(2):.3f}  rho(4)={rho_at(4):.5f}  "
       f"rho(6)={rho_at(6):.3e}  rho(8)={rho_at(8):.3e}")
-
-# Edit: 2026-07-07

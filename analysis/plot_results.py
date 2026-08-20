@@ -384,5 +384,3 @@ if __name__ == "__main__":
     a=cat_A(); b=cat_B(); c=cat_C(); d=cat_D(); e=cat_E()
     print(f"generated  A(scaling)={a}  B(per_size)={b}  C(global)={c}  "
           f"D(per_config)={d}  E(projection)={e}  total={a+b+c+d+e}")
-
-# Edit: 2026-07-10

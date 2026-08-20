@@ -74,10 +74,10 @@ export OMP_WAIT_POLICY=active
 #          --n-challenges 50 --cbrt-dir data/cbrt/alg2_k32_e3 --json out/k32
 #
 #   Optional — pre-build the .dlt yourself instead of the auto-build:
-#     mpicxx -O3 -std=c++17 -fopenmp -I src/common src/aion/alg2_k32.cpp \
+#     mpicxx -O3 -std=c++17 -fopenmp -I src/common -I experiments/delta src/aion/alg2_k32.cpp \
 #            src/common/*.cpp -lgmp -o alg2_k32
-#     srun -N1 --ntasks=2 ./alg2_k32 --convert-delta     # writes k32_primes.dlt
-#     # (alg2_k35 --convert-delta writes BOTH k32_primes.dlt + k35_upper_primes.dlt)
+#     ./delta_convert data/k32_primes.bin                # writes k32_primes.dlt
+#     # (add --u64 for the k35 upper table: ./delta_convert --u64 data/k35_upper_primes.bin)
 #
 # TABLE_FORMAT="--table-format delta"    # <-- UNCOMMENT this for the delta table
 TABLE_FORMAT=""                          #     default: flat (uint32/uint64 table)
@@ -136,7 +136,7 @@ run_variant() {
     echo "============================================================"
 
     mpicxx -O3 -std=c++17 -fopenmp -Wall \
-        -I src/common \
+        -I src/common -I experiments/delta \
         src/aion/${SRC} src/common/solver_common.cpp \
         src/common/common.cpp src/common/factorization.cpp \
         -lgmp -o "$BIN"
