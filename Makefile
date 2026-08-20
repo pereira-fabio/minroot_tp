@@ -14,10 +14,11 @@
 #   make gpu ARCH=sm_80   # A100
 # =============================================================================
 
-CXXFLAGS = -O3 -std=c++17 -fopenmp -Wall
-CFLAGS   = -O2 -fopenmp
-INCLUDE  = -I src/common -I experiments/delta
-LIBS     = -lgmp
+MPICXX   ?= mpicxx
+CXXFLAGS  = -O3 -std=c++17 -fopenmp -Wall
+CFLAGS    = -O2 -fopenmp
+INCLUDE   = -I src/common -I experiments/delta
+LIBS      = -lgmp
 
 NVCC       ?= nvcc
 ARCH       ?= sm_70
@@ -52,22 +53,22 @@ tools: challenges gen_prime_table
 # --- algorithms, CPU ---------------------------------------------------------
 
 alg2_k16: src/aion/alg2_k16.cpp $(COMMON_SRC)
-	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
+	$(MPICXX) $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
 alg2_k32: src/aion/alg2_k32.cpp $(COMMON_SRC)
-	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
+	$(MPICXX) $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
 alg2_k35: src/aion/alg2_k35.cpp $(COMMON_SRC)
-	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
+	$(MPICXX) $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
 alg3: src/aion/alg3.cpp $(COMMON_SRC)
-	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
+	$(MPICXX) $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
 alg4: src/aion/alg4.cpp $(COMMON_SRC)
-	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
+	$(MPICXX) $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
 alg7: src/aion/alg7.cpp $(COMMON_SRC)
-	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
+	$(MPICXX) $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
 # --- algorithms, GPU ---------------------------------------------------------
 
@@ -93,18 +94,18 @@ alg7_cuda: src/iris/alg7_cuda.cu $(GPU_COMMON_SRC)
 
 # CRT exponentiation — negative result, never approaches the baseline.
 alg_crt: experiments/crt/alg_crt.cpp experiments/crt/crt_common.cpp $(COMMON_SRC)
-	mpicxx $(CXXFLAGS) $(INCLUDE) -I experiments/crt $^ $(LIBS) -o $@
+	$(MPICXX) $(CXXFLAGS) $(INCLUDE) -I experiments/crt $^ $(LIBS) -o $@
 
 # Strong-scaling simulator used for the beyond-128-rank projections.
 cpu_scale_sim: experiments/scale_sim/cpu_scale_sim.cpp $(COMMON_SRC)
-	mpicxx $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
+	$(MPICXX) $(CXXFLAGS) $(INCLUDE) $^ $(LIBS) -o $@
 
 # B0 threshold pre-filter cost. No solver calls this primitive; Algorithm 4 has
 # its own inline pre-filter. Kept because it produced the thesis C_pf figures.
 prefilter_bench: experiments/prefilter/prefilter_bench.cpp \
                  experiments/prefilter/prefilter.cpp \
                  src/common/common.cpp src/common/factorization.cpp
-	mpicxx $(CXXFLAGS) $(INCLUDE) -I experiments/prefilter $^ $(LIBS) -o $@
+	$(MPICXX) $(CXXFLAGS) $(INCLUDE) -I experiments/prefilter $^ $(LIBS) -o $@
 
 # Flat prime table -> delta table. Replaces the old `--convert-delta` mode.
 delta_convert: experiments/delta/delta_convert.cpp experiments/delta/delta_table.cpp \

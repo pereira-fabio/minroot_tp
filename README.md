@@ -65,6 +65,7 @@ scripts/                     the sweeps that reproduce the results, nothing else
 analysis/                    Python plotting and analysis
 
 Makefile                     all builds, CPU and CUDA
+REQUIREMENTS.md              prerequisites, install, smoke test
 ```
 
 See `experiments/README.md` for what each experiment asked and what it found.
@@ -176,6 +177,10 @@ lifts `y = x + r*M` for one that is smooth, inverting the loop nesting. Reaches
 26.76x at 128 ranks; its table method is not usable.
 
 ## Build
+
+Prerequisites, install commands per platform, disk/RAM needs and a one-minute
+smoke test are in [REQUIREMENTS.md](REQUIREMENTS.md). In short: an MPI compiler,
+GMP and OpenMP for the CPU solvers; CUDA only for the GPU ones.
 
 ### CPU (AION)
 
