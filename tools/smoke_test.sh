@@ -51,6 +51,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 PASS=0; FAIL=0; SKIP=0
 RESULTS=""
+LAST_OUT=""
 
 record() {  # record <status> <name> <detail>
     RESULTS="${RESULTS}$1|$2|$3
@@ -68,6 +69,7 @@ check() {  # check <name> <command...>
     local name="$1"; shift
     local out rc
     out=$("$@" 2>&1); rc=$?
+    LAST_OUT="$out"
     if echo "$out" | grep -q "SUCCESS: .*root is correct"; then
         record PASS "$name" "correctness gate passed"
     elif echo "$out" | grep -q "FAILURE: .*root is incorrect"; then
@@ -98,6 +100,39 @@ check_baseline() {  # check_baseline <name> <command...>
         record FAIL "$name" "$why"
     else
         record FAIL "$name" "no baseline measurement in output"
+    fi
+}
+
+
+# cbrt(q0) is a full-width modular exponentiation whose cost is set by |M|, not
+# by the size of q0. Algorithms 3 and 4 need it; k32 does not. Both reconstruct
+# a comparable set of small primes, so the gap between their recon_ms is what
+# the cofactor costs: a cache read if the untimed precompute ran, a whole
+# exponentiation if it did not. That makes the check self-calibrating -- it
+# needs no absolute threshold, only the measured cost of one powm at this size.
+recon_of() { echo "$1" | sed -n 's/.*recon_ms  *(CPU) *: *\([0-9.][0-9.]*\).*/\1/p' | head -1; }
+
+check_q0() {  # check_q0 <name> <k32 recon> <alg3 recon> <alg3 output> <powm ms>
+    local name="$1" r32="$2" r3="$3" out="$4" powm="$5"
+    local n
+    n=$(echo "$out" | sed -n 's/.*Cofactor precompute: *\([0-9][0-9]*\) root.*/\1/p' | head -1)
+    if [ -z "$n" ]; then
+        record FAIL "$name" "no 'Cofactor precompute' line — the pre-pass did not run"
+        return
+    fi
+    if [ "$n" -lt 1 ]; then
+        record FAIL "$name" "precompute cached 0 roots — nothing was precomputed"
+        return
+    fi
+    if [ -z "$r32" ] || [ -z "$r3" ] || [ -z "$powm" ]; then
+        record SKIP "$name" "could not read recon_ms/baseline from the runs"
+        return
+    fi
+    # Fail if the cofactor cost even half an exponentiation.
+    if awk -v a="$r3" -v b="$r32" -v p="$powm" 'BEGIN{exit !((a-b) < p/2)}'; then
+        record PASS "$name" "$n cached; recon ${r3} vs k32 ${r32} ms, powm ${powm} ms"
+    else
+        record FAIL "$name" "recon ${r3} ms exceeds k32 ${r32} by ~one powm (${powm} ms) — q0 not cached"
     fi
 }
 
@@ -179,7 +214,9 @@ if [ "$RUN_GPU" = 1 ]; then
 
     check "gpu k16   sieve" G alg2_k16 "$K16" sieve
     check "gpu k32   sieve" G alg2_k32 "$K32" sieve
+    Q0_R32=$(recon_of "$LAST_OUT")
     check "gpu alg3  sieve" G alg3     "$A3"  sieve
+    Q0_R3=$(recon_of "$LAST_OUT"); Q0_OUT="$LAST_OUT"
     check "gpu alg4  sieve" G alg4     "$A4"  sieve
 
     # Exponent 5 against the _e5 moduli. Before --modulo-suffix existed these
@@ -188,6 +225,15 @@ if [ "$RUN_GPU" = 1 ]; then
                        --modulo-suffix _e5 --n-challenges "$NCH" --n-gpus 1; }
     check "gpu k32   e5"    E5 alg2_k32 "$K32"
     check "gpu alg3  e5"    E5 alg3     "$A3"
+
+    # The q0 precompute: is cbrt(q0) out of the timed region on the GPU path?
+    if [ "$RUN_CPU" = 1 ]; then
+        Q0_POWM=$(mpirun -n 1 ./alg3 $A3/challenge_0_alg3_$SIZE.txt $A3/modulo_alg3_$SIZE.txt \
+                    --method powm 2>&1 | sed -n 's/.*powm (sequential baseline):[^=]*= *\([0-9.][0-9.]*\) ms.*/\1/p' | head -1)
+    else
+        Q0_POWM=""
+    fi
+    check_q0 "gpu alg3  q0" "$Q0_R32" "$Q0_R3" "$Q0_OUT" "$Q0_POWM"
 
     if [ "$SLOW" = 1 ]; then
         check "gpu alg7  sieve" G alg7 "$A3" sieve
