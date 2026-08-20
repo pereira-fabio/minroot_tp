@@ -13,7 +13,7 @@ for the cluster sweeps. The CPU code builds and runs on an ordinary laptop.
 | | Used for | Minimum | Used in this study |
 |---|---|---|---|
 | C++17 compiler | all solvers | GCC 7 / Clang 5 | GCC 13.2.0 |
-| MPI implementation | `mpicxx`, rank distribution | MPI 2.0 (`MPI_IN_PLACE`) | Open MPI 4.1.6 |
+| MPI implementation | `mpicxx`, rank distribution | MPI 2.0 (`MPI_IN_PLACE`) | Open MPI 4.1.6; MPICH 4.3.2 also verified |
 | GMP | all multi-precision arithmetic | 5.0 | 6.3.0 |
 | OpenMP | per-rank threading | 3.1 (GCC 4.7) | OpenMP 5.2 |
 | GNU make, `gcc` | build, and the C tools | any | — |
@@ -21,7 +21,41 @@ for the cluster sweeps. The CPU code builds and runs on an ordinary laptop.
 The code declares `-std=c++17` but uses no C++17 library features (no
 `std::filesystem`, no structured bindings), and every GMP call is long-stable
 API, so older toolchains than the ones above will very likely work. The versions
-in the right-hand column are what the reported results were produced with.
+in the right-hand column are what the reported results were produced with; the
+whole tree has also been built warning-free on GCC 15.2.0, three major versions
+newer.
+
+### A broken MPI install looks like a crash in this code
+
+Observed on Ubuntu 25.10 with its Open MPI 5.0.10 packaging: every MPI program
+dies with `Illegal instruction` (exit 132) inside `MPI_Init`, before any of its
+own code runs. The symptom is easy to misread, because
+
+- the process produces **no output at all**, so it looks like the solver failed
+  at startup — and under `mpirun` stdout is a pipe, so even output that *was*
+  written is lost when the process dies by signal (use `stdbuf -o0` to see it);
+- `mpirun -n 2 hostname` still works, because `hostname` never calls `MPI_Init`;
+- the error text is `prun:proc-aborted-strsignal` alongside a complaint about a
+  missing help file, which names no cause.
+
+The tell is that `mpirun --version` also fails, and that the help files are
+missing from both the PMIx and PRRTE directories — Open MPI 5.x is built against
+external PMIx and PRRTE on Debian and Ubuntu, and that combination is where this
+went wrong.
+
+**MPICH is a drop-in fix.** This code uses only MPI 2.0 calls, so nothing here
+depends on which implementation you use:
+
+```bash
+sudo apt install mpich libmpich-dev
+sudo update-alternatives --set mpi /usr/bin/mpicc.mpich
+sudo update-alternatives --set mpirun /usr/bin/mpirun.mpich
+make clean && make
+```
+
+Verified working with MPICH 4.3.2 and GCC 15.2.0. None of this affects the
+clusters, where Open MPI 4.1.6 is loaded as a module and is what every published
+result was measured with.
 
 ### Install
 
@@ -197,8 +231,28 @@ report that as `prun:proc-aborted-strsignal`, often alongside a complaint about
 a missing help file, which tells you nothing about the cause. Two things it is
 usually not, and one it usually is:
 
-1. **Check MPI itself first.** `mpirun -n 2 hostname` should print your hostname
-   twice. If that fails, the problem is the MPI installation, not this code.
+1. **Check MPI itself first — and check it properly.** `mpirun -n 2 hostname`
+   is not enough: `hostname` never calls `MPI_Init`, so it only proves the
+   launcher runs programs. Compile a six-line MPI program instead:
+
+   ```bash
+   cat > /tmp/hello.c <<'EOF'
+   #include <mpi.h>
+   #include <stdio.h>
+   int main(int argc, char **argv) {
+       MPI_Init(&argc, &argv);
+       int r; MPI_Comm_rank(MPI_COMM_WORLD, &r);
+       printf("rank %d alive\n", r);
+       MPI_Finalize();
+       return 0;
+   }
+   EOF
+   mpicc /tmp/hello.c -o /tmp/hello && mpirun -n 2 /tmp/hello
+   ```
+
+   If *that* aborts, no solver here can run and the fault is the MPI
+   installation. See "A broken MPI install looks like a crash in this code"
+   below.
 2. **`--all` needs every canonical size.** It iterates
    {256, 384, 512, 768, 1024, 2048, 4096, 8192, 16384, 24576} and aborts on the
    first one it cannot find, so generating only 1024 bits is not enough:
