@@ -252,14 +252,18 @@ its own right, not an oversight.
 ### Everything at once
 
 ```bash
-./tools/smoke_test.sh
+make test
 ```
 
 Builds what is missing, generates small challenges, runs every solver once and
 checks each result against the correctness gate, then prints a pass/fail table.
 It uses the GPU too if `nvcc` and a card are present, and skips that half
-cleanly if not. `--slow` adds k35 and alg7, which are slow for a reason the
-script explains; `--cpu` / `--gpu` / `--size N` narrow it down.
+cleanly if not, and it covers both exponents — e=5 needs its own moduli, where
+gcd(5, M-1) = 1.
+
+For the options, call the script directly: `./tools/smoke_test.sh --help`.
+`--slow` adds k35 and alg7, which are slow for a reason the script explains;
+`--cpu` / `--gpu` / `--size N` narrow it down.
 
 A failing row shows why — a wrong root, a signal, a missing file — rather than
 just a non-zero exit.

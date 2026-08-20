@@ -6,6 +6,7 @@
 #   make experiments      research code, CPU           — see experiments/README.md
 #   make gpu-experiments  research code, CUDA
 #   make tools            challenge and prime-table generators
+#   make test             build, run every solver, check every result
 #
 # GPU builds detect the card in this machine, so `make gpu` normally needs no
 # argument. Override or force portability when the build host has no GPU:
@@ -73,7 +74,7 @@ GPU_COMMON_SRC = src/common/common.cpp \
                  src/common/factorization.cpp \
                  experiments/delta/delta_table.cpp
 
-.PHONY: all gpu gpu-arch experiments gpu-experiments tools clean
+.PHONY: all gpu gpu-arch experiments gpu-experiments tools test clean
 
 # The six algorithms the thesis measures.
 all: alg2_k16 alg2_k32 alg2_k35 alg3 alg4 alg7 challenges
@@ -91,6 +92,12 @@ experiments: alg_crt cpu_scale_sim delta_convert prefilter_bench
 gpu-experiments: alg_crt_cuda alg2_ksweep_cuda gpu_scale_sim_cuda
 
 tools: challenges gen_prime_table
+
+# The project's test: builds what is missing, runs every solver once at a small
+# size and checks each result against the correctness gate. Adds the GPU half
+# when nvcc and a card are present. See tools/smoke_test.sh --help.
+test:
+	@./tools/smoke_test.sh
 
 # --- algorithms, CPU ---------------------------------------------------------
 

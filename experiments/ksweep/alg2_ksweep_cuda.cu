@@ -180,6 +180,11 @@ int main(int argc, char **argv)
     const char *challenge_file = nullptr;
     const char *modulo_file = nullptr;
     const char *data_dir = nullptr;
+    // Suffix on the modulus filename, e.g. "_e5" for the exponent-5 moduli that
+    // challenge_gen_e5.slurm generates with gcd(5, M-1) = 1. Challenge files are
+    // exponent-agnostic and shared, so only the modulus changes. Mirrors
+    // --modulo-suffix on the MPI solvers.
+    const char *modulo_suffix = "";
     int size_bits = 0;
     unsigned long exponent = 3;
     const char *primes_path = nullptr; // resolved from k unless overridden
@@ -203,6 +208,8 @@ int main(int argc, char **argv)
             data_dir = argv[++i];
         else if (!strcmp(argv[i], "--size") && i + 1 < argc)
             size_bits = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--modulo-suffix") && i + 1 < argc)
+            modulo_suffix = argv[++i];
         else if (!strcmp(argv[i], "--n-challenges") && i + 1 < argc)
             n_challenges = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--n-runs") && i + 1 < argc)
@@ -256,7 +263,7 @@ int main(int argc, char **argv)
     if (data_dir && size_bits > 0 && !challenge_file)
     {
         snprintf(cbuf, sizeof(cbuf), "%s/challenge_0_%d_%d.txt", data_dir, chal_k, size_bits);
-        snprintf(mbuf, sizeof(mbuf), "%s/modulo_%d_%d.txt", data_dir, chal_k, size_bits);
+        snprintf(mbuf, sizeof(mbuf), "%s/modulo_%d_%d%s.txt", data_dir, chal_k, size_bits, modulo_suffix);
         challenge_file = cbuf;
         modulo_file = mbuf;
     }

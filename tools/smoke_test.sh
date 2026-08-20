@@ -133,6 +133,13 @@ for spec in "16" "32" "35" "32 alg3" "32 alg4" "32 alg4_multi"; do
     ./challenges "$NCH" "$SIZE" $spec >/dev/null 2>&1 \
         || echo "  warning: generation failed for: $spec"
 done
+# Exponent-5 moduli: same challenges, but a modulus with gcd(5, M-1) = 1,
+# written as modulo_<B>_<bits>_e5.txt. Selected with --modulo-suffix _e5.
+for spec in "16" "32" "32 alg3" "32 alg4"; do
+    # shellcheck disable=SC2086
+    ./challenges "$NCH" "$SIZE" $spec --exponent 5 >/dev/null 2>&1 \
+        || echo "  warning: e5 generation failed for: $spec"
+done
 echo "done."
 
 K16=data/challenges/k16;  K32=data/challenges/k32;  K35=data/challenges/k35
@@ -149,6 +156,8 @@ if [ "$RUN_CPU" = 1 ]; then
     check "cpu alg3  sieve" M ./alg3     $A3/challenge_0_alg3_$SIZE.txt  $A3/modulo_alg3_$SIZE.txt  --method sieve
     check "cpu alg4  sieve" M ./alg4     $A4/challenge_0_alg4_$SIZE.txt  $A4/modulo_alg4_$SIZE.txt  --method sieve
     check_baseline "cpu k16  powm" M ./alg2_k16 $K16/challenge_0_16_$SIZE.txt $K16/modulo_16_$SIZE.txt --method powm
+    check "cpu k32   e5"    M ./alg2_k32 $K32/challenge_0_32_$SIZE.txt  $K32/modulo_32_${SIZE}_e5.txt  --method sieve --exponent 5
+    check "cpu alg3  e5"    M ./alg3     $A3/challenge_0_alg3_$SIZE.txt $A3/modulo_alg3_${SIZE}_e5.txt --method sieve --exponent 5
     if [ "$SLOW" = 1 ]; then
         check "cpu k35   sieve" M ./alg2_k35 $K35/challenge_0_35_$SIZE.txt  $K35/modulo_35_$SIZE.txt  --method sieve
         check "cpu alg7  sieve" M ./alg7     $A3/challenge_0_alg3_$SIZE.txt $A3/modulo_alg3_$SIZE.txt --method sieve --R 1048576
@@ -172,6 +181,13 @@ if [ "$RUN_GPU" = 1 ]; then
     check "gpu k32   sieve" G alg2_k32 "$K32" sieve
     check "gpu alg3  sieve" G alg3     "$A3"  sieve
     check "gpu alg4  sieve" G alg4     "$A4"  sieve
+
+    # Exponent 5 against the _e5 moduli. Before --modulo-suffix existed these
+    # read the e3 modulus and failed whenever 5 divided M-1.
+    E5() { ./"$1"_cuda --data "$2" --size "$SIZE" --method sieve --exponent 5 \
+                       --modulo-suffix _e5 --n-challenges "$NCH" --n-gpus 1; }
+    check "gpu k32   e5"    E5 alg2_k32 "$K32"
+    check "gpu alg3  e5"    E5 alg3     "$A3"
 
     if [ "$SLOW" = 1 ]; then
         check "gpu alg7  sieve" G alg7 "$A3" sieve

@@ -147,6 +147,11 @@ static void usage(const char *p) {
 int main(int argc, char **argv)
 {
     const char *data_dir = nullptr, *json_path = nullptr, *primes_path = nullptr;
+    // Suffix on the modulus filename, e.g. "_e5" for the exponent-5 moduli that
+    // challenge_gen_e5.slurm generates with gcd(5, M-1) = 1. Challenge files are
+    // exponent-agnostic and shared, so only the modulus changes. Mirrors
+    // --modulo-suffix on the MPI solvers.
+    const char *modulo_suffix = "";
     const char *splits_s = "1 2 4 8 16 32 64 128 256 512";
     int size_bits = 0, n_gpus = 0, n_runs = 5, k_bound = 32;
     int chal_k = 0;   // bound the challenge set was crafted for; defaults to k_bound
@@ -156,6 +161,8 @@ int main(int argc, char **argv)
         if      (!strcmp(argv[i], "--data")     && i+1<argc) data_dir   = argv[++i];
         else if (!strcmp(argv[i], "--size")     && i+1<argc) size_bits  = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--k")        && i+1<argc) k_bound    = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--modulo-suffix") && i + 1 < argc)
+            modulo_suffix = argv[++i];
         else if (!strcmp(argv[i], "--splits")   && i+1<argc) splits_s   = argv[++i];
         else if (!strcmp(argv[i], "--n-gpus")   && i+1<argc) n_gpus     = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--n-runs")   && i+1<argc) n_runs     = atoi(argv[++i]);
@@ -188,7 +195,7 @@ int main(int argc, char **argv)
     // necessarily --k (see the note in the sweep script).
     static char cbuf[512], mbuf[512], pbuf[256];
     snprintf(cbuf, sizeof(cbuf), "%s/challenge_0_%d_%d.txt", data_dir, chal_k, size_bits);
-    snprintf(mbuf, sizeof(mbuf), "%s/modulo_%d_%d.txt",      data_dir, chal_k, size_bits);
+    snprintf(mbuf, sizeof(mbuf), "%s/modulo_%d_%d%s.txt", data_dir, chal_k, size_bits, modulo_suffix);
     require_file(mbuf, "modulo");
     require_file(cbuf, "challenge");
     if (!primes_path) { snprintf(pbuf, sizeof(pbuf), "data/k%d_primes.bin", k_bound); primes_path = pbuf; }

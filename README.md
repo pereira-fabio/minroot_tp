@@ -54,7 +54,7 @@ experiments/                 research code that is NOT part of the attack
                              each holds its own SLURM job script
 
 tools/
-  smoke_test.sh              build, run every solver, check every result
+  smoke_test.sh              the project's test (`make test`)
   challenges.c               challenge generator
   gen_prime_table.c          prime table for an arbitrary bound 2^k
   timelock/                  standalone time-lock puzzle demo, with its jobs
@@ -183,8 +183,9 @@ Prerequisites, install commands per platform and disk/RAM needs are in
 [REQUIREMENTS.md](REQUIREMENTS.md). In short: an MPI compiler, GMP and OpenMP
 for the CPU solvers; CUDA only for the GPU ones.
 
-To check a fresh machine end to end, `./tools/smoke_test.sh` builds everything,
-runs every solver once and reports which ones produced a correct root.
+To check a machine end to end, `make test` builds everything, runs every solver
+once and reports which produced a correct root — CPU and GPU, e=3 and e=5. It is
+the test for this project; run it after any change.
 
 ### CPU (AION)
 
