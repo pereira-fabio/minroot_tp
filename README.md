@@ -103,7 +103,7 @@ A precomputed table would require ~52GB — infeasible. Instead:
 4. Reconstruction: compute `powm(p, e, M)` on-the-fly per found factor
    — only ~challenge_bits/32 calls total (e.g. ~34 for 1024-bit challenge)
 
-### k32_mpi — MPI+OpenMP Hybrid
+### alg2_k32 — MPI+OpenMP Hybrid
 
 Distributes the sieve range `[65537, 2^32]` across MPI ranks. Each rank
 factors its own slice and computes its partial cbrt product locally
@@ -118,7 +118,7 @@ the number of ranks.
 - `MPI_Gather`: one `~ceil(modulo_bits/8)` buffer per rank → rank 0 (cbrt products)
 - No communication during the hot trial division loop
 
-### k35_mpi — Paper's Concrete Parameters (B = 2^35)
+### alg2_k35 — Paper's Concrete Parameters (B = 2^35)
 
 Extends the sieve range to `[65537, 2^35]`, matching the paper's Algorithm 2
 parameters. ~1.1 billion primes in range.
@@ -130,7 +130,7 @@ exceed `uint32_t`. Three methods are available:
 needed. This is the default and recommended method.
 
 **table** — two-slice preloaded prime files:
-- `k32_primes.bin` for `[65537, 2^32]` (~813 MB, shared with k32_mpi)
+- `k32_primes.bin` for `[65537, 2^32]` (~813 MB, shared with alg2_k32)
 - `k35_upper_primes.bin` for `(2^32, 2^35]` (~10 GB, generated on first table run)
 
 **powm** — sequential `mpz_powm` baseline (single rank, no factoring), used only
@@ -138,9 +138,41 @@ for speedup comparison.
 
 Breakeven vs sequential powm: ~17000 bits (sieve), ~12000 bits (table).
 Below these sizes the factoring overhead exceeds the powm cost. The communication
-pattern is identical to k32_mpi.
+pattern is identical to alg2_k32.
 
 ---
+
+### Algorithm 3 — one medium prime cofactor
+
+Sieves to 2^32 exactly as k32 does, but accepts a candidate whose unfactored
+remainder is a single prime `q0` in (2^32, 2^65] rather than requiring it to be
+1. Reconstruction folds in `cbrt(q0)` alongside the tabulated small-prime roots.
+
+Sieving cost is unchanged, so `speedup_total` is indistinguishable from k32 --
+both land near 43x. What changes is the **hit rate**: Algorithm 3 accepts roughly
+119x more of the candidates it is handed, which is the only currency that matters
+to an attacker paying for failures.
+
+`cbrt(q0)` is a full-width modular exponentiation whose cost is set by |M|, not
+by the size of q0 -- about 1800 ms at 24576 bits, the same as the sequential
+baseline. It is computed in an untimed precompute so the benchmark measures the
+parallel attack rather than one exponentiation. An attacker could not amortise
+it: there are some 2^59 primes in the range, so no table can hold them, and each
+successful candidate presents a fresh one.
+
+### Algorithm 4 — composite cofactor
+
+Accepts a cofactor that is a *product* of medium primes, split with Pollard's rho
+during reconstruction, and screens candidates against a B0 = 2^20 threshold
+pre-filter before sieving. On challenges that are smooth by construction the
+pre-filter never fires and the cofactor path is a cached lookup, so it measures
+almost exactly what k32 and Algorithm 3 measure -- which is the consistency check.
+
+### Algorithm 7 — inverted sieve
+
+Instead of sieving one candidate against every prime, it searches a range of
+lifts `y = x + r*M` for one that is smooth, inverting the loop nesting. Reaches
+26.76x at 128 ranks; its table method is not usable.
 
 ## Build
 
@@ -189,82 +221,72 @@ Substitute any of `alg2_k16`, `alg2_k32`, `alg2_k35`, `alg3`, `alg4`, `alg7`.
 
 ## Usage
 
-### k16_mpi
+All six solvers share one interface. The binaries are `alg2_k16`, `alg2_k32`,
+`alg2_k35`, `alg3`, `alg4` and `alg7`.
+
+| flag | meaning |
+|------|---------|
+| `--all --data DIR` | run every canonical challenge size in one MPI execution |
+| `--method sieve\|table\|powm` | factoring strategy; `powm` is the sequential baseline |
+| `--table-format flat\|delta\|auto` | prime table encoding (`auto` detects by file magic) |
+| `--n-challenges N` | challenges to solve; each is one timed run |
+| `--exponent E` | root exponent (default 3) |
+| `--cbrt-dir DIR` | where to keep the cube-root cache |
+| `--json PREFIX` | write results as `PREFIX_<size>.json` |
+| `--skip-powm-baseline` | skip the baseline (already measured by the `powm` pass) |
+| `--primes FILE` | prime table for `--method table` |
+
+There is no `--bench` flag: one challenge is one timed run, and `--n-challenges`
+sets how many are averaged.
+
+### Generate challenges first
 
 ```bash
-# single run (sieve method)
-srun --mpi=pmix ./k16_mpi \
-    data/challenges/k16/challenge_0_16_2048.txt \
-    data/challenges/k16/modulo_16_2048.txt --method sieve
-
-# benchmark 10 runs
-srun --mpi=pmix ./k16_mpi \
-    data/challenges/k16/challenge_0_16_2048.txt \
-    data/challenges/k16/modulo_16_2048.txt --method sieve --bench 10
-
-# sequential powm baseline (for comparison)
-srun --mpi=pmix ./k16_mpi \
-    data/challenges/k16/challenge_0_16_2048.txt \
-    data/challenges/k16/modulo_16_2048.txt --method powm --bench 10
+sbatch scripts/aion/challenge_gen.slurm        # e = 3
+sbatch scripts/aion/challenge_gen_e5.slurm     # e = 5
 ```
 
-Note: the first run for a given modulo file precomputes and saves a `.cbrt`
-table under `data/cbrt/`. Subsequent runs load it from disk.
-
-### k32_mpi (local / single-node)
+### Single challenge
 
 ```bash
-# single challenge (sieve method)
-srun --mpi=pmix ./k32_mpi \
+srun --mpi=pmix ./alg2_k32 \
     data/challenges/k32/challenge_0_32_2048.txt \
-    data/challenges/k32/modulo_32_2048.txt
-
-# benchmark 5 runs
-srun --mpi=pmix ./k32_mpi \
-    data/challenges/k32/challenge_0_32_2048.txt \
-    data/challenges/k32/modulo_32_2048.txt --bench 5
+    data/challenges/k32/modulo_32_2048.txt --method sieve
 ```
 
-### k32_mpi (HPC)
+The first run for a given modulus precomputes and saves a `.cbrt` cache under
+`data/cbrt/`; later runs load it from disk.
+
+### Full sweep (what the results above were produced by)
 
 ```bash
-# generate challenges first
-sbatch scripts/challenge_gen.slurm
-
-# submit SLURM job array (scaling study across 1/2/4/8 nodes)
-sbatch scripts/k32.slurm
-
-# manual run with specific challenge
-srun --mpi=pmix ./k32_mpi \
-    data/challenges/k32/challenge_0_32_1024.txt \
-    data/challenges/k32/modulo_32_1024.txt
-
-# run all challenge sizes in one MPI execution (avoids multi-srun issues)
-srun --mpi=pmix ./k32_mpi --all --data data/challenges/k32 --bench 5
+srun --mpi=pmix -N 64 --ntasks=128 ./alg2_k32 \
+    --all --data data/challenges/k32 \
+    --method table --skip-powm-baseline \
+    --n-challenges 50 --cbrt-dir data/cbrt/alg2_k32_e3 \
+    --json out/alg2_k32_table
 ```
 
-### k35_mpi (HPC)
+Run the `powm` pass once per variant without `--skip-powm-baseline` to get the
+sequential baseline the speedups are divided by.
+
+### The whole study
 
 ```bash
-# generate challenges first (k35 sizes: 8192 12288 16384 20480 24576 bits)
-sbatch scripts/challenge_gen.slurm
-
-# submit SLURM job array (scaling study across 1/2/4/8 nodes)
-sbatch scripts/k35.slurm
-
-# single challenge, sieve method (default)
-srun --mpi=pmix ./k35_mpi \
-    data/challenges/k35/challenge_0_35_16384.txt \
-    data/challenges/k35/modulo_35_16384.txt --method sieve --bench 10
-
-# table method — generates data/k35_upper_primes.bin (~10 GB) on first run
-srun --mpi=pmix ./k35_mpi \
-    data/challenges/k35/challenge_0_35_16384.txt \
-    data/challenges/k35/modulo_35_16384.txt --method table --bench 10
-
-# run all challenge sizes in one MPI execution
-srun --mpi=pmix ./k35_mpi --all --data data/challenges/k35 --method sieve --bench 5
+sbatch scripts/aion/all_cpu.slurm      # every CPU variant, N1..N64
+sbatch scripts/iris/all_gpu.slurm      # every GPU variant, V100
+sbatch scripts/iris/all_gpu_l40.slurm  # L40 partition
 ```
+
+### Per-algorithm notes
+
+- **`alg2_k35 --method table`** generates `data/k35_upper_primes.bin` (~10 GB) on
+  first use.
+- **`alg7`** takes `--R <range>` (the study used `--R 1048576`) and reads the
+  Algorithm 3 challenge set.
+- **`alg3` / `alg4`** read `data/challenges/alg3` and `data/challenges/alg4`.
+- **Delta tables** are built with the `delta_convert` tool, not by a solver flag:
+  `./delta_convert data/k32_primes.bin`, or `--u64` for the k35 upper table.
 
 ---
 
@@ -291,58 +313,97 @@ every figure and how to interpret it.
 
 ## Performance Results
 
-### k16 — local machine (AMD EPYC 7452, 16 threads)
-Averaged over 1000 runs (warm cache, thread pool alive).
+All figures below are `speedup_total = powm_baseline_ms / (factor_ms + recon_ms)`,
+measured on AION with e = 3 and 48 warm runs per point. Every reported result
+passed the correctness gate: `result^3 mod M == challenge`.
 
-| Challenge size | Factoring | Reconstruction | Total   | Target  |
-|---------------|-----------|----------------|---------|---------|
-| 256-bit       | 0.108ms   | 0.076ms        | 0.184ms | 0.024ms |
-| 1024-bit      | 0.194ms   | 0.087ms        | 0.281ms | 1.661ms |
-| 2048-bit      | 0.399ms   | 0.172ms        | 0.571ms | 7.143ms |
+Two caveats that matter for reading these numbers:
 
-All sizes beat the professor's targets at steady state (1000-run average).
-The 256-bit target is below single-run overhead; achieving it requires
-keeping the process alive across many challenges (as in real VDF deployments).
+- **The challenges are smooth by construction.** What is measured is the cost of
+  inverting a challenge that is *already* smooth, not the cost of finding one.
+  See "Known Limitations" below.
+- **Warm runs that took a cube-root cache miss are excluded.** A miss pays a
+  full-width `mpz_powm` (~1.8 s at 24576 bits), so it measures cache population
+  rather than the attack. This affects Algorithm 4's table method at 24576 bits,
+  where 1 run in 49 is dropped; without the exclusion that column reads 16.24x
+  instead of 49.39x.
 
-### k32_mpi — HPC scaling study (AMD EPYC 7452, 32 threads/rank)
-Averaged over 5 runs. All results verified correct.
+### Two regimes
 
-**Factoring time (ms) — scales linearly with ranks:**
+The attack is a large-modulus phenomenon. At MinRoot's own deployment size it
+loses to the sequential baseline; at the design point it wins by ~50x.
 
-| Challenge | 2 ranks | 4 ranks | 6 ranks | 8 ranks | Speedup (2→8) |
-|-----------|---------|---------|---------|---------|---------------|
-| 1024-bit  | 339ms   | 174ms   | 125ms   | 90ms    | 3.8×          |
-| 2048-bit  | 403ms   | 201ms   | 141ms   | 100ms   | 4.0×          |
-| 5000-bit  | 495ms   | 250ms   | 171ms   | 127ms   | 3.9×          |
-| 7000-bit  | 579ms   | 289ms   | 200ms   | 146ms   | 4.0×          |
+| 128 MPI ranks, table method | 256-bit | 1024-bit | 2048-bit | 8192-bit | 24576-bit |
+|-----------------------------|--------:|---------:|---------:|---------:|----------:|
+| k16   (B = 2^16)            |  0.366x |   3.382x |   9.985x |  43.407x |  119.022x |
+| k32   (B = 2^32)            |  0.017x |   0.156x |   0.789x |  11.145x |   51.839x |
+| k35   (B = 2^35)            |  0.002x |   0.023x |   0.119x |   2.108x |   11.922x |
+| Algorithm 3                 |  0.016x |   0.154x |   0.782x |  11.155x |   52.475x |
+| Algorithm 4                 |  0.013x |   0.142x |   0.687x |  10.374x |   49.581x |
+| Algorithm 7 (sieve)         |  0.002x |   0.028x |   0.165x |   4.143x |   26.760x |
 
-**Reconstruction time (ms) — distributed across ranks (each rank computes its own partial cbrt product):**
+k16 is the only variant that beats the baseline at cryptographic sizes, and it
+pays for that in hit rate: a 256-bit challenge is 2^16-smooth with probability
+2^-69.6, which makes the win unusable.
 
-| Challenge | 2 ranks | 16 ranks | Note                                     |
-|-----------|---------|----------|------------------------------------------|
-| 1024-bit  | ~1ms    | ~1ms     | Fast — only ~34 powm calls total         |
-| 2048-bit  | ~11ms   | ~3ms     | Scales — 67 powm calls split per rank    |
-| 5000-bit  | ~205ms  | ~26ms    | Scales — 163 powm calls split per rank   |
-| 7000-bit  | ~650ms  | ~81ms    | Scales — 229 powm calls split per rank   |
+Sequential `mpz_powm` baseline, for reference: 0.026 ms at 256 bits, 3.04 ms at
+2048, 117.6 ms at 8192, 1806.9 ms at 24576.
 
-Each rank computes `cbrt(pᵢ)^eᵢ mod M` for its own factors locally, then sends
-one fixed-size partial product to rank 0. Rank 0 multiplies `nranks` terms —
-O(nranks) cheap multiplications instead of O(total_factors) expensive powm calls.
+### CPU strong scaling at 24576 bits
 
-### k35_mpi — HPC scaling study (AMD EPYC 7452, 32 threads/rank)
-Expected results at 8 nodes / 16 ranks / 32 threads per rank, 10 bench runs.
+Ranks are 2 per node (one per NUMA socket), 32 OpenMP threads each. 128 ranks
+across 64 nodes is the hard account limit on AION.
 
-| Challenge | powm (ms) | sieve speedup | table speedup |
-|-----------|-----------|---------------|---------------|
-| 8192-bit  | 118ms     | 0.18×         | 0.31×         |
-| 12288-bit | 309ms     | 0.48×         | 0.81×         |
-| 16384-bit | 615ms     | 0.96×         | 1.62×         |
-| 20480-bit | 1047ms    | 1.64×         | 2.76×         |
-| 24576-bit | 1600ms    | 2.50×         | 4.21×         |
+| Variant | Method | 2r | 4r | 8r | 16r | 32r | 64r | 128r |
+|---------|--------|---:|---:|---:|----:|----:|----:|-----:|
+| k16     | table  | 20.99x | 40.35x | 75.47x | 131.12x | **180.58x** | 176.36x | 119.02x |
+| k32     | sieve  |  1.66x |  2.87x |  5.15x |   9.46x |  17.57x |  30.27x |  42.82x |
+| k32     | table  |  2.18x |  3.77x |  6.73x |  13.00x |  23.71x |  40.68x |  51.84x |
+| k35     | sieve  |  0.23x |  0.40x |  0.72x |   1.40x |   2.62x |   4.95x |   8.85x |
+| k35     | table  |  0.27x |  0.52x |  1.00x |   1.92x |   3.60x |   6.83x |  11.92x |
+| Alg 3   | sieve  |  1.70x |  2.91x |  5.23x |   9.61x |  17.54x |  30.37x |  43.57x |
+| Alg 3   | table  |  2.17x |  3.71x |  6.72x |  12.96x |  23.63x |  40.17x |  52.48x |
+| Alg 4   | sieve  |  1.70x |  2.87x |  5.13x |   9.52x |  17.34x |  29.19x |  41.33x |
+| Alg 4   | table  |  2.22x |  3.76x |  6.93x |  12.84x |  23.41x |  38.28x |  49.39x |
+| Alg 7   | sieve  |  0.89x |  1.58x |  2.96x |   5.49x |  10.00x |  17.84x |  26.76x |
 
-k35 breaks even against sequential powm at ~17000 bits (sieve) and ~12000 bits
-(table). For smaller challenges, powm is faster because the sieve overhead across
-2^35 primes exceeds the cost of a single modular exponentiation.
+k32, Algorithm 3 and Algorithm 4 reach the paper's ~43x target on 128 ranks
+rather than the 2^54.5 processors of its circuit model. That the three agree to
+within a few percent is expected and is a consistency check: they differ only in
+which cofactor they accept after sieving, and on a challenge that is smooth by
+construction that branch never fires.
+
+**k16 peaks at 32 ranks and then declines.** Beyond that the 6542-prime sieve is
+divided too finely for the reconstruction and gather to be worth their cost.
+
+**k35 does not reach the paper's figure**, and cannot here: it would need roughly
+1024 ranks, eight times the maximum allocation. Any number quoted beyond 128
+ranks in the thesis is extrapolation from this curve, not measurement.
+
+### GPU, 24576 bits
+
+Speedups use the AION N1 `powm_baseline` for the matching size. IRIS's own
+baseline measures the forward `y^e` with a small exponent and is ~920x too
+small; do not use it.
+
+| Variant | 1x V100 | 4x V100 | 4x L40 | factor-only (1x V100) |
+|---------|--------:|--------:|-------:|----------------------:|
+| k16     |  11.69x |  12.17x | 16.71x |              43,097x  |
+| k32     |   1.11x |   3.75x |  9.18x |                  1.2x |
+| k35     |   0.12x |   0.36x |  1.23x |                  0.1x |
+| Alg 3   |   0.57x |       - |  1.43x |                  1.1x |
+| Alg 4   |   0.57x |   0.92x |  1.43x |                  1.1x |
+
+The last column is the point: k16's trial division on a GPU is ~43,000x faster
+than the sequential baseline, and that collapses to 11.69x end to end because
+reconstruction stays on the host — no multi-precision arithmetic was written for
+the device. Reconstruction, not sieving, is the binding constraint.
+
+Algorithms 3 and 4 are understated here. Their reconstruction carries the
+medium-prime cube root `cbrt(q0)`, which the CPU path takes from an untimed
+precompute and the CUDA path did not, paying a full-width exponentiation on
+every timed run. That is fixed in the current source but the numbers above
+predate the fix.
 
 ---
 
@@ -361,19 +422,36 @@ k35 breaks even against sequential powm at ~17000 bits (sieve) and ~12000 bits
 
 ## Known Limitations and Future Work
 
-- **k64 not yet implemented**: challenges with 64-bit prime factors would
-  require a different approach — the sieve range (up to 2^64) is too large
-  for trial division even with MPI. The randomized smoothness approach from
-  the paper (Algorithm 2) would be needed.
+- **The challenges are smooth by construction.** This is the limitation that
+  bounds every number in this repository. `tools/challenges.c` builds each
+  challenge as a product of small primes, so the benchmarks measure the cost of
+  *inverting* a smooth challenge, not the cost of finding one. An attacker pays
+  for the failures too, and the acceptance probability falls with the modulus far
+  faster than the speedup rises: a 256-bit challenge is 2^32-smooth with
+  probability about 2^-24.9, and a 24576-bit one with probability rho(768) — a
+  quantity with no physical interpretation. The attack becomes profitable per
+  attempt in exactly the regime where attempts stop being winnable.
 
-- **k35 table file size**: `k35_upper_primes.bin` is ~10 GB and is generated
-  on the first `--method table` run. This is a one-time cost but requires
-  sufficient scratch space on the HPC filesystem.
+- **128 MPI ranks is a hard ceiling**, and 4 GPUs. Both are account limits on the
+  University of Luxembourg clusters, not choices. k35 would need roughly 1024
+  ranks to reach the paper's figure and Algorithm 7 around 530 nodes; those
+  numbers are extrapolated from the measured N1-N64 curve and are projections,
+  not measurements.
 
-- **Multiple `srun` calls hang**: running k32_mpi or k35_mpi with multiple
-  sequential `srun` invocations in one SLURM job causes MPI reinit issues.
-  Use the `--all` flag to run all challenge sizes in a single MPI execution instead.
+- **GPU reconstruction runs on the host.** No multi-precision arithmetic was
+  written for the device, so every variant gathers to the CPU to reconstruct.
+  This is what turns k16's ~43,000x factoring advantage into 11.7x end to end.
+  A device port would move the ceiling rather than remove it.
 
-- **cbrt table load time**: loading the precomputed k16 table for large
-  moduli (7000-bit) takes ~50ms from disk. For production use, keeping the
-  table in memory across multiple challenge solves would eliminate this overhead.
+- **Algorithms 3 and 4 are understated on the GPU** in the results above. Their
+  CUDA path computed the medium-prime cube root inside the timed region on every
+  warm run, while the MPI path takes it from an untimed precompute. The source
+  now does the same on both; the published numbers predate the fix and need a
+  re-run.
+
+- **k35 table file size**: `k35_upper_primes.bin` is ~10 GB, generated on the
+  first `--method table` run. A one-time cost, but it needs scratch space.
+
+- **Multiple `srun` calls hang**: several sequential `srun` invocations in one
+  SLURM job cause MPI reinit issues. Use `--all` to run every challenge size in a
+  single MPI execution.

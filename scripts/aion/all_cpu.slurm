@@ -139,6 +139,7 @@ run_variant() {
         -I src/common -I experiments/delta \
         src/aion/${SRC} src/common/solver_common.cpp \
         src/common/common.cpp src/common/factorization.cpp \
+        experiments/delta/delta_table.cpp \
         -lgmp -o "$BIN"
     if [ $? -ne 0 ]; then
         echo "  !! compilation failed for $NAME — skipping this variant"

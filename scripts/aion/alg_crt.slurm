@@ -77,6 +77,7 @@ mpicxx -O3 -std=c++17 -fopenmp -Wall \
     -I src/common -I experiments/delta \
     experiments/crt/alg_crt.cpp src/common/solver_common.cpp \
     src/common/common.cpp src/common/factorization.cpp \
+    experiments/delta/delta_table.cpp \
     src/common/prefilter.cpp experiments/crt/crt_common.cpp \
     -lgmp -o alg_crt_N${N_NODES}
 
