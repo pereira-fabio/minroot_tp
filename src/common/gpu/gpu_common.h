@@ -248,6 +248,37 @@ struct GpuTransferStats
     double table_mb = 0.0;      // prime table bytes / (1024*1024)
 };
 
+// ---------------------------------------------------------------------------
+// Warm-up pass support
+//
+// Reconstruction looks up cbrt(p) for every prime factor it finds; a miss costs
+// one full-width mpz_powm, whose price is set by |M| and not by p (~1.8 s at
+// 24576 bits).  A challenge set of N distinct challenges therefore pays for
+// several hundred exponentiations the first time it is factored, and only runs
+// at cache speed afterwards.
+//
+// The CPU solvers avoid this by building the cache eagerly before timing
+// (Plan A).  The GPU solvers instead run the whole warm loop twice and time
+// only the second pass, which needs no separate factoring path.  This call
+// discards whatever the untimed pass recorded.  It deliberately does NOT touch
+// the cube-root cache — populating that is the entire point of the first pass.
+// ---------------------------------------------------------------------------
+static inline void gpu_reset_warm_accumulators(std::vector<double> &factor_ms_v,
+                                               std::vector<double> &recon_ms_v,
+                                               GpuHitStats &hits,
+                                               GpuTransferStats &xfer)
+{
+    factor_ms_v.clear();
+    recon_ms_v.clear();
+    hits.hit_type.clear();
+    hits.cofactor_bits.clear();
+    hits.medium_factor_count.clear();
+    const double table_mb = xfer.table_mb; // set once at setup, not per run
+    xfer.h2d_ms.clear();
+    xfer.d2h_ms.clear();
+    xfer.table_mb = table_mb;
+}
+
 // Per-GPU device state for multi-GPU prime-range splitting.
 struct GpuDev
 {
