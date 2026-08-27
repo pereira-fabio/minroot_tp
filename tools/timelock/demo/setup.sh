@@ -12,12 +12,13 @@
 set -euo pipefail
 
 MINUTES=${MINUTES:-20}
+ATTACK_SECS=${ATTACK_SECS:-30}   # target wall time for the CPU half of compare.sh
 BITS=${BITS:-1024}
 PROBE_T=${PROBE_T:-300}
 ARCH=${ARCH:-sm_75}          # 2080 Super = Turing = sm_75 (V100 would be sm_70)
 SRC=${SRC:-..}               # the timelock sources live one level up
 MSG_A=${MSG_A:-"The delay held for the whole talk."}
-MSG_B=${MSG_B:-"Recovered by factoring, not by waiting."}
+MSG_B=${MSG_B:-"Solved by searching in parallel on the GPU, serially on the CPU."}
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
@@ -79,36 +80,37 @@ echo "  solving must walk it forwards, one e-th root per round."
 # ----------------------------------------------------- puzzle B (attack) ----
 # 64 bits is not a choice, it is a constraint: the smoothness search only
 # terminates when u = |p|/log2(B) is small.  At B=2^16 that caps |p| at 64.
-say "Puzzle B — the attack (64-bit, runs in seconds)"
-"$TOOL" generate -b 64 -T 100 -m "$MSG_B" puzzle_attack.mrt
+say "Puzzle B — the comparison (64-bit)"
+# Size T so the SERIAL half of compare.sh lands near ATTACK_SECS.  The attack is
+# a lottery, so calibrate on a 200-round probe rather than a handful of rounds.
+"$TOOL" generate -b 64 -T 200 -m probe probeB.mrt >/dev/null
+PB=$("$TOOL" attack probeB.mrt | awk '/Attack solved in/ {print $5}')
+T_B=$(awk -v s="$PB" -v n=200 -v t="$ATTACK_SECS" 'BEGIN{ printf "%d", t/(s/n) }')
+[ "$T_B" -lt 50 ] && T_B=50
+echo "  one serial round   : $(awk -v s="$PB" 'BEGIN{printf "%.1f", 1000*s/200}') ms"
+echo "  T for ${ATTACK_SECS}s serial : $T_B"
+"$TOOL" generate -b 64 -T "$T_B" -m "$MSG_B" puzzle_attack.mrt
 echo "  64-bit / B=2^16 gives u=4, so rho(4) ~ 1/200 attempts per round."
 
 # --------------------------------------------------------------- ready ----
 say "Ready"
 cat <<EOF
-Start of talk, in a visible terminal:
+THE CENTREPIECE -- same puzzle, serial vs batched:
+
+    ./compare.sh
+
+  Runs the CPU search then the GPU search on puzzle_attack.mrt and prints the
+  speedup. About ${ATTACK_SECS}s plus a few seconds. This is the parallel result.
+
+RUNNING THROUGH THE TALK -- start this before you speak:
 
     $TOOL solve puzzle_delay.mrt
 
-  Prints a progress line every 5% with elapsed and ETA -- about 20 lines
-  across the talk.  It reveals the plaintext when it finishes.
+  A progress line every 5% with elapsed and ETA. Single-threaded, and that is
+  the point -- the chain cannot be parallelised, which is what a VDF claims.
 
-At the demo slide:
-
-    $TOOL attack puzzle_attack.mrt      # recovers the message by factoring
-    $TOOL solve  puzzle_attack.mrt      # the honest solver, for comparison
-
-  The second one is FASTER.  That is the point, not a mistake -- see README.md.
 EOF
-if [ -n "$GPUTOOL" ]; then
-cat <<EOF
-
-GPU variant of the same search (batched on the device):
-
-    $GPUTOOL puzzle_attack.mrt --batch 1024 --seed 1
-
-  --seed makes the run reproducible.  --batch 1024 is near the optimum:
-  the batch only needs ~5/rho(u) candidates to hit on the first launch,
-  and beyond that the surplus is pure waste.
-EOF
+if [ -z "$GPUTOOL" ]; then
+  echo "  NOTE: nvcc was not found, so compare.sh runs the CPU half only."
+  echo "        Install the CUDA toolkit and re-run ./setup.sh."
 fi
