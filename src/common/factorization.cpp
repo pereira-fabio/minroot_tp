@@ -1196,13 +1196,23 @@ static int ksc_available_cpus(void)
 // pairwise: n/T + ceil(log2 T) dependent mulmods instead of n-1, with the
 // same total work. The result is identical to the serial product.
 //
-// Each thread gets at least two values, so small n stays serial. Thread count
-// is read inside the region because the runtime may grant fewer than asked.
+// Each thread gets at least two values, and small products stay serial: below
+// KF_TREE_MIN_WORK (n * limbs^2, ~1 ms of serial mulmods) threads cannot pay
+// for themselves. Waking a team costs microseconds on a quiet machine, but on a
+// busy one a thread descheduled at a barrier stalls the region for a scheduler
+// time slice (~10 ms observed) — 1000x the 15 us a 1024-bit, 33-term product
+// needs. Thread count is read inside the region because the runtime may grant
+// fewer than asked.
 // ---------------------------------------------------------------------------
+#define KF_TREE_MIN_WORK 2.0e6
+
 void kf_product_mod_tree(mpz_t result, mpz_t *vals, int n,
                          const mpz_t modulo, int nthreads)
 {
     int want = nthreads < n / 2 ? nthreads : n / 2;
+    double limbs = (double)mpz_size(modulo);
+    if ((double)n * limbs * limbs < KF_TREE_MIN_WORK)
+        want = 1;
 #ifdef _OPENMP
     if (want >= 2)
     {
@@ -1267,11 +1277,12 @@ void kf_set_product_backend(kf_product_fn fn)
 // associative and commutative, so parallelism changes only the order of the
 // multiplications, not the product.
 //
-// Thread-safety: the cbrt cache is READ (kf_cbrt_cache_find) inside the parallel
-// region but never written there — newly computed roots are appended to the
-// cache in the serial phase afterward. This avoids the data race a naive
-// parallelization would introduce. Without -fopenmp the pragma is ignored and
-// the function runs serially (still correct).
+// Cache lookups are O(1) (hashed), so they run serially first; threads are
+// only woken for real work — a cache miss is a full |M|-bit exponentiation —
+// for the same reason kf_product_mod_tree gates its tree. The cache is never
+// written inside the parallel region: newly computed roots are appended in the
+// serial phase afterward. Without -fopenmp the pragma is ignored and the
+// function runs serially (still correct).
 void kf_compute_cbrt_from_factors_omp(mpz_t result,
                                       const kfactor_list_t *found,
                                       const mpz_t modulo,
@@ -1308,24 +1319,38 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
 
     auto t_p0 = std::chrono::high_resolution_clock::now();
 
-// Parallel: compute each factor's cube root. Cache access is read-only here.
-#pragma omp parallel for schedule(dynamic) num_threads(nthreads)
+    // Serial: look every factor up; count what is left to compute.
+    int misses = 0, powers = 0;
     for (int i = 0; i < n; i++)
     {
         mpz_init(cbrts[i]);
-        unsigned long p = mpz_get_ui(found->items[i].prime);
-        int idx = kf_cbrt_cache_find(cache, p);
+        int idx = kf_cbrt_cache_find(cache, mpz_get_ui(found->items[i].prime));
         if (idx >= 0)
         {
             mpz_set(cbrts[i], cache->items[idx].cbrt);
         }
         else
         {
+            miss[i] = 1;
+            misses++;
+        }
+        powers += (found->items[i].exponent > 1);
+    }
+    // Two or more exponentiations always pay for threads; small powers
+    // (a few mulmods each) only in bulk.
+    double limbs = (double)mpz_size(modulo);
+    bool par = misses >= 2 || 4.0 * powers * limbs * limbs >= KF_TREE_MIN_WORK;
+
+// Parallel when worth it: cube roots for the misses, then each term's power.
+#pragma omp parallel for schedule(dynamic) num_threads(nthreads) if (par)
+    for (int i = 0; i < n; i++)
+    {
+        if (miss[i])
+        {
             mpz_t p_mpz;
-            mpz_init_set_ui(p_mpz, p);
+            mpz_init_set_ui(p_mpz, mpz_get_ui(found->items[i].prime));
             mpz_powm(cbrts[i], p_mpz, e_inv, modulo); // p^(e_inv) mod M
             mpz_clear(p_mpz);
-            miss[i] = 1;
         }
         if (found->items[i].exponent > 1)
         {
