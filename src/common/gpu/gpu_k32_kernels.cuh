@@ -29,16 +29,17 @@ __constant__ int d_nlimbs;
 // ---------------------------------------------------------------------------
 // Trial-divide y (in constant memory) by all k32 primes.
 //
-// KF_TD_ILP = 2 makes each thread test two primes per pass over y
+// KF_TD_ILP = 2 (default) makes each thread test two primes per pass over y
 // (divides_big_u32_x2): primes[i] and primes[i + stride], so loads stay
-// coalesced. Whether the extra instruction-level parallelism beats the
-// higher register count is a per-card question; build both and compare:
-//     make -B gpu                          # KF_TD_ILP=1 (default)
-//     make -B gpu GPU_DEFS=-DKF_TD_ILP=2   # -B: make cannot see GPU_DEFS change
+// coalesced. Measured on an RTX 2080 SUPER, k32 8192-bit table, factor_ms
+// warm 64.1 -> 43.0 ms (cold 73.9 -> 50.0) against one prime per thread; the
+// two independent chains hide the multiply latency for 38 registers instead
+// of 32. The single-prime kernel stays available for comparison:
+//     make -B gpu GPU_DEFS=-DKF_TD_ILP=1   # -B: make cannot see GPU_DEFS change
 // ---------------------------------------------------------------------------
 
 #ifndef KF_TD_ILP
-#define KF_TD_ILP 1
+#define KF_TD_ILP 2
 #endif
 
 __device__ __forceinline__ void k32_record_factor(uint64_t p, uint64_t *out_factors,
