@@ -164,11 +164,16 @@ typedef struct
     cbrt_entry_t *items;
     int count;
     int capacity;
+    // Open-addressing index prime -> items[] position, kept in step by
+    // kf_cbrt_cache_append. slot holds index+1; 0 marks an empty slot.
+    int *slots;
+    int slot_mask; // slot capacity - 1 (a power of two), or -1 when empty
 } cbrt_cache_t;
 
 void kf_cbrt_cache_init(cbrt_cache_t *cache);
 void kf_cbrt_cache_clear(cbrt_cache_t *cache);
-// Returns index of prime in cache, or -1 if not found.
+// Returns index of prime in cache, or -1 if not found. O(1) expected via the
+// hash index; safe to call concurrently as long as nothing appends meanwhile.
 int kf_cbrt_cache_find(const cbrt_cache_t *cache, unsigned long prime);
 void kf_cbrt_cache_append(cbrt_cache_t *cache, unsigned long prime,
                           const mpz_t val);
@@ -176,10 +181,10 @@ bool kf_cbrt_cache_load(cbrt_cache_t *cache, const char *path);
 bool kf_cbrt_cache_save(const cbrt_cache_t *cache, const char *path);
 
 // ---------------------------------------------------------------------------
-// Every lookup goes through kf_cbrt_cache_find, which is a LINEAR scan, so a
-// lookup costs O(cache->count) comparisons. Counting probes as well as hits
-// exposes that cost: a challenge with n distinct prime factors performs ~n
-// lookups against an n-entry cache, i.e. O(n^2) comparisons per reconstruction.
+// Every lookup goes through kf_cbrt_cache_find. It was a LINEAR scan, so a
+// challenge with n factors against a C-entry cache cost O(n*C) comparisons,
+// and the cache persists and grows across challenges. It is now a hash index;
+// `probes` counts hash slots inspected, so probes/lookup near 1 confirms O(1).
 //
 // Counters are per-thread, indexed by omp_get_thread_num, and each block is
 // padded to 64 bytes so the OpenMP reconstruction loop does not false-share.

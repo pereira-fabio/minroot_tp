@@ -100,8 +100,12 @@ Challenges with 32-bit prime factors (65537 to 2^32). ~203 million primes.
 A precomputed table would require ~52GB — infeasible. Instead:
 
 **Per-challenge solve:**
-1. Segmented sieve over [65537, 2^32] in 512K-entry segments (fits in L2 cache)
-2. For each prime found by sieve: check divisibility with `mpz_tdiv_ui`
+1. Segmented sieve over [65537, 2^32] in 512K-entry segments (fits in L2 cache);
+   segments store odd numbers only, so each covers 1M integers
+2. For each prime found by sieve: check divisibility with `mpz_tdiv_ui`. Two
+   primes whose product is below 2^62 share one call (`y mod p1*p2`, then
+   reduce by each) — GMP's remainder loop costs the same up to a 62-bit
+   divisor, so this halves the passes over y for primes below ~2^31
 3. For divisible primes: count exact exponent with `count_exponent`
 4. Reconstruction: compute `powm(p, e, M)` on-the-fly per found factor
    — only ~challenge_bits/32 calls total (e.g. ~34 for 1024-bit challenge)
