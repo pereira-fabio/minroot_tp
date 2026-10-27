@@ -422,13 +422,15 @@ void ksc_compute_local_cbrt(mpz_t result,
         mpz_clear(cbrt_vals[i]);
     free(cbrt_vals);
 
-    mpz_set_ui(result, 1);
+    // Phase 3 (parallel): product tree over the terms.
+#ifdef _OPENMP
+    kf_product_mod_tree(result, parts, n, modulo, omp_get_max_threads());
+#else
+    kf_product_mod_tree(result, parts, n, modulo, 1);
+#endif
+
     for (int i = 0; i < n; i++)
-    {
-        mpz_mul(result, result, parts[i]);
-        mpz_mod(result, result, modulo);
         mpz_clear(parts[i]);
-    }
     free(parts);
 }
 

@@ -454,7 +454,7 @@ int main(int argc, char **argv)
 
     {
         auto tc0 = std::chrono::high_resolution_clock::now();
-        kf_compute_cbrt_from_factors(result, &solved_factors, modulo, &cache, &cache_dirty, exponent);
+        kf_compute_cbrt_from_factors_omp(result, &solved_factors, modulo, &cache, &cache_dirty, exponent);
         if (solved_b > 0)
         {
             mpz_mul(result, result, btable[solved_b].r_inv);
@@ -547,7 +547,7 @@ int main(int argc, char **argv)
                 auto t_d2h1 = std::chrono::high_resolution_clock::now();
 
                 auto tr0 = std::chrono::high_resolution_clock::now();
-                kf_compute_cbrt_from_factors(result, &fl_w, modulo, &cache, &cache_dirty, exponent);
+                kf_compute_cbrt_from_factors_omp(result, &fl_w, modulo, &cache, &cache_dirty, exponent);
                 // slot 0 = unblinded (attempt 0): no r_inv needed
                 auto tr1 = std::chrono::high_resolution_clock::now();
 

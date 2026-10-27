@@ -1074,17 +1074,78 @@ static int ksc_available_cpus(void)
 }
 
 // ---------------------------------------------------------------------------
+// kf_product_mod_tree — result = vals[0] * ... * vals[n-1] mod M, in parallel
+//
+// A serial accumulator is a chain of n-1 dependent |M|-bit mulmods. With a
+// warm cbrt cache that chain IS reconstruction (~800 links for k32 at 24576
+// bits). Multiplication mod M is associative and commutative, so each thread
+// multiplies one contiguous chunk, then the per-thread partials are combined
+// pairwise: n/T + ceil(log2 T) dependent mulmods instead of n-1, with the
+// same total work. The result is identical to the serial product.
+//
+// Each thread gets at least two values, so small n stays serial. Thread count
+// is read inside the region because the runtime may grant fewer than asked.
+// ---------------------------------------------------------------------------
+void kf_product_mod_tree(mpz_t result, mpz_t *vals, int n,
+                         const mpz_t modulo, int nthreads)
+{
+    int want = nthreads < n / 2 ? nthreads : n / 2;
+#ifdef _OPENMP
+    if (want >= 2)
+    {
+        mpz_t *part = (mpz_t *)malloc((size_t)want * sizeof(mpz_t));
+#pragma omp parallel num_threads(want)
+        {
+            int T = omp_get_num_threads();
+            int t = omp_get_thread_num();
+            int lo = (int)((long)n * t / T);
+            int hi = (int)((long)n * (t + 1) / T);
+            mpz_init_set(part[t], vals[lo]);
+            for (int i = lo + 1; i < hi; i++)
+            {
+                mpz_mul(part[t], part[t], vals[i]);
+                mpz_mod(part[t], part[t], modulo);
+            }
+            for (int s = 1; s < T; s <<= 1)
+            {
+#pragma omp barrier
+                if (t % (2 * s) == 0 && t + s < T)
+                {
+                    mpz_mul(part[t], part[t], part[t + s]);
+                    mpz_mod(part[t], part[t], modulo);
+                }
+            }
+#pragma omp barrier
+#pragma omp single
+            mpz_set(result, part[0]);
+            mpz_clear(part[t]);
+        }
+        free(part);
+        return;
+    }
+#endif
+    (void)want;
+    mpz_set_ui(result, 1);
+    for (int i = 0; i < n; i++)
+    {
+        mpz_mul(result, result, vals[i]);
+        mpz_mod(result, result, modulo);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parallel (OpenMP) variant of kf_compute_cbrt_from_factors, for single-process
 // solvers (the IRIS GPU port) where reconstruction is NOT distributed across MPI
 // ranks as it is on AION. At large moduli a challenge can have hundreds of
 // distinct prime factors, each needing a full |M|-bit modular exponentiation for
 // its cube root; serially on one core this dominates the runtime (e.g. ~20 min
-// for a 24576-bit k35 challenge). Here the per-factor cube roots are computed
-// concurrently, then combined serially.
+// for a 24576-bit k35 challenge). Here the per-factor cube roots (and their
+// e_i-th powers) are computed concurrently, then combined by
+// kf_product_mod_tree.
 //
-// Output is bit-identical to the serial version: the cube roots are combined in
-// index order and multiplication mod M is commutative, so parallelism changes
-// only *when* each root is computed, not the product.
+// Output is bit-identical to the serial version: multiplication mod M is
+// associative and commutative, so parallelism changes only the order of the
+// multiplications, not the product.
 //
 // Thread-safety: the cbrt cache is READ (kf_cbrt_cache_find) inside the parallel
 // region but never written there — newly computed roots are appended to the
@@ -1114,7 +1175,9 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
     }
 
     // Per-factor base cube root cbrt(p_i); miss[i] flags a cache miss.
+    // parts[i] = cbrt(p_i)^e_i, the term that goes into the product.
     mpz_t *cbrts = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
+    mpz_t *parts = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
     char *miss = (char *)calloc((size_t)n, 1);
 
     // Use exactly the cores this process was granted; never more threads than
@@ -1144,29 +1207,27 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
             mpz_clear(p_mpz);
             miss[i] = 1;
         }
+        if (found->items[i].exponent > 1)
+        {
+            mpz_init(parts[i]);
+            mpz_powm_ui(parts[i], cbrts[i],
+                        (unsigned long)found->items[i].exponent, modulo);
+        }
+        else
+        {
+            mpz_init_set(parts[i], cbrts[i]);
+        }
     }
 
     auto t_p1 = std::chrono::high_resolution_clock::now();
 
-    // Serial: combine into result and append newly computed roots to the cache.
-    mpz_set_ui(result, 1);
+    // Combine: parallel product tree over the terms.
+    kf_product_mod_tree(result, parts, n, modulo, nthreads);
+
+    // Serial: append newly computed roots to the cache, in index order.
     for (int i = 0; i < n; i++)
     {
-        if (found->items[i].exponent > 1)
-        {
-            mpz_t powered;
-            mpz_init(powered);
-            mpz_powm_ui(powered, cbrts[i],
-                        (unsigned long)found->items[i].exponent, modulo);
-            mpz_mul(result, result, powered);
-            mpz_clear(powered);
-        }
-        else
-        {
-            mpz_mul(result, result, cbrts[i]);
-        }
-        mpz_mod(result, result, modulo);
-
+        mpz_clear(parts[i]);
         if (miss[i])
         {
             unsigned long p = mpz_get_ui(found->items[i].prime);
@@ -1186,6 +1247,7 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
     g_recon_prof.calls++;
 
     free(cbrts);
+    free(parts);
     free(miss);
     mpz_clear(e_inv);
 }

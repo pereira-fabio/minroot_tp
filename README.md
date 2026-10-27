@@ -586,7 +586,9 @@ predate the fix.
 - **GPU reconstruction runs on the host.** No multi-precision arithmetic was
   written for the device, so every variant gathers to the CPU to reconstruct.
   This is what turns k16's ~43,000x factoring advantage into 11.7x end to end.
-  A device port would move the ceiling rather than remove it.
+  A device port would move the ceiling rather than remove it. The host product
+  is now a parallel tree over all the job's cores (`kf_product_mod_tree`, also
+  used by k16, which was fully serial); the GPU figures above predate it.
 
 - **Algorithms 3 and 4 are understated on the GPU** in the results above. Their
   CUDA path computed the medium-prime cube root inside the timed region on every

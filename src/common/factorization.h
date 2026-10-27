@@ -209,16 +209,17 @@ void kf_cbrt_stats_report(const char *tag);
 
 // ---------------------------------------------------------------------------
 // Reconstruction phase profile. kf_compute_cbrt_from_factors_omp splits into a
-// parallel phase (per-factor cube root: cache lookup, or mpz_powm on a miss)
-// and a strictly serial phase (product mod M + cache append). Separating them
-// shows whether reconstruction is bound by exponentiation or by the serial
-// accumulation — the question that decides whether a device port could help.
+// per-factor phase (cube root: cache lookup, or mpz_powm on a miss; then the
+// e_i-th power) and a combine phase (product mod M + cache append). Separating
+// them shows whether reconstruction is bound by exponentiation or by the
+// accumulation. The combine was strictly serial before kf_product_mod_tree;
+// the field keeps its name so RECONPROF lines stay comparable.
 // ---------------------------------------------------------------------------
 
 typedef struct
 {
     double parallel_ms; // phase 1: per-factor cbrt across threads
-    double serial_ms;   // phase 2: serial product mod M + cache append
+    double serial_ms;   // phase 2: product mod M (tree) + cache append
     long factors;       // total factors processed
     long calls;         // number of reconstruction calls accumulated
 } kf_recon_prof_t;
@@ -244,7 +245,8 @@ void kf_compute_cbrt_from_factors(mpz_t result,
 
 // OpenMP-parallel variant of the above, for single-process (IRIS GPU) solvers
 // where reconstruction is not distributed across MPI ranks. Computes the
-// per-factor cube roots concurrently; output is identical to the serial version.
+// per-factor cube roots concurrently and combines them with
+// kf_product_mod_tree; output is identical to the serial version.
 // Cache reads happen in the parallel region, cache writes serially afterward.
 void kf_compute_cbrt_from_factors_omp(mpz_t result,
                                       const kfactor_list_t *found,
@@ -252,6 +254,13 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
                                       cbrt_cache_t *cache,
                                       bool *cache_dirty,
                                       unsigned long exponent);
+
+// result = vals[0] * ... * vals[n-1] mod M (1 when n == 0), computed as
+// per-thread chunk products combined pairwise on up to nthreads OpenMP
+// threads: n/T + ceil(log2 T) dependent mulmods instead of n-1. Identical to
+// the serial product; falls back to it without OpenMP or for small n.
+void kf_product_mod_tree(mpz_t result, mpz_t *vals, int n,
+                         const mpz_t modulo, int nthreads);
 
 // ---------------------------------------------------------------------------
 // Blinding pair table (Algorithm 2 precomputation, Biryukov et al. §2)
