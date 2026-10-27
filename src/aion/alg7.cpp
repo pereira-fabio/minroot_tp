@@ -312,6 +312,12 @@ static benchmark_results_t run_one(
         // ================================================================
         int found_r = -1;
         int attempt = 0;
+        // The attempt whose blinded value produced found_r. The loop's
+        // `attempt` has already been incremented past it when the loop exits,
+        // and reconstruction unblinds with blind_table[attempt - 1]: passing the
+        // loop counter unblinded an unblinded challenge (found on attempt 0)
+        // with pair 0's r^-1, which made every alg7 root wrong.
+        int found_attempt = -1;
 
         for (attempt = 0; attempt < ALG7_MAX_ATTEMPTS && found_r < 0; attempt++)
         {
@@ -420,6 +426,7 @@ static benchmark_results_t run_one(
                 if (log_sum[r] >= log2_y_r - ALG7_SLACK)
                 {
                     found_r = (int)r;
+                    found_attempt = attempt;
                     break;
                 }
             }
@@ -481,7 +488,7 @@ static benchmark_results_t run_one(
         double fac2_dt = 0.0, recon_dt = 0.0;
         int complete = ksc_reconstruct_y(
             result, cofactor,
-            y_r, attempt, bench,
+            y_r, found_attempt, bench,
             &loc_acc, &gat_acc, &com_acc,
             &fac2_dt, &recon_dt,
             &json_results, &recon_ctx);

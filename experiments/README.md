@@ -147,13 +147,28 @@ higher recon share.
 | output | what it measures |
 |---|---|
 | `CBRTSTAT\|` | cbrt cache hits/misses/probes per thread |
-| `RECONPROF\|` | reconstruction split into parallel (per-factor cbrt) and serial (product mod M) |
+| `RECONPROF\|` | reconstruction split into per-factor cbrt and combine (product mod M; `serial_ms`, now a parallel tree) |
 | `XFERPROF\|` | H2D/D2H transfer cost, which the `factor_ms` event bracket excludes |
 
 **Result: no.** In the warm steady state the cache hits ~100%, so reconstruction
-performs no exponentiation at all — it is cache lookups plus a serial product,
-and a GPU accelerates neither. Whatever sits in the serial column cannot be
-parallelised on a device at any width. The instrumentation itself lives in
+performs no exponentiation at all — it is cache lookups plus a product of ~800
+residues mod M, and a device port accelerates neither.
+
+**Follow-up: the product parallelises on the host.** The original write-up
+called the serial column unparallelisable; it is not. Multiplication mod M is
+associative, so `kf_product_mod_tree` splits it into per-thread chunk products
+combined pairwise — n/T + log2 T dependent mulmods instead of n-1 — on the
+host cores the GPU jobs already reserve (28 on IRIS). Measured off-cluster on 4
+cores at 24576 bits, warm cache: 62 -> 19 ms for 802 factors, 124 -> 40 ms for
+1536, identical results. Not yet re-measured on IRIS.
+
+**Follow-up: and on the device.** `--recon device` runs the same tree on the
+GPU (`src/common/gpu/gpu_recon.cuh`): one thread block per Montgomery
+multiplication (`gpu_mont.h`), one kernel launch per tree level, ceil(log2 n)+2
+launches in all. The block arithmetic is unit-tested against GMP by running the
+identical code as host threads behind a barrier; it has not yet been run or
+timed on a GPU, so whether it beats the 28-core host tree is open. The
+instrumentation itself lives in
 `src/common/factorization.cpp` and `src/common/gpu/gpu_common.h`, compiled into
 every solver; this directory holds only the job that exercises it.
 

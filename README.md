@@ -100,25 +100,38 @@ Challenges with 32-bit prime factors (65537 to 2^32). ~203 million primes.
 A precomputed table would require ~52GB — infeasible. Instead:
 
 **Per-challenge solve:**
-1. Segmented sieve over [65537, 2^32] in 512K-entry segments (fits in L2 cache)
-2. For each prime found by sieve: check divisibility with `mpz_tdiv_ui`
+1. Segmented sieve over [65537, 2^32] in 512K-entry segments (fits in L2 cache);
+   segments store odd numbers only, so each covers 1M integers
+2. For each prime found by sieve: check divisibility with `mpz_tdiv_ui`. Two
+   primes whose product is below 2^62 share one call (`y mod p1*p2`, then
+   reduce by each) — GMP's remainder loop costs the same up to a 62-bit
+   divisor, so this halves the passes over y for primes below ~2^31
 3. For divisible primes: count exact exponent with `count_exponent`
 4. Reconstruction: compute `powm(p, e, M)` on-the-fly per found factor
    — only ~challenge_bits/32 calls total (e.g. ~34 for 1024-bit challenge)
 
 ### alg2_k32 — MPI+OpenMP Hybrid
 
-Distributes the sieve range `[65537, 2^32]` across MPI ranks. Each rank
+Distributes the sieve range `[65537, 2^32]` across MPI ranks, in pieces of
+equal estimated trial-division cost rather than equal width (`kf_cost_split`:
+low ranges hold more primes but test them in pairs, and the sieve adds a cost
+per integer; at 24576 bits this cut the slowest rank by 1.13-1.18x in a local
+8- and 32-rank simulation). Each rank
 factors its own slice and computes its partial cbrt product locally
-(`∏ cbrt(pᵢ)^eᵢ mod M`). Rank 0 collects one fixed-size partial product
-per rank and multiplies them — both factoring and reconstruction scale with
-the number of ranks.
+(`∏ cbrt(pᵢ)^eᵢ mod M`). The per-rank partial products are combined by a
+log-depth reduction tree (`MPI_Reduce` with a user-defined multiply-mod-M op),
+so the combine takes `ceil(log2 N)` rounds instead of `N-1` serial
+multiplications on rank 0 — both factoring and reconstruction scale with the
+number of ranks.
 
 **Communication pattern:**
 - `MPI_Bcast`: challenge + modulo bytes → all ranks (once per challenge)
 - `MPI_Barrier`: synchronise before timing each phase
 - `MPI_Reduce (MAX)`: max local-cbrt time across ranks → rank 0 (timing only)
-- `MPI_Gather`: one `~ceil(modulo_bits/8)` buffer per rank → rank 0 (cbrt products)
+- `MPI_Reduce (custom op)`: one `~ceil(modulo_bits/8)` buffer per rank, multiplied
+  up a binary tree → rank 0 (cbrt products, and the exact factor products used by
+  the completeness/cofactor checks). Each buffer is one element of a contiguous
+  derived datatype so MPI never hands the op a partial big integer
 - No communication during the hot trial division loop
 
 ### alg2_k35 — Paper's Concrete Parameters (B = 2^35)
@@ -209,6 +222,8 @@ make gpu                  # detects the local card; prints what it chose
 make gpu-experiments      # alg_crt_cuda, alg2_ksweep_cuda, gpu_scale_sim_cuda
 make gpu ARCH=sm_75       # force one architecture (2080/2080 Super)
 make gpu ARCH=portable    # one fatbinary for any Volta-or-newer card
+make -B gpu GPU_DEFS=-DKF_TD_ILP=1   # one prime per thread in the k32 kernel (default: two)
+make -B gpu GPU_DEFS=-DKF_TD_ILP=4   # four primes per thread
 
 # on a cluster, load the toolkit first:
 module load system/CUDA/12.6.0
@@ -325,6 +340,7 @@ Same flags as the CPU solvers, minus `--all`, `--cbrt-dir` and
 | `--size N` | challenge size, with `--data`, instead of naming both files |
 | `--n-gpus N` | split the prime range across N devices |
 | `--n-runs N` | warm runs to average |
+| `--recon auto\|host\|device` | where the final reconstruction product runs: a tree over the host cores, a tree of Montgomery-multiply kernels on device 0 (`gpu_recon.cuh`), or `auto` (default): the device once the product is big enough to pay for its launches |
 
 Two things worth knowing before the first k32 or k35 run:
 
@@ -511,6 +527,10 @@ construction that branch never fires.
 
 **k16 peaks at 32 ranks and then declines.** Beyond that the 6542-prime sieve is
 divided too finely for the reconstruction and gather to be worth their cost.
+These figures were measured with the old serial combine (gather to rank 0, then
+`N-1` multiplications); the combine is now a log-depth tree, which
+`analysis/ideal_combine.py` projects to remove most of this decline. Not yet
+re-measured on the cluster.
 
 **k35 does not reach the paper's figure**, and cannot here: it would need roughly
 1024 ranks, eight times the maximum allocation. Any number quoted beyond 128
@@ -577,7 +597,9 @@ predate the fix.
 - **GPU reconstruction runs on the host.** No multi-precision arithmetic was
   written for the device, so every variant gathers to the CPU to reconstruct.
   This is what turns k16's ~43,000x factoring advantage into 11.7x end to end.
-  A device port would move the ceiling rather than remove it.
+  A device port would move the ceiling rather than remove it. The host product
+  is now a parallel tree over all the job's cores (`kf_product_mod_tree`, also
+  used by k16, which was fully serial); the GPU figures above predate it.
 
 - **Algorithms 3 and 4 are understated on the GPU** in the results above. Their
   CUDA path computed the medium-prime cube root inside the timed region on every

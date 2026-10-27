@@ -35,6 +35,7 @@
 // =============================================================================
 
 #include "gpu_common.h"
+#include "gpu_recon.cuh" // --recon auto|host|device
 
 #include <gmp.h>
 #include <cstdint>
@@ -96,6 +97,7 @@ static void print_usage(const char *prog)
 
 int main(int argc, char **argv)
 {
+    gpu_recon_parse_args(&argc, argv); // consumes --recon before the parser below
     const char *challenge_file = nullptr;
     const char *modulo_file = nullptr;
     const char *data_dir = nullptr;

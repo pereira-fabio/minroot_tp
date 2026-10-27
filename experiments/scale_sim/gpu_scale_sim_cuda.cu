@@ -88,7 +88,7 @@ __global__ void scale_trial_divide_kernel(
     int nlimbs     = d_nlimbs;
     for (int64_t i = idx; i < nprimes; i += stride) {
         uint64_t p = (uint64_t)primes[i];
-        if (mod_big_by_u32(d_y_limbs, nlimbs, p) == 0) {
+        if (divides_big_u32(d_y_limbs, nlimbs, (uint32_t)p)) {
             int slot = atomicAdd(out_count, 1);
             if (slot < MAX_GPU_FACTORS) out_factors[slot] = p;
         }

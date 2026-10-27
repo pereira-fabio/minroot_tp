@@ -164,11 +164,16 @@ typedef struct
     cbrt_entry_t *items;
     int count;
     int capacity;
+    // Open-addressing index prime -> items[] position, kept in step by
+    // kf_cbrt_cache_append. slot holds index+1; 0 marks an empty slot.
+    int *slots;
+    int slot_mask; // slot capacity - 1 (a power of two), or -1 when empty
 } cbrt_cache_t;
 
 void kf_cbrt_cache_init(cbrt_cache_t *cache);
 void kf_cbrt_cache_clear(cbrt_cache_t *cache);
-// Returns index of prime in cache, or -1 if not found.
+// Returns index of prime in cache, or -1 if not found. O(1) expected via the
+// hash index; safe to call concurrently as long as nothing appends meanwhile.
 int kf_cbrt_cache_find(const cbrt_cache_t *cache, unsigned long prime);
 void kf_cbrt_cache_append(cbrt_cache_t *cache, unsigned long prime,
                           const mpz_t val);
@@ -176,10 +181,10 @@ bool kf_cbrt_cache_load(cbrt_cache_t *cache, const char *path);
 bool kf_cbrt_cache_save(const cbrt_cache_t *cache, const char *path);
 
 // ---------------------------------------------------------------------------
-// Every lookup goes through kf_cbrt_cache_find, which is a LINEAR scan, so a
-// lookup costs O(cache->count) comparisons. Counting probes as well as hits
-// exposes that cost: a challenge with n distinct prime factors performs ~n
-// lookups against an n-entry cache, i.e. O(n^2) comparisons per reconstruction.
+// Every lookup goes through kf_cbrt_cache_find. It was a LINEAR scan, so a
+// challenge with n factors against a C-entry cache cost O(n*C) comparisons,
+// and the cache persists and grows across challenges. It is now a hash index;
+// `probes` counts hash slots inspected, so probes/lookup near 1 confirms O(1).
 //
 // Counters are per-thread, indexed by omp_get_thread_num, and each block is
 // padded to 64 bytes so the OpenMP reconstruction loop does not false-share.
@@ -209,22 +214,47 @@ void kf_cbrt_stats_report(const char *tag);
 
 // ---------------------------------------------------------------------------
 // Reconstruction phase profile. kf_compute_cbrt_from_factors_omp splits into a
-// parallel phase (per-factor cube root: cache lookup, or mpz_powm on a miss)
-// and a strictly serial phase (product mod M + cache append). Separating them
-// shows whether reconstruction is bound by exponentiation or by the serial
-// accumulation — the question that decides whether a device port could help.
+// per-factor phase (cube root: cache lookup, or mpz_powm on a miss; then the
+// e_i-th power) and a combine phase (product mod M + cache append). Separating
+// them shows whether reconstruction is bound by exponentiation or by the
+// accumulation. The combine was strictly serial before kf_product_mod_tree;
+// the field keeps its name so RECONPROF lines stay comparable.
 // ---------------------------------------------------------------------------
 
 typedef struct
 {
     double parallel_ms; // phase 1: per-factor cbrt across threads
-    double serial_ms;   // phase 2: serial product mod M + cache append
+    double serial_ms;   // phase 2: product mod M (tree) + cache append
     long factors;       // total factors processed
     long calls;         // number of reconstruction calls accumulated
 } kf_recon_prof_t;
 
 void kf_recon_prof_reset(void);
 const kf_recon_prof_t *kf_recon_prof_get(void);
+
+// ---------------------------------------------------------------------------
+// Cost-balanced split of a trial-division range [lo, hi] into `parts`
+// contiguous pieces; piece `idx` is returned as [*out_lo, *out_hi] (empty when
+// *out_lo > *out_hi). `limbs` is the size of the number being divided (64-bit
+// limbs) and `sieve` says whether the range is sieved (sieve method) or read
+// from a prime table. Equal-width pieces are unbalanced: low ranges hold more
+// primes (density 1/ln x), primes below 2^31 are tested in pairs at under half
+// the cost each, and the sieve adds a fixed cost per integer. The model, per
+// integer x (constants measured single-threaded, see factorization.cpp):
+//
+//     cost(x) = sieve * KF_SIEVE_NS + w(x) * u(limbs) / ln x
+//     u(limbs) = KF_TD_BASE_NS + KF_TD_LIMB_NS * limbs     one prime test
+//     w(x) = KF_PAIRED_COST below 2^31, 1 above
+//
+// Every caller computes the same boundaries independently.
+// ---------------------------------------------------------------------------
+
+#define KF_SIEVE_NS 2.1
+#define KF_TD_BASE_NS 5.0
+#define KF_TD_LIMB_NS 0.55
+#define KF_PAIRED_COST 0.45
+void kf_cost_split(uint64_t lo, uint64_t hi, int parts, int idx, int limbs, bool sieve,
+                   uint64_t *out_lo, uint64_t *out_hi);
 
 // ---------------------------------------------------------------------------
 // k32 — reconstruction from found factors
@@ -244,7 +274,8 @@ void kf_compute_cbrt_from_factors(mpz_t result,
 
 // OpenMP-parallel variant of the above, for single-process (IRIS GPU) solvers
 // where reconstruction is not distributed across MPI ranks. Computes the
-// per-factor cube roots concurrently; output is identical to the serial version.
+// per-factor cube roots concurrently and combines them with
+// kf_product_mod_tree; output is identical to the serial version.
 // Cache reads happen in the parallel region, cache writes serially afterward.
 void kf_compute_cbrt_from_factors_omp(mpz_t result,
                                       const kfactor_list_t *found,
@@ -252,6 +283,25 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
                                       cbrt_cache_t *cache,
                                       bool *cache_dirty,
                                       unsigned long exponent);
+
+// result = vals[0] * ... * vals[n-1] mod M (1 when n == 0), computed as
+// per-thread chunk products combined pairwise on up to nthreads OpenMP
+// threads: n/T + ceil(log2 T) dependent mulmods instead of n-1. Identical to
+// the serial product; falls back to it without OpenMP or for small n.
+void kf_product_mod_tree(mpz_t result, mpz_t *vals, int n,
+                         const mpz_t modulo, int nthreads);
+
+// True when `mulmods` |M|-bit modular multiplications are enough work to be
+// worth waking an OpenMP team for (~1 ms serial). Below it, thread start-up and
+// barrier stalls on a busy machine cost more than they save.
+bool kf_parallel_worth(double mulmods, const mpz_t modulo);
+
+// Where kf_compute_cbrt_from_factors_omp sends its final product. The default
+// is kf_product_mod_tree; the CUDA solvers can install the device tree
+// (gpu_recon.cuh, --recon device). nullptr restores the default.
+typedef void (*kf_product_fn)(mpz_t result, mpz_t *vals, int n,
+                              const mpz_t modulo, int nthreads);
+void kf_set_product_backend(kf_product_fn fn);
 
 // ---------------------------------------------------------------------------
 // Blinding pair table (Algorithm 2 precomputation, Biryukov et al. §2)

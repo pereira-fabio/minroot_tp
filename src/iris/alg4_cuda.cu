@@ -32,6 +32,7 @@
 // =============================================================================
 
 #include "gpu_common.h"
+#include "gpu_recon.cuh" // --recon auto|host|device
 #include "common.h"
 #include "factorization.h"
 #include "gpu_k32_kernels.cuh"
@@ -142,6 +143,7 @@ static bool cache_cofactor_cbrt(const mpz_t cofactor, const mpz_t modulo,
 // ---------------------------------------------------------------------------
 int main(int argc, char **argv)
 {
+    gpu_recon_parse_args(&argc, argv); // consumes --recon before the parser below
     const char *challenge_file = nullptr;
     const char *modulo_file = nullptr;
     const char *data_dir = nullptr;

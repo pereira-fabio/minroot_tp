@@ -30,6 +30,7 @@
 // =============================================================================
 
 #include "gpu_common.h"
+#include "gpu_recon.cuh" // --recon auto|host|device
 
 #include <gmp.h>
 #include <cstdint>
@@ -72,8 +73,7 @@ __global__ void k16_trial_divide_kernel(
     for (int i = (int)threadIdx.x; i < nprime; i += (int)blockDim.x)
     {
         uint64_t p = (uint64_t)d_k16_primes[i];
-        uint64_t rem = mod_big_by_u32(y, nlimbs, p);
-        if (rem == 0)
+        if (divides_big_u32(y, nlimbs, (uint32_t)p))
         {
             int slot = atomicAdd(&out_counts[b], 1);
             if (slot < MAX_GPU_FACTORS)
@@ -135,6 +135,7 @@ static void print_usage(const char *prog)
 
 int main(int argc, char **argv)
 {
+    gpu_recon_parse_args(&argc, argv); // consumes --recon before the parser below
     const char *challenge_file = nullptr;
     const char *modulo_file = nullptr;
     const char *data_dir = nullptr;
@@ -454,7 +455,7 @@ int main(int argc, char **argv)
 
     {
         auto tc0 = std::chrono::high_resolution_clock::now();
-        kf_compute_cbrt_from_factors(result, &solved_factors, modulo, &cache, &cache_dirty, exponent);
+        kf_compute_cbrt_from_factors_omp(result, &solved_factors, modulo, &cache, &cache_dirty, exponent);
         if (solved_b > 0)
         {
             mpz_mul(result, result, btable[solved_b].r_inv);
@@ -547,7 +548,7 @@ int main(int argc, char **argv)
                 auto t_d2h1 = std::chrono::high_resolution_clock::now();
 
                 auto tr0 = std::chrono::high_resolution_clock::now();
-                kf_compute_cbrt_from_factors(result, &fl_w, modulo, &cache, &cache_dirty, exponent);
+                kf_compute_cbrt_from_factors_omp(result, &fl_w, modulo, &cache, &cache_dirty, exponent);
                 // slot 0 = unblinded (attempt 0): no r_inv needed
                 auto tr1 = std::chrono::high_resolution_clock::now();
 

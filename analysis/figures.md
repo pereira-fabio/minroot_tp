@@ -101,8 +101,11 @@ Drills into the reconstruction phase for MPI configurations. Three sub-component
 vs challenge size for each configuration:
 
 - **local_cbrt:** time for each rank to compute its partial cube-root product.
-- **gather:** `MPI_Gather` communication time.
-- **combine:** time for rank 0 to multiply the gathered partial products.
+- **gather:** `MPI_Gather` communication time. Always 0 for runs after the switch to
+  the tree reduce, which has no separate gather step.
+- **combine:** time for rank 0 to multiply the gathered partial products. For runs after
+  the switch, the whole `MPI_Reduce` tree (communication + multiplications) plus the
+  unblind.
 
 All on a log-log scale. Useful for diagnosing whether the gather is becoming a bottleneck
 as ranks increase or challenge size grows.

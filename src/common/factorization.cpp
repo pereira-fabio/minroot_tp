@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <math.h>
 #include <time.h>
 #include <chrono>
 
@@ -233,6 +234,124 @@ uint32_t *kf_load_prime_slice(uint64_t *slice_count, const char *path,
 }
 
 // ---------------------------------------------------------------------------
+// Shared pieces of the k32 trial-division loops
+// ---------------------------------------------------------------------------
+
+static_assert(sizeof(unsigned long) == 8,
+              "paired trial division packs two primes into one unsigned long");
+
+// Strip every power of p from the shared cofactor under the lock and resync
+// the caller's snapshot. Returns the exponent (0 for a stale snapshot hit).
+static int kf_strip_prime(mpz_t cofactor, mpz_t local_cof, omp_lock_t *lock,
+                          unsigned long p, bool *now_one)
+{
+    omp_set_lock(lock);
+    int e = 0;
+    while (mpz_divisible_ui_p(cofactor, p))
+    {
+        mpz_divexact_ui(cofactor, cofactor, p);
+        e++;
+    }
+    *now_one = (mpz_cmp_ui(cofactor, 1) == 0);
+    // Sync thread-local snapshot so subsequent pre-checks stay accurate
+    // (reflects factors removed by all threads so far).
+    mpz_set(local_cof, cofactor);
+    omp_unset_lock(lock);
+    return e;
+}
+
+// Divisibility pre-check for a pair of candidates (b == 0: a alone).
+//
+// mpz_tdiv_ui walks every limb of the snapshot, and up to a 62-bit divisor
+// its cost is set by |y|, not by the divisor. Two primes whose product is
+// below 2^62 share one walk: r = y mod (a*b), then a | y iff a | r.
+//
+// The 2^62 cap matters: GMP's fast remainder loop needs two spare bits in the
+// divisor, so a 63-bit divisor costs ~1.7x and a 64-bit one ~3.2x a 62-bit one
+// (measured at 24576 bits). Pairing two primes near 2^32 would be SLOWER than
+// testing them apart, so only primes below ~2^31 pair; the rest, and k35's
+// upper range, take one walk each exactly as before.
+#define KF_PAIR_LIMIT (1UL << 62)
+static inline void kf_pair_check(const mpz_t local_cof, uint64_t a, uint64_t b,
+                                 bool *hit_a, bool *hit_b)
+{
+    unsigned long ab;
+    if (b != 0 && !__builtin_mul_overflow((unsigned long)a, (unsigned long)b, &ab) &&
+        ab < KF_PAIR_LIMIT)
+    {
+        unsigned long r = mpz_tdiv_ui(local_cof, ab);
+        *hit_a = (r % a == 0);
+        *hit_b = (r % b == 0);
+        return;
+    }
+    *hit_a = (mpz_tdiv_ui(local_cof, (unsigned long)a) == 0);
+    *hit_b = (b != 0 && mpz_tdiv_ui(local_cof, (unsigned long)b) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// kf_cost_split — see factorization.h
+//
+// Constants: 2^24-integer windows near 2^28 (paired) and 2^32 (unpaired), one
+// thread. The sieve alone (64-bit y) costs ~2.1 ns per integer; one unpaired
+// test 10.7 / 42 / 59 / 221 ns at 1024 / 4096 / 8192 / 24576 bits (fit:
+// 5 + 0.55 * limbs); a paired test 0.29-0.46 of that (0.45 used, the large-
+// size value where trial division dominates).
+// ---------------------------------------------------------------------------
+
+#define KF_COST_STEPS 4096
+
+// Boundary k of the split: the x where the cumulative cost reaches k/parts of
+// the total, by midpoint-rule integration over KF_COST_STEPS equal cells and
+// linear interpolation inside the cell. Pure arithmetic on the arguments, so
+// every rank and thread gets bit-identical boundaries.
+static uint64_t kf_cost_boundary(uint64_t lo, uint64_t hi, int parts, int k,
+                                 int limbs, bool sieve)
+{
+    if (k <= 0)
+        return lo;
+    if (k >= parts)
+        return hi + 1;
+    const double a = (double)lo, width = (double)(hi - lo + 1);
+    const double cell = width / KF_COST_STEPS;
+    const double fixed = sieve ? KF_SIEVE_NS : 0.0;
+    const double test = KF_TD_BASE_NS + KF_TD_LIMB_NS * limbs;
+    double cum[KF_COST_STEPS + 1];
+    cum[0] = 0.0;
+    for (int i = 0; i < KF_COST_STEPS; i++)
+    {
+        double x = a + (i + 0.5) * cell;
+        double w = (x < 2147483648.0) ? KF_PAIRED_COST : 1.0;
+        cum[i + 1] = cum[i] + (fixed + w * test / log(x < 3.0 ? 3.0 : x)) * cell;
+    }
+    double target = cum[KF_COST_STEPS] * k / parts;
+    int i = 0;
+    while (i < KF_COST_STEPS - 1 && cum[i + 1] < target)
+        i++;
+    double frac = (cum[i + 1] > cum[i]) ? (target - cum[i]) / (cum[i + 1] - cum[i]) : 0.0;
+    uint64_t b = lo + (uint64_t)((i + frac) * cell);
+    if (b < lo)
+        b = lo;
+    if (b > hi + 1)
+        b = hi + 1;
+    return b;
+}
+
+void kf_cost_split(uint64_t lo, uint64_t hi, int parts, int idx, int limbs, bool sieve,
+                   uint64_t *out_lo, uint64_t *out_hi)
+{
+    uint64_t b0 = kf_cost_boundary(lo, hi, parts, idx, limbs, sieve);
+    uint64_t b1 = kf_cost_boundary(lo, hi, parts, idx + 1, limbs, sieve);
+    if (b1 <= b0)
+    {
+        *out_lo = 1; // empty piece
+        *out_hi = 0;
+        return;
+    }
+    *out_lo = b0;
+    *out_hi = b1 - 1;
+}
+
+// ---------------------------------------------------------------------------
 // k32 — Trial division: sieve method
 // ---------------------------------------------------------------------------
 
@@ -261,8 +380,6 @@ void kf_trial_divide_sieve(const mpz_t n,
     omp_init_lock(&cof_lock);
     volatile int done = 0; // set to 1 when cofactor == 1
 
-    uint64_t range_size = range_hi - range_lo + 1;
-
 #ifdef _OPENMP
 #pragma omp parallel
     {
@@ -272,10 +389,9 @@ void kf_trial_divide_sieve(const mpz_t n,
     {
         int t = 0, nt = 1;
 #endif
-        uint64_t t_lo = range_lo + (range_size * (uint64_t)t) / (uint64_t)nt;
-        uint64_t t_hi = range_lo + (range_size * (uint64_t)(t + 1)) / (uint64_t)nt - 1;
-        if (t == nt - 1)
-            t_hi = range_hi;
+        // Threads split the rank's range by cost, like ranks split the whole.
+        uint64_t t_lo, t_hi;
+        kf_cost_split(range_lo, range_hi, nt, t, (int)mpz_size(n), true, &t_lo, &t_hi);
 
         char *seg = (char *)malloc(KF_SEG_SIZE);
 
@@ -302,65 +418,94 @@ void kf_trial_divide_sieve(const mpz_t n,
         mpz_init_set(local_cof, cofactor);
         omp_unset_lock(&cof_lock);
 
-        // Incremental segment offsets: compute the first multiple of each small
-        // prime once (one division per prime), then carry it forward across
-        // segments by stepping past `hi`.  This removes the per-prime,
-        // per-segment division `((lo+p-1)/p)*p` from the hot loop — a leading
-        // cost for the large k35 range.  The marking and factor-finding logic
-        // below is byte-for-byte identical to the division-based version.
+        // The segment holds odd numbers only: seg[k] stands for lo + 2k. Even
+        // candidates other than 2 are never prime, so storing them doubled the
+        // memset, the scan and the work of the p = 2 marking pass for nothing.
+        // 2 itself, when in range, is queued as the first candidate.
+        uint64_t first_odd = t_lo | 1;
+
+        // Incremental segment offsets: compute the first odd multiple of each
+        // odd small prime once, then carry it forward across segments in steps
+        // of 2p. This removes the per-prime, per-segment division from the hot
+        // loop — a leading cost for the large k35 range.
         uint64_t *next_mult = (uint64_t *)malloc((size_t)sp_count * sizeof(uint64_t));
         for (int i = 0; i < sp_count; i++)
         {
             uint64_t p = sp[i];
-            uint64_t start = ((t_lo + p - 1) / p) * p;
-            if (start == p) // never sieve the prime itself out
+            if (p == 2)
+            {
+                next_mult[i] = UINT64_MAX; // no odd multiples to mark
+                continue;
+            }
+            uint64_t start = ((first_odd + p - 1) / p) * p;
+            if ((start & 1) == 0)
                 start += p;
+            if (start == p) // never sieve the prime itself out
+                start += 2 * p;
             next_mult[i] = start;
         }
 
-        for (uint64_t lo = t_lo; lo <= t_hi && !done; lo += KF_SEG_SIZE)
+        // Candidates are tested in pairs (kf_pair_check); `pend` holds the
+        // first of a pair until its partner arrives, 0 when none is waiting.
+        uint64_t pend = (t_lo <= 2 && 2 <= t_hi) ? 2 : 0;
+        auto test_pair = [&](uint64_t a, uint64_t b)
         {
-            uint64_t hi = lo + KF_SEG_SIZE - 1;
+            bool hit_a, hit_b;
+            kf_pair_check(local_cof, a, b, &hit_a, &hit_b);
+            uint64_t cand[2] = {a, b};
+            bool hit[2] = {hit_a, hit_b};
+            for (int k = 0; k < 2; k++)
+            {
+                if (!hit[k])
+                    continue;
+                bool now_one = false;
+                int e = kf_strip_prime(cofactor, local_cof, &cof_lock,
+                                       (unsigned long)cand[k], &now_one);
+                if (now_one)
+                    done = 1;
+                if (e > 0)
+                    kfl_append_ul(&tf[t], (unsigned long)cand[k], e);
+            }
+        };
+
+        const uint64_t span = 2 * (uint64_t)KF_SEG_SIZE;
+        for (uint64_t lo = first_odd; lo <= t_hi && !done; lo += span)
+        {
+            uint64_t hi = lo + span - 2;
             if (hi > t_hi)
                 hi = t_hi;
-            size_t seg_len = (size_t)(hi - lo + 1);
+            size_t seg_len = (size_t)((hi - lo) / 2 + 1);
 
             memset(seg, 1, seg_len);
+            if (lo == 1)
+                seg[0] = 0; // 1 is not a prime
             for (int i = 0; i < sp_count; i++)
             {
-                uint64_t p = sp[i];
                 uint64_t j = next_mult[i];
-                for (; j <= hi; j += p)
-                    seg[j - lo] = 0;
-                next_mult[i] = j; // first multiple > hi — carry to next segment
+                if (j > hi)
+                    continue;
+                uint64_t step = 2 * (uint64_t)sp[i];
+                for (; j <= hi; j += step)
+                    seg[(j - lo) >> 1] = 0;
+                next_mult[i] = j; // first odd multiple > hi — carry to next segment
             }
-            for (uint64_t c = lo; c <= hi; c++)
+            for (size_t k = 0; k < seg_len; k++)
             {
-                if (!seg[c - lo])
+                if (!seg[k])
                     continue;
-                // Pre-check against thread-local snapshot (no data race).
-                // As factors are stripped, local_cof shrinks → each test is
-                // proportionally cheaper (limb count drops).
-                if (mpz_tdiv_ui(local_cof, (unsigned long)c) != 0)
-                    continue;
-                // Factor found — extract full exponent from shared cofactor.
-                omp_set_lock(&cof_lock);
-                int e = 0;
-                while (mpz_divisible_ui_p(cofactor, (unsigned long)c))
+                uint64_t c = lo + 2 * (uint64_t)k;
+                if (pend == 0)
                 {
-                    mpz_divexact_ui(cofactor, cofactor, (unsigned long)c);
-                    e++;
+                    pend = c;
+                    continue;
                 }
-                if (mpz_cmp_ui(cofactor, 1) == 0)
-                    done = 1;
-                // Sync thread-local snapshot so subsequent pre-checks stay
-                // accurate (reflects factors removed by all threads so far).
-                mpz_set(local_cof, cofactor);
-                omp_unset_lock(&cof_lock);
-                if (e > 0)
-                    kfl_append_ul(&tf[t], (unsigned long)c, e);
+                test_pair(pend, c);
+                pend = 0;
             }
         }
+        if (pend != 0 && !done)
+            test_pair(pend, 0);
+
         mpz_clear(local_cof);
         free(next_mult);
         free(seg);
@@ -415,78 +560,64 @@ void kf_trial_divide_table(const mpz_t n,
     // lock, re-synced after each factor is stripped.  local_cof >= actual
     // cofactor always, so no false negatives; stale hits just waste one lock
     // acquisition (e=0, nothing appended).
+    //
+    // Primes are tested two at a time (kf_pair_check): iteration j covers
+    // primes[2j] and primes[2j+1], sharing one walk when their product allows.
+    // Pairs below 2^31 cost about half those above, so a slice that straddles
+    // it is handed out in dynamic chunks rather than equal static blocks.
+    int64_t npairs = (prime_count + 1) / 2;
+
 #ifdef _OPENMP
 #pragma omp parallel
+#endif
     {
+#ifdef _OPENMP
         int t = omp_get_thread_num();
+#else
+        int t = 0;
+#endif
 
         mpz_t local_cof;
         omp_set_lock(&cof_lock);
         mpz_init_set(local_cof, cofactor);
         omp_unset_lock(&cof_lock);
 
-#pragma omp for schedule(static)
-        for (int64_t i = 0; i < prime_count; i++)
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 256)
+#endif
+        for (int64_t j = 0; j < npairs; j++)
         {
-            if (i >= stop_idx)
+            int64_t i0 = 2 * j;
+            if (i0 >= stop_idx)
                 continue;
-
-            uint64_t p = (uint64_t)primes[i];
+            int64_t np = (i0 + 1 < prime_count) ? 2 : 1;
+            uint64_t cand[2] = {(uint64_t)primes[i0],
+                                np == 2 ? (uint64_t)primes[i0 + 1] : 0};
             if (thread_tested && t < nthreads_out)
-                thread_tested[t]++;
-            if (mpz_tdiv_ui(local_cof, (unsigned long)p) != 0)
-                continue;
+                thread_tested[t] += np;
 
-            omp_set_lock(&cof_lock);
-            int e = 0;
-            while (mpz_divisible_ui_p(cofactor, (unsigned long)p))
+            bool hit[2];
+            kf_pair_check(local_cof, cand[0], cand[1], &hit[0], &hit[1]);
+            for (int k = 0; k < np; k++)
             {
-                mpz_divexact_ui(cofactor, cofactor, (unsigned long)p);
-                e++;
-            }
-            if (mpz_cmp_ui(cofactor, 1) == 0)
-                stop_idx = i + 1;
-            mpz_set(local_cof, cofactor);
-            omp_unset_lock(&cof_lock);
-            if (e > 0)
-            {
-                kfl_append_ul(&tf[t], p, e);
-                if (thread_found && t < nthreads_out)
-                    thread_found[t]++;
+                if (!hit[k])
+                    continue;
+                bool now_one = false;
+                int e = kf_strip_prime(cofactor, local_cof, &cof_lock,
+                                       (unsigned long)cand[k], &now_one);
+                if (now_one)
+                    stop_idx = i0 + k + 1;
+                if (e > 0)
+                {
+                    kfl_append_ul(&tf[t], (unsigned long)cand[k], e);
+                    if (thread_found && t < nthreads_out)
+                        thread_found[t]++;
+                }
             }
         }
 
         mpz_clear(local_cof);
     } // omp parallel
-#else
-    {
-        int t = 0;
-        for (int64_t i = 0; i < prime_count; i++)
-        {
-            if (i >= stop_idx)
-                continue;
-            uint64_t p = (uint64_t)primes[i];
-            if (thread_tested && t < nthreads_out)
-                thread_tested[t]++;
-            if (mpz_tdiv_ui(cofactor, (unsigned long)p) != 0)
-                continue;
-            int e = 0;
-            while (mpz_divisible_ui_p(cofactor, (unsigned long)p))
-            {
-                mpz_divexact_ui(cofactor, cofactor, (unsigned long)p);
-                e++;
-            }
-            if (mpz_cmp_ui(cofactor, 1) == 0)
-                stop_idx = i + 1;
-            if (e > 0)
-            {
-                kfl_append_ul(&tf[t], p, e);
-                if (thread_found && t < nthreads_out)
-                    thread_found[t]++;
-            }
-        }
-    }
-#endif
 
     omp_destroy_lock(&cof_lock);
     mpz_clear(cofactor);
@@ -766,6 +897,8 @@ void kf_cbrt_cache_init(cbrt_cache_t *cache)
     cache->items = NULL;
     cache->count = 0;
     cache->capacity = 0;
+    cache->slots = NULL;
+    cache->slot_mask = -1;
 }
 
 void kf_cbrt_cache_clear(cbrt_cache_t *cache)
@@ -773,9 +906,29 @@ void kf_cbrt_cache_clear(cbrt_cache_t *cache)
     for (int i = 0; i < cache->count; i++)
         mpz_clear(cache->items[i].cbrt);
     free(cache->items);
-    cache->items = NULL;
-    cache->count = 0;
-    cache->capacity = 0;
+    free(cache->slots);
+    kf_cbrt_cache_init(cache);
+}
+
+// Fibonacci hashing: primes are odd and clustered, so mix before masking.
+static inline int cbrt_slot_of(unsigned long prime, int mask)
+{
+    return (int)(((uint64_t)prime * 0x9E3779B97F4A7C15ULL) >> 32) & mask;
+}
+
+// Rebuild the index at `nslots` (a power of two > count) from items[].
+static void cbrt_cache_reindex(cbrt_cache_t *cache, int nslots)
+{
+    free(cache->slots);
+    cache->slots = (int *)calloc((size_t)nslots, sizeof(int));
+    cache->slot_mask = nslots - 1;
+    for (int i = 0; i < cache->count; i++)
+    {
+        int s = cbrt_slot_of(cache->items[i].prime, cache->slot_mask);
+        while (cache->slots[s])
+            s = (s + 1) & cache->slot_mask;
+        cache->slots[s] = i + 1;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -887,14 +1040,21 @@ int kf_cbrt_cache_find(const cbrt_cache_t *cache, unsigned long prime)
     // One counter update per LOOKUP, not per comparison, so the instrumentation
     // does not perturb the scan it measures.
     kf_cbrt_stat_t *st = kf_cbrt_slot();
-    for (int i = 0; i < cache->count; i++)
-        if (cache->items[i].prime == prime)
+    if (cache->slot_mask < 0)
+    {
+        st->misses++;
+        return -1;
+    }
+    int s = cbrt_slot_of(prime, cache->slot_mask);
+    long probes = 1;
+    for (int v; (v = cache->slots[s]) != 0; s = (s + 1) & cache->slot_mask, probes++)
+        if (cache->items[v - 1].prime == prime)
         {
-            st->probes += (long)i + 1;
+            st->probes += probes;
             st->hits++;
-            return i;
+            return v - 1;
         }
-    st->probes += (long)cache->count;
+    st->probes += probes;
     st->misses++;
     return -1;
 }
@@ -912,6 +1072,22 @@ void kf_cbrt_cache_append(cbrt_cache_t *cache, unsigned long prime,
     cache->items[cache->count].prime = prime;
     mpz_init_set(cache->items[cache->count].cbrt, val);
     cache->count++;
+
+    // Keep the index at most half full; growing rebuilds it from items[].
+    if (2 * cache->count > cache->slot_mask + 1)
+    {
+        int ns = 128;
+        while (ns < 2 * cache->count)
+            ns *= 2;
+        cbrt_cache_reindex(cache, ns);
+    }
+    else
+    {
+        int s = cbrt_slot_of(prime, cache->slot_mask);
+        while (cache->slots[s])
+            s = (s + 1) & cache->slot_mask;
+        cache->slots[s] = cache->count;
+    }
 }
 
 bool kf_cbrt_cache_load(cbrt_cache_t *cache, const char *path)
@@ -1074,23 +1250,107 @@ static int ksc_available_cpus(void)
 }
 
 // ---------------------------------------------------------------------------
+// kf_product_mod_tree — result = vals[0] * ... * vals[n-1] mod M, in parallel
+//
+// A serial accumulator is a chain of n-1 dependent |M|-bit mulmods. With a
+// warm cbrt cache that chain IS reconstruction (~800 links for k32 at 24576
+// bits). Multiplication mod M is associative and commutative, so each thread
+// multiplies one contiguous chunk, then the per-thread partials are combined
+// pairwise: n/T + ceil(log2 T) dependent mulmods instead of n-1, with the
+// same total work. The result is identical to the serial product.
+//
+// Each thread gets at least two values, and small products stay serial: below
+// KF_TREE_MIN_WORK (n * limbs^2, ~1 ms of serial mulmods) threads cannot pay
+// for themselves. Waking a team costs microseconds on a quiet machine, but on a
+// busy one a thread descheduled at a barrier stalls the region for a scheduler
+// time slice (~10 ms observed) — 1000x the 15 us a 1024-bit, 33-term product
+// needs. Thread count is read inside the region because the runtime may grant
+// fewer than asked.
+// ---------------------------------------------------------------------------
+#define KF_TREE_MIN_WORK 2.0e6
+
+bool kf_parallel_worth(double mulmods, const mpz_t modulo)
+{
+    double limbs = (double)mpz_size(modulo);
+    return mulmods * limbs * limbs >= KF_TREE_MIN_WORK;
+}
+
+void kf_product_mod_tree(mpz_t result, mpz_t *vals, int n,
+                         const mpz_t modulo, int nthreads)
+{
+    int want = nthreads < n / 2 ? nthreads : n / 2;
+    if (!kf_parallel_worth((double)n, modulo))
+        want = 1;
+#ifdef _OPENMP
+    if (want >= 2)
+    {
+        mpz_t *part = (mpz_t *)malloc((size_t)want * sizeof(mpz_t));
+#pragma omp parallel num_threads(want)
+        {
+            int T = omp_get_num_threads();
+            int t = omp_get_thread_num();
+            int lo = (int)((long)n * t / T);
+            int hi = (int)((long)n * (t + 1) / T);
+            mpz_init_set(part[t], vals[lo]);
+            for (int i = lo + 1; i < hi; i++)
+            {
+                mpz_mul(part[t], part[t], vals[i]);
+                mpz_mod(part[t], part[t], modulo);
+            }
+            for (int s = 1; s < T; s <<= 1)
+            {
+#pragma omp barrier
+                if (t % (2 * s) == 0 && t + s < T)
+                {
+                    mpz_mul(part[t], part[t], part[t + s]);
+                    mpz_mod(part[t], part[t], modulo);
+                }
+            }
+#pragma omp barrier
+#pragma omp single
+            mpz_set(result, part[0]);
+            mpz_clear(part[t]);
+        }
+        free(part);
+        return;
+    }
+#endif
+    (void)want;
+    mpz_set_ui(result, 1);
+    for (int i = 0; i < n; i++)
+    {
+        mpz_mul(result, result, vals[i]);
+        mpz_mod(result, result, modulo);
+    }
+}
+
+static kf_product_fn g_product_backend = kf_product_mod_tree;
+
+void kf_set_product_backend(kf_product_fn fn)
+{
+    g_product_backend = fn ? fn : kf_product_mod_tree;
+}
+
+// ---------------------------------------------------------------------------
 // Parallel (OpenMP) variant of kf_compute_cbrt_from_factors, for single-process
 // solvers (the IRIS GPU port) where reconstruction is NOT distributed across MPI
 // ranks as it is on AION. At large moduli a challenge can have hundreds of
 // distinct prime factors, each needing a full |M|-bit modular exponentiation for
 // its cube root; serially on one core this dominates the runtime (e.g. ~20 min
-// for a 24576-bit k35 challenge). Here the per-factor cube roots are computed
-// concurrently, then combined serially.
+// for a 24576-bit k35 challenge). Here the per-factor cube roots (and their
+// e_i-th powers) are computed concurrently, then combined by
+// kf_product_mod_tree.
 //
-// Output is bit-identical to the serial version: the cube roots are combined in
-// index order and multiplication mod M is commutative, so parallelism changes
-// only *when* each root is computed, not the product.
+// Output is bit-identical to the serial version: multiplication mod M is
+// associative and commutative, so parallelism changes only the order of the
+// multiplications, not the product.
 //
-// Thread-safety: the cbrt cache is READ (kf_cbrt_cache_find) inside the parallel
-// region but never written there — newly computed roots are appended to the
-// cache in the serial phase afterward. This avoids the data race a naive
-// parallelization would introduce. Without -fopenmp the pragma is ignored and
-// the function runs serially (still correct).
+// Cache lookups are O(1) (hashed), so they run serially first; threads are
+// only woken for real work — a cache miss is a full |M|-bit exponentiation —
+// for the same reason kf_product_mod_tree gates its tree. The cache is never
+// written inside the parallel region: newly computed roots are appended in the
+// serial phase afterward. Without -fopenmp the pragma is ignored and the
+// function runs serially (still correct).
 void kf_compute_cbrt_from_factors_omp(mpz_t result,
                                       const kfactor_list_t *found,
                                       const mpz_t modulo,
@@ -1114,7 +1374,9 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
     }
 
     // Per-factor base cube root cbrt(p_i); miss[i] flags a cache miss.
+    // parts[i] = cbrt(p_i)^e_i, the term that goes into the product.
     mpz_t *cbrts = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
+    mpz_t *parts = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
     char *miss = (char *)calloc((size_t)n, 1);
 
     // Use exactly the cores this process was granted; never more threads than
@@ -1125,48 +1387,60 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
 
     auto t_p0 = std::chrono::high_resolution_clock::now();
 
-// Parallel: compute each factor's cube root. Cache access is read-only here.
-#pragma omp parallel for schedule(dynamic) num_threads(nthreads)
+    // Serial: look every factor up; count what is left to compute.
+    int misses = 0, powers = 0;
     for (int i = 0; i < n; i++)
     {
         mpz_init(cbrts[i]);
-        unsigned long p = mpz_get_ui(found->items[i].prime);
-        int idx = kf_cbrt_cache_find(cache, p);
+        int idx = kf_cbrt_cache_find(cache, mpz_get_ui(found->items[i].prime));
         if (idx >= 0)
         {
             mpz_set(cbrts[i], cache->items[idx].cbrt);
         }
         else
         {
+            miss[i] = 1;
+            misses++;
+        }
+        powers += (found->items[i].exponent > 1);
+    }
+    // Two or more exponentiations always pay for threads; small powers
+    // (a few mulmods each) only in bulk.
+    bool par = misses >= 2 || kf_parallel_worth(4.0 * powers, modulo);
+
+// Parallel when worth it: cube roots for the misses, then each term's power.
+#pragma omp parallel for schedule(dynamic) num_threads(nthreads) if (par)
+    for (int i = 0; i < n; i++)
+    {
+        if (miss[i])
+        {
             mpz_t p_mpz;
-            mpz_init_set_ui(p_mpz, p);
+            mpz_init_set_ui(p_mpz, mpz_get_ui(found->items[i].prime));
             mpz_powm(cbrts[i], p_mpz, e_inv, modulo); // p^(e_inv) mod M
             mpz_clear(p_mpz);
-            miss[i] = 1;
+        }
+        if (found->items[i].exponent > 1)
+        {
+            mpz_init(parts[i]);
+            mpz_powm_ui(parts[i], cbrts[i],
+                        (unsigned long)found->items[i].exponent, modulo);
+        }
+        else
+        {
+            mpz_init_set(parts[i], cbrts[i]);
         }
     }
 
     auto t_p1 = std::chrono::high_resolution_clock::now();
 
-    // Serial: combine into result and append newly computed roots to the cache.
-    mpz_set_ui(result, 1);
+    // Combine: product tree over the terms (host threads, or the device tree
+    // when a CUDA solver installed it with kf_set_product_backend).
+    g_product_backend(result, parts, n, modulo, nthreads);
+
+    // Serial: append newly computed roots to the cache, in index order.
     for (int i = 0; i < n; i++)
     {
-        if (found->items[i].exponent > 1)
-        {
-            mpz_t powered;
-            mpz_init(powered);
-            mpz_powm_ui(powered, cbrts[i],
-                        (unsigned long)found->items[i].exponent, modulo);
-            mpz_mul(result, result, powered);
-            mpz_clear(powered);
-        }
-        else
-        {
-            mpz_mul(result, result, cbrts[i]);
-        }
-        mpz_mod(result, result, modulo);
-
+        mpz_clear(parts[i]);
         if (miss[i])
         {
             unsigned long p = mpz_get_ui(found->items[i].prime);
@@ -1186,6 +1460,7 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
     g_recon_prof.calls++;
 
     free(cbrts);
+    free(parts);
     free(miss);
     mpz_clear(e_inv);
 }

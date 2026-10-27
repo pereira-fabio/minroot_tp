@@ -53,6 +53,7 @@
 // =============================================================================
 
 #include "gpu_common.h"
+#include "gpu_recon.cuh" // --recon auto|host|device
 #include "common.h"
 #include "factorization.h"
 
@@ -165,7 +166,7 @@ __global__ void factor_candidate_kernel(const uint32_t *primes, int64_t nprimes,
     for (int64_t i = idx; i < nprimes; i += stride)
     {
         uint64_t q = primes[i];
-        if (mod_big_by_u32(d_y_limbs, d_y_nlimbs, q) == 0)
+        if (divides_big_u32(d_y_limbs, d_y_nlimbs, (uint32_t)q))
         {
             int slot = atomicAdd(out_count, 1);
             if (slot < max_out)
@@ -335,6 +336,7 @@ static void print_usage(const char *prog)
 
 int main(int argc, char **argv)
 {
+    gpu_recon_parse_args(&argc, argv); // consumes --recon before the parser below
     const char *challenge_file = nullptr;
     const char *modulo_file = nullptr;
     const char *data_dir = nullptr;
