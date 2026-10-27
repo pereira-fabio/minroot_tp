@@ -24,7 +24,9 @@ LIBS      = -lgmp
 
 NVCC       ?= nvcc
 ARCH       ?= auto
-NVCCFLAGS   = -O3 -std=c++17 -Xcompiler -Wall -Xcompiler -fopenmp
+# Extra -D switches for the CUDA builds, e.g. GPU_DEFS=-DKF_TD_ILP=2
+GPU_DEFS   ?=
+NVCCFLAGS   = -O3 -std=c++17 -Xcompiler -Wall -Xcompiler -fopenmp $(GPU_DEFS)
 GPU_INCLUDE = -I src/common -I src/common/gpu -I experiments/delta
 GPU_LIBS    = -lgmp -lgomp
 

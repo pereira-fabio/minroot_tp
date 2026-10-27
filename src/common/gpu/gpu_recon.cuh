@@ -13,10 +13,15 @@
 // kf_mont_mul_block (gpu_mont.h). An odd element at the end of a level is
 // carried up unchanged. The result is the same residue the host computes.
 //
-// Enabled per run with `--recon device` (default `--recon host`). It replaces
-// only the final product in kf_compute_cbrt_from_factors_omp; the per-factor
-// cube roots, cache and exponents stay on the host. It falls back to the host
-// tree when M is even or the per-block shared memory does not fit the device.
+// Chosen per run with `--recon auto|device|host`; the default is auto, which
+// sends a product to the device only when kf_parallel_worth says it is big
+// enough (n * limbs^2 >= 2e6). Measured on an RTX 2080 SUPER: at 2048 bits
+// (66 terms, below the gate) the host was faster, 0.075 vs 0.18 ms; at 8192
+// bits (268 and 528 terms, above it) the device was, 1.3x for k32 and 2.6x for
+// k16. It replaces only the final product in kf_compute_cbrt_from_factors_omp;
+// the per-factor cube roots, cache and exponents stay on the host. It falls
+// back to the host tree when M is even or the per-block shared memory does not
+// fit the device.
 //
 // Device 0 does the work. The caller's current device is restored afterwards.
 // =============================================================================
@@ -231,30 +236,46 @@ static void gpu_recon_product(mpz_t result, mpz_t *vals, int n,
     CUDA_CHECK(cudaSetDevice(prev_dev));
 }
 
-// Strip `--recon host|device` from argv (so the solver's own parser never sees
-// it) and install the device tree when asked. Call first thing in main().
+// --recon auto: the device for products big enough to pay for the launches.
+static void gpu_recon_auto(mpz_t result, mpz_t *vals, int n,
+                           const mpz_t modulo, int nthreads)
+{
+    if (kf_parallel_worth((double)n, modulo))
+        gpu_recon_product(result, vals, n, modulo, nthreads);
+    else
+        kf_product_mod_tree(result, vals, n, modulo, nthreads);
+}
+
+// Strip `--recon auto|host|device` from argv (so the solver's own parser never
+// sees it) and install the chosen product backend; auto when the flag is
+// absent. Call first thing in main().
 static inline void gpu_recon_parse_args(int *argc, char **argv)
 {
+    const char *mode = "auto";
     int w = 1;
     for (int i = 1; i < *argc; i++)
     {
         if (!strcmp(argv[i], "--recon") && i + 1 < *argc)
         {
-            const char *mode = argv[++i];
-            if (!strcmp(mode, "device"))
-                kf_set_product_backend(gpu_recon_product);
-            else if (!strcmp(mode, "host"))
-                kf_set_product_backend(nullptr);
-            else
-            {
-                fprintf(stderr, "Error: --recon must be host or device, got '%s'\n", mode);
-                exit(1);
-            }
-            printf("Reconstruction product: %s tree\n", mode);
+            mode = argv[++i];
             continue;
         }
         argv[w++] = argv[i];
     }
     *argc = w;
     argv[w] = nullptr;
+
+    if (!strcmp(mode, "auto"))
+        kf_set_product_backend(gpu_recon_auto);
+    else if (!strcmp(mode, "device"))
+        kf_set_product_backend(gpu_recon_product);
+    else if (!strcmp(mode, "host"))
+        kf_set_product_backend(nullptr);
+    else
+    {
+        fprintf(stderr, "Error: --recon must be auto, host or device, got '%s'\n", mode);
+        exit(1);
+    }
+    printf("Reconstruction product: %s%s\n", mode,
+           strcmp(mode, "auto") ? " tree" : " (device tree for large products, host otherwise)");
 }

@@ -140,8 +140,8 @@ void ksc_gather_and_combine_cbrt(
 // Local cube root reconstruction — called by EVERY rank
 //
 // Computes  partial = ∏ cbrt(p_i)^e_i  mod M  for this rank's local factors.
-// Phase 1 (sequential): resolve cbrt(p) per factor via cache or mpz_powm.
-// Phase 2 (parallel):   exponentiate each cbrt by its exponent (OMP).
+// Phase 1 (sequential): look up cbrt(p) per factor; misses (mpz_powm) in parallel.
+// Phase 2 (parallel):   exponentiate each cbrt by its exponent (OMP, when worth it).
 // Phase 3 (parallel):   product tree mod M (kf_product_mod_tree).
 // ---------------------------------------------------------------------------
 void ksc_compute_local_cbrt(

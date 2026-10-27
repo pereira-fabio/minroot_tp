@@ -361,11 +361,12 @@ void ksc_compute_local_cbrt(mpz_t result,
     for (int i = 0; i < n; i++)
         mpz_init_set_ui(parts[i], 1);
 
-    // Phase 1 (sequential): resolve cbrt(p) for each factor via cache or powm.
-    // Cache lookups and appends are NOT thread-safe (realloc), so this phase
-    // must run sequentially. With a warm cache every call is a cheap array
-    // lookup (~0 ms total), so sequential cost is negligible.
+    // Phase 1 (sequential): look every factor up. Lookups are O(1) (hashed)
+    // and appends realloc, so the cache is only touched serially.
     mpz_t *cbrt_vals = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
+    char *miss = (char *)calloc((size_t)n, 1);
+    int n_miss = 0, n_pow = 0;
+    auto _ct0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < n; i++)
     {
         mpz_init(cbrt_vals[i]);
@@ -373,41 +374,62 @@ void ksc_compute_local_cbrt(mpz_t result,
         int cache_idx = (cache && p_ul > 0)
                             ? kf_cbrt_cache_find(cache, p_ul)
                             : -1;
-
-        auto _ct0 = std::chrono::high_resolution_clock::now();
         if (cache_idx >= 0)
-        {
             mpz_set(cbrt_vals[i], cache->items[cache_idx].cbrt);
-            auto _ct1 = std::chrono::high_resolution_clock::now();
-            if (record && hit_ms_out)
-                *hit_ms_out += std::chrono::duration<double, std::milli>(_ct1 - _ct0).count();
-            if (record && hits_out)
-                (*hits_out)++;
-        }
         else
         {
-            mpz_t p_mpz;
-            mpz_init_set_ui(p_mpz, p_ul);
-            mpz_powm(cbrt_vals[i], p_mpz, e, modulo);
-            mpz_clear(p_mpz);
-            auto _ct1 = std::chrono::high_resolution_clock::now();
-            if (record && miss_ms_out)
-                *miss_ms_out += std::chrono::duration<double, std::milli>(_ct1 - _ct0).count();
-            if (record && misses_out)
-                (*misses_out)++;
+            miss[i] = 1;
+            n_miss++;
+        }
+        n_pow += (factors->items[i].exponent > 1);
+    }
+    auto _ct1 = std::chrono::high_resolution_clock::now();
 
-            if (cache && p_ul > 0)
-            {
-                kf_cbrt_cache_append(cache, p_ul, cbrt_vals[i]);
-                if (cache_dirty)
-                    *cache_dirty = true;
-            }
+    // Phase 1b (parallel): a miss is a full |M|-bit exponentiation (~1.8 s at
+    // 24576 bits). They used to run one after another inside the lookup loop;
+    // a cold cache with hundreds of misses per rank now uses every thread.
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic) if (n_miss >= 2)
+#endif
+    for (int i = 0; i < n; i++)
+    {
+        if (!miss[i])
+            continue;
+        mpz_t p_mpz;
+        mpz_init_set_ui(p_mpz, mpz_get_ui(factors->items[i].prime));
+        mpz_powm(cbrt_vals[i], p_mpz, e, modulo);
+        mpz_clear(p_mpz);
+    }
+    auto _ct2 = std::chrono::high_resolution_clock::now();
+
+    // Phase 1c (sequential): cache the new roots in factor order.
+    for (int i = 0; i < n; i++)
+    {
+        unsigned long p_ul = mpz_get_ui(factors->items[i].prime);
+        if (miss[i] && cache && p_ul > 0 && kf_cbrt_cache_find(cache, p_ul) < 0)
+        {
+            kf_cbrt_cache_append(cache, p_ul, cbrt_vals[i]);
+            if (cache_dirty)
+                *cache_dirty = true;
         }
     }
+    free(miss);
+    if (record)
+    {
+        if (hit_ms_out)
+            *hit_ms_out += std::chrono::duration<double, std::milli>(_ct1 - _ct0).count();
+        if (miss_ms_out)
+            *miss_ms_out += std::chrono::duration<double, std::milli>(_ct2 - _ct1).count();
+        if (hits_out)
+            *hits_out += n - n_miss;
+        if (misses_out)
+            *misses_out += n_miss;
+    }
 
-    // Phase 2 (parallel): parts[i] = cbrt_vals[i]^exponent mod M.
+    // Phase 2 (parallel when worth it): parts[i] = cbrt_vals[i]^exponent mod M.
+    bool par = kf_parallel_worth(4.0 * n_pow, modulo);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if (par)
 #endif
     for (int i = 0; i < n; i++)
     {

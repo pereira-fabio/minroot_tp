@@ -138,3 +138,37 @@ KF_HD bool divides_big_u64(const uint64_t *limbs, int nlimbs, uint64_t q)
     }
     return acc == 0 || acc == q;
 }
+
+// Two primes in one pass over y: the chains for q0 and q1 are independent, so
+// a thread has twice the work in flight between y loads (instruction-level
+// parallelism) and reads each limb once for both. Same verdicts as two
+// divides_big_u32 calls; even q (never a k32 prime) takes that route.
+KF_HD void divides_big_u32_x2(const uint64_t *limbs, int nlimbs,
+                              uint32_t q0, uint32_t q1, bool *d0, bool *d1)
+{
+    if (((q0 & q1) & 1u) == 0)
+    {
+        *d0 = divides_big_u32(limbs, nlimbs, q0);
+        *d1 = divides_big_u32(limbs, nlimbs, q1);
+        return;
+    }
+    uint32_t i0 = kf_neg_inv32(q0), i1 = kf_neg_inv32(q1);
+    uint64_t a0 = 0, a1 = 0;
+    for (int i = 0; i < nlimbs; i++)
+    {
+        uint64_t limb = limbs[i];
+        uint32_t lo = (uint32_t)limb, hi = (uint32_t)(limb >> 32);
+        uint64_t t0 = a0 + lo, t1 = a1 + lo;
+        uint32_t m0 = (uint32_t)t0 * i0, m1 = (uint32_t)t1 * i1;
+        a0 = (t0 + (uint64_t)m0 * q0) >> 32;
+        a1 = (t1 + (uint64_t)m1 * q1) >> 32;
+        t0 = a0 + hi;
+        t1 = a1 + hi;
+        m0 = (uint32_t)t0 * i0;
+        m1 = (uint32_t)t1 * i1;
+        a0 = (t0 + (uint64_t)m0 * q0) >> 32;
+        a1 = (t1 + (uint64_t)m1 * q1) >> 32;
+    }
+    *d0 = (a0 == 0 || a0 == q0);
+    *d1 = (a1 == 0 || a1 == q1);
+}

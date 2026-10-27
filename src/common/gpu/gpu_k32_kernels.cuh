@@ -28,7 +28,26 @@ __constant__ int d_nlimbs;
 
 // ---------------------------------------------------------------------------
 // Trial-divide y (in constant memory) by all k32 primes.
+//
+// KF_TD_ILP = 2 makes each thread test two primes per pass over y
+// (divides_big_u32_x2): primes[i] and primes[i + stride], so loads stay
+// coalesced. Whether the extra instruction-level parallelism beats the
+// higher register count is a per-card question; build both and compare:
+//     make -B gpu                          # KF_TD_ILP=1 (default)
+//     make -B gpu GPU_DEFS=-DKF_TD_ILP=2   # -B: make cannot see GPU_DEFS change
 // ---------------------------------------------------------------------------
+
+#ifndef KF_TD_ILP
+#define KF_TD_ILP 1
+#endif
+
+__device__ __forceinline__ void k32_record_factor(uint64_t p, uint64_t *out_factors,
+                                                  int *out_count)
+{
+    int slot = atomicAdd(out_count, 1);
+    if (slot < MAX_GPU_FACTORS)
+        out_factors[slot] = p;
+}
 
 __global__ void k32_trial_divide_kernel(
     const uint32_t *__restrict__ primes, int64_t nprimes,
@@ -38,14 +57,32 @@ __global__ void k32_trial_divide_kernel(
     int64_t stride = (int64_t)gridDim.x * blockDim.x;
     int nlimbs = d_nlimbs;
 
+#if KF_TD_ILP == 2
+    for (int64_t i = idx; i < nprimes; i += 2 * stride)
+    {
+        uint32_t p0 = primes[i];
+        int64_t j = i + stride;
+        if (j < nprimes)
+        {
+            uint32_t p1 = primes[j];
+            bool d0, d1;
+            divides_big_u32_x2(d_y_limbs, nlimbs, p0, p1, &d0, &d1);
+            if (d0)
+                k32_record_factor(p0, out_factors, out_count);
+            if (d1)
+                k32_record_factor(p1, out_factors, out_count);
+        }
+        else if (divides_big_u32(d_y_limbs, nlimbs, p0))
+        {
+            k32_record_factor(p0, out_factors, out_count);
+        }
+    }
+#else
     for (int64_t i = idx; i < nprimes; i += stride)
     {
         uint64_t p = (uint64_t)primes[i];
         if (divides_big_u32(d_y_limbs, nlimbs, (uint32_t)p))
-        {
-            int slot = atomicAdd(out_count, 1);
-            if (slot < MAX_GPU_FACTORS)
-                out_factors[slot] = p;
-        }
+            k32_record_factor(p, out_factors, out_count);
     }
+#endif
 }

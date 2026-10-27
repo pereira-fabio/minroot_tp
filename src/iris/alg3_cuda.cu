@@ -25,7 +25,7 @@
 // =============================================================================
 
 #include "gpu_common.h"
-#include "gpu_recon.cuh" // --recon host|device
+#include "gpu_recon.cuh" // --recon auto|host|device
 #include "common.h"
 #include "factorization.h"
 #include "gpu_k32_kernels.cuh"
