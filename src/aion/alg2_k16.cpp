@@ -30,6 +30,14 @@
 
 // ---------------------------------------------------------------------------
 // Local cbrt reconstruction using the dense k16 cbrt table
+//
+// Every factor is a table hit, so the work is raising each cbrt(p) to its
+// exponent and multiplying the terms together. Both used to run serially in
+// one loop: at 24576 bits and 2 ranks that is ~750 dependent mulmods per rank.
+// The terms are now computed in parallel and multiplied by
+// kf_product_mod_tree; both only wake threads when kf_parallel_worth says the
+// work pays for them, so high rank counts (a handful of factors each) stay
+// serial. hit_ms covers the lookups and powers, no longer the product.
 // ---------------------------------------------------------------------------
 
 static void compute_local_cbrt_k16(
@@ -50,9 +58,20 @@ static void compute_local_cbrt_k16(
         return;
     }
 
-    mpz_set_ui(result, 1);
+    int powers = 0;
+    for (int i = 0; i < n; i++)
+        powers += (factors->items[i].exponent > 1);
+    bool par = kf_parallel_worth(4.0 * powers, modulo);
+
+    mpz_t *terms = (mpz_t *)malloc((size_t)n * sizeof(mpz_t));
+    int found = 0;
+    auto t0 = std::chrono::high_resolution_clock::now();
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par) reduction(+ : found)
+#endif
     for (int i = 0; i < n; i++)
     {
+        mpz_init(terms[i]);
         unsigned long p = mpz_get_ui(factors->items[i].prime);
         // Binary search for prime index
         int lo = 0, hi = prime_count - 1, idx = -1;
@@ -72,28 +91,34 @@ static void compute_local_cbrt_k16(
         if (idx < 0)
         {
             fprintf(stderr, "[ERROR] prime %lu not in k16 table\n", p);
+            mpz_set_ui(terms[i], 1); // leave it out of the product
             continue;
         }
-        auto t0 = std::chrono::high_resolution_clock::now();
-        mpz_t term;
-        mpz_init(term);
+        found++;
         if (factors->items[i].exponent == 1)
-            mpz_set(term, cbrt_table[idx]);
+            mpz_set(terms[i], cbrt_table[idx]);
         else
-            mpz_powm_ui(term, cbrt_table[idx],
+            mpz_powm_ui(terms[i], cbrt_table[idx],
                         (unsigned long)factors->items[i].exponent, modulo);
-        mpz_mul(result, result, term);
-        mpz_mod(result, result, modulo);
-        mpz_clear(term);
-        auto t1 = std::chrono::high_resolution_clock::now();
-        // k16 always hits (dense precomputed table)
-        if (record)
-        {
-            if (hit_ms)
-                *hit_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
-            if (hits)
-                (*hits)++;
-        }
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+#ifdef _OPENMP
+    kf_product_mod_tree(result, terms, n, modulo, omp_get_max_threads());
+#else
+    kf_product_mod_tree(result, terms, n, modulo, 1);
+#endif
+    for (int i = 0; i < n; i++)
+        mpz_clear(terms[i]);
+    free(terms);
+
+    // k16 always hits (dense precomputed table)
+    if (record)
+    {
+        if (hit_ms)
+            *hit_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        if (hits)
+            *hits += found;
     }
     if (record && misses)
         *misses = 0;

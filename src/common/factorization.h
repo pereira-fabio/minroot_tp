@@ -267,6 +267,11 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
 void kf_product_mod_tree(mpz_t result, mpz_t *vals, int n,
                          const mpz_t modulo, int nthreads);
 
+// True when `mulmods` |M|-bit modular multiplications are enough work to be
+// worth waking an OpenMP team for (~1 ms serial). Below it, thread start-up and
+// barrier stalls on a busy machine cost more than they save.
+bool kf_parallel_worth(double mulmods, const mpz_t modulo);
+
 // Where kf_compute_cbrt_from_factors_omp sends its final product. The default
 // is kf_product_mod_tree; the CUDA solvers can install the device tree
 // (gpu_recon.cuh, --recon device). nullptr restores the default.

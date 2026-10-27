@@ -1206,12 +1206,17 @@ static int ksc_available_cpus(void)
 // ---------------------------------------------------------------------------
 #define KF_TREE_MIN_WORK 2.0e6
 
+bool kf_parallel_worth(double mulmods, const mpz_t modulo)
+{
+    double limbs = (double)mpz_size(modulo);
+    return mulmods * limbs * limbs >= KF_TREE_MIN_WORK;
+}
+
 void kf_product_mod_tree(mpz_t result, mpz_t *vals, int n,
                          const mpz_t modulo, int nthreads)
 {
     int want = nthreads < n / 2 ? nthreads : n / 2;
-    double limbs = (double)mpz_size(modulo);
-    if ((double)n * limbs * limbs < KF_TREE_MIN_WORK)
+    if (!kf_parallel_worth((double)n, modulo))
         want = 1;
 #ifdef _OPENMP
     if (want >= 2)
@@ -1338,8 +1343,7 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
     }
     // Two or more exponentiations always pay for threads; small powers
     // (a few mulmods each) only in bulk.
-    double limbs = (double)mpz_size(modulo);
-    bool par = misses >= 2 || 4.0 * powers * limbs * limbs >= KF_TREE_MIN_WORK;
+    bool par = misses >= 2 || kf_parallel_worth(4.0 * powers, modulo);
 
 // Parallel when worth it: cube roots for the misses, then each term's power.
 #pragma omp parallel for schedule(dynamic) num_threads(nthreads) if (par)
