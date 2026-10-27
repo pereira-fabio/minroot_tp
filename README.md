@@ -219,6 +219,7 @@ make gpu-experiments      # alg_crt_cuda, alg2_ksweep_cuda, gpu_scale_sim_cuda
 make gpu ARCH=sm_75       # force one architecture (2080/2080 Super)
 make gpu ARCH=portable    # one fatbinary for any Volta-or-newer card
 make -B gpu GPU_DEFS=-DKF_TD_ILP=1   # one prime per thread in the k32 kernel (default: two)
+make -B gpu GPU_DEFS=-DKF_TD_ILP=4   # four primes per thread
 
 # on a cluster, load the toolkit first:
 module load system/CUDA/12.6.0

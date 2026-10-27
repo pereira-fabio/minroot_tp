@@ -172,3 +172,48 @@ KF_HD void divides_big_u32_x2(const uint64_t *limbs, int nlimbs,
     *d0 = (a0 == 0 || a0 == q0);
     *d1 = (a1 == 0 || a1 == q1);
 }
+
+// Four primes in one pass over y: divides_big_u32_x2 widened to four
+// independent chains (KF_TD_ILP=4). d[k] answers q[k] | y.
+KF_HD void divides_big_u32_x4(const uint64_t *limbs, int nlimbs,
+                              const uint32_t q[4], bool d[4])
+{
+    if (((q[0] & q[1] & q[2] & q[3]) & 1u) == 0)
+    {
+        for (int k = 0; k < 4; k++)
+            d[k] = divides_big_u32(limbs, nlimbs, q[k]);
+        return;
+    }
+    uint32_t inv[4];
+    uint64_t a[4] = {0, 0, 0, 0};
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+    for (int k = 0; k < 4; k++)
+        inv[k] = kf_neg_inv32(q[k]);
+    for (int i = 0; i < nlimbs; i++)
+    {
+        uint64_t limb = limbs[i];
+        uint32_t digit[2] = {(uint32_t)limb, (uint32_t)(limb >> 32)};
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+        for (int h = 0; h < 2; h++)
+        {
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+            for (int k = 0; k < 4; k++)
+            {
+                uint64_t t = a[k] + digit[h];
+                uint32_t m = (uint32_t)t * inv[k];
+                a[k] = (t + (uint64_t)m * q[k]) >> 32;
+            }
+        }
+    }
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+    for (int k = 0; k < 4; k++)
+        d[k] = (a[k] == 0 || a[k] == q[k]);
+}

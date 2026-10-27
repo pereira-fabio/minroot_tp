@@ -34,8 +34,10 @@ __constant__ int d_nlimbs;
 // coalesced. Measured on an RTX 2080 SUPER, k32 8192-bit table, factor_ms
 // warm 64.1 -> 43.0 ms (cold 73.9 -> 50.0) against one prime per thread; the
 // two independent chains hide the multiply latency for 38 registers instead
-// of 32. The single-prime kernel stays available for comparison:
+// of 32. The other widths stay available for comparison (KF_TD_ILP=4: four
+// primes per thread, primes[i + k*stride] for k = 0..3):
 //     make -B gpu GPU_DEFS=-DKF_TD_ILP=1   # -B: make cannot see GPU_DEFS change
+//     make -B gpu GPU_DEFS=-DKF_TD_ILP=4
 // ---------------------------------------------------------------------------
 
 #ifndef KF_TD_ILP
@@ -58,7 +60,31 @@ __global__ void k32_trial_divide_kernel(
     int64_t stride = (int64_t)gridDim.x * blockDim.x;
     int nlimbs = d_nlimbs;
 
-#if KF_TD_ILP == 2
+#if KF_TD_ILP == 4
+    for (int64_t i = idx; i < nprimes; i += 4 * stride)
+    {
+        if (i + 3 * stride < nprimes)
+        {
+            uint32_t q[4];
+            bool d[4];
+#pragma unroll
+            for (int k = 0; k < 4; k++)
+                q[k] = primes[i + k * stride];
+            divides_big_u32_x4(d_y_limbs, nlimbs, q, d);
+#pragma unroll
+            for (int k = 0; k < 4; k++)
+                if (d[k])
+                    k32_record_factor(q[k], out_factors, out_count);
+        }
+        else
+        {
+            // Tail: fewer than four of this thread's primes remain.
+            for (int64_t j = i; j < nprimes && j < i + 4 * stride; j += stride)
+                if (divides_big_u32(d_y_limbs, nlimbs, primes[j]))
+                    k32_record_factor(primes[j], out_factors, out_count);
+        }
+    }
+#elif KF_TD_ILP == 2
     for (int64_t i = idx; i < nprimes; i += 2 * stride)
     {
         uint32_t p0 = primes[i];
