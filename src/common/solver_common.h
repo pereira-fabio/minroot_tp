@@ -99,13 +99,31 @@ void ksc_init_json_results(
     const mpz_t challenge, int rank);
 
 // ---------------------------------------------------------------------------
-// Partial cbrt gather + combine
+// Log-depth product reduction — called by EVERY rank
 //
-// Every rank exports local_cbrt to a fixed-size big-endian buffer.
-// Rank 0 gathers all nranks buffers, multiplies them into result, then
-// unblinds: if attempt > 0, multiplies by blind_table[attempt-1].r_inv.
+// result (rank 0 only) = product of every rank's `local`, reduced mod *modulo
+// when modulo is non-null, exact otherwise. Uses MPI_Reduce with a
+// user-defined op, so the multiplications form a ceil(log2 nranks)-deep tree
+// instead of nranks-1 serial steps on rank 0. Values travel as nbytes
+// zero-padded big-endian buffers; an exact product that overflows nbytes
+// saturates to all 0xFF bytes (never equal to, or a divisor of, a value < M).
+// ---------------------------------------------------------------------------
+void ksc_reduce_product(mpz_t result,
+                        const mpz_t local,
+                        mpz_srcptr modulo,
+                        size_t nbytes,
+                        int rank);
+
+// ---------------------------------------------------------------------------
+// Partial cbrt combine
 //
-// t_gat_ms_out, t_com_ms_out: elapsed times on rank 0 (others: ignored).
+// Tree-reduces every rank's local_cbrt into result mod M on rank 0
+// (ksc_reduce_product), then unblinds: if attempt > 0, multiplies by
+// blind_table[attempt-1].r_inv.
+//
+// t_gat_ms_out is always 0: there is no separate gather step any more.
+// t_com_ms_out is the whole reduce (communication + mulmods) plus the unblind,
+// on rank 0 (others: ignored).
 // ---------------------------------------------------------------------------
 void ksc_gather_and_combine_cbrt(
     mpz_t result,

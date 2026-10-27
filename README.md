@@ -110,15 +110,20 @@ A precomputed table would require ~52GB — infeasible. Instead:
 
 Distributes the sieve range `[65537, 2^32]` across MPI ranks. Each rank
 factors its own slice and computes its partial cbrt product locally
-(`∏ cbrt(pᵢ)^eᵢ mod M`). Rank 0 collects one fixed-size partial product
-per rank and multiplies them — both factoring and reconstruction scale with
-the number of ranks.
+(`∏ cbrt(pᵢ)^eᵢ mod M`). The per-rank partial products are combined by a
+log-depth reduction tree (`MPI_Reduce` with a user-defined multiply-mod-M op),
+so the combine takes `ceil(log2 N)` rounds instead of `N-1` serial
+multiplications on rank 0 — both factoring and reconstruction scale with the
+number of ranks.
 
 **Communication pattern:**
 - `MPI_Bcast`: challenge + modulo bytes → all ranks (once per challenge)
 - `MPI_Barrier`: synchronise before timing each phase
 - `MPI_Reduce (MAX)`: max local-cbrt time across ranks → rank 0 (timing only)
-- `MPI_Gather`: one `~ceil(modulo_bits/8)` buffer per rank → rank 0 (cbrt products)
+- `MPI_Reduce (custom op)`: one `~ceil(modulo_bits/8)` buffer per rank, multiplied
+  up a binary tree → rank 0 (cbrt products, and the exact factor products used by
+  the completeness/cofactor checks). Each buffer is one element of a contiguous
+  derived datatype so MPI never hands the op a partial big integer
 - No communication during the hot trial division loop
 
 ### alg2_k35 — Paper's Concrete Parameters (B = 2^35)
@@ -511,6 +516,10 @@ construction that branch never fires.
 
 **k16 peaks at 32 ranks and then declines.** Beyond that the 6542-prime sieve is
 divided too finely for the reconstruction and gather to be worth their cost.
+These figures were measured with the old serial combine (gather to rank 0, then
+`N-1` multiplications); the combine is now a log-depth tree, which
+`analysis/ideal_combine.py` projects to remove most of this decline. Not yet
+re-measured on the cluster.
 
 **k35 does not reach the paper's figure**, and cannot here: it would need roughly
 1024 ranks, eight times the maximum allocation. Any number quoted beyond 128

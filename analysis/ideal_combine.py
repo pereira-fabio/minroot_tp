@@ -17,11 +17,12 @@ speedup_total would be if that serial combine were replaced with a log-depth
 tree (ceil(log2(N)) rounds instead of N-1), covering every benchmarked
 algorithm and method (sieve vs table, where both exist).
 
-This was flagged but deliberately deferred as a code change (perf-fix-plan
-2026-06-11, item "D-review"): implementing it for real risks silently
-corrupting every algorithm's result and can't be validated without cluster
-access. This script is the analytical alternative -- estimate the effect from
-data already in hand, without touching the solver code.
+This was first deferred as a code change (perf-fix-plan 2026-06-11, item
+"D-review") and is now implemented: ksc_reduce_product in
+src/common/solver_common.cpp tree-reduces with MPI_Reduce and a custom op.
+Correctness is checked locally by `make test` at any rank count; only the
+speedup needs the cluster. Until fresh cluster numbers land, this script is
+the estimate of what that change buys, computed from the serial-combine data.
 
 METHOD
 ------
@@ -59,7 +60,7 @@ resting on this one assumption.
 CAVEAT
 ------
 This is a projection, not a measurement -- the log-depth combine has not been
-implemented or run on the cluster. It also assumes the log-depth tree adds no
+run on the cluster yet. It also assumes the log-depth tree adds no
 per-round overhead beyond the raw multiplication cost c (a generous, lower-
 bound assumption -- a real MPI-based tree reduce would add some communication
 latency per round, though that should be small given Bcast/Gather/Barrier are
@@ -163,8 +164,8 @@ def main():
         gain = (speedup_id / speedup_meas - 1) * 100
         print(f"{name:>14} | {speedup_meas:9.2f} | {speedup_id:9.2f} | {gain:+.1f}%")
 
-    print("\nAll 'ideal' values assume a log-depth combine tree that does not exist in the "
-          "code yet -- this is a projection, not a measurement. See "
+    print("\nAll 'ideal' values come from a model of the log-depth combine tree, not from "
+          "cluster runs of it -- this is a projection, not a measurement. See "
           "wiki/results/ideal-overhead-free-projection.md.")
 
 

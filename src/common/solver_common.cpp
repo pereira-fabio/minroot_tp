@@ -182,6 +182,114 @@ void ksc_init_json_results(
 }
 
 // ---------------------------------------------------------------------------
+// ksc_reduce_product — log-depth product of one value per rank
+//
+// The combine used to be MPI_Gather followed by N-1 serial multiplications on
+// rank 0. Multiplication (mod M or exact) is associative and commutative, so
+// MPI_Reduce with a user-defined op computes the same product in a
+// ceil(log2 N)-deep tree, with the multiplications spread across ranks.
+//
+// Each rank's value travels as ONE element of a contiguous nbytes datatype.
+// With count = nbytes of MPI_BYTE, MPI may pipeline a large message and call
+// the op on byte slices of it, which would corrupt the big integers. A single
+// element of a derived type is never split.
+//
+// MPI ops carry no user data, so the modulus lives in file statics for the
+// duration of one reduce. MPI calls here are single-threaded.
+// ---------------------------------------------------------------------------
+
+static mpz_t s_red_modulo;
+static bool s_red_modulo_init = false;
+static bool s_red_use_modulo = false;
+static size_t s_red_nbytes = 0;
+
+// Zero-padded big-endian export into exactly nbytes. Returns false when the
+// value does not fit; buf is then left all zeros.
+static bool export_padded(unsigned char *buf, size_t nbytes, const mpz_t v)
+{
+    memset(buf, 0, nbytes);
+    size_t wr = 0;
+    unsigned char *tmp = (unsigned char *)mpz_export(NULL, &wr, 1, 1, 0, 0, v);
+    bool fits = (wr <= nbytes);
+    if (tmp && wr > 0 && fits)
+        memcpy(buf + nbytes - wr, tmp, wr);
+    free(tmp);
+    return fits;
+}
+
+// inout[i] = in[i] * inout[i]  (mod M when s_red_use_modulo).
+//
+// Exact products that overflow the buffer saturate to all 0xFF bytes. Every
+// exact caller compares the product against (or divides it into) a value below
+// M, which an all-ones buffer of nbytes > |M| bytes can never equal or divide,
+// so overflow reads as "not complete" rather than a wrapped wrong answer.
+static void ksc_mul_op(void *in, void *inout, int *len, MPI_Datatype *)
+{
+    const size_t nb = s_red_nbytes;
+    mpz_t a, b;
+    mpz_inits(a, b, NULL);
+    for (int i = 0; i < *len; i++)
+    {
+        unsigned char *pa = (unsigned char *)in + (size_t)i * nb;
+        unsigned char *pb = (unsigned char *)inout + (size_t)i * nb;
+        mpz_import(a, nb, 1, 1, 0, 0, pa);
+        mpz_import(b, nb, 1, 1, 0, 0, pb);
+        mpz_mul(b, b, a);
+        if (s_red_use_modulo)
+            mpz_mod(b, b, s_red_modulo);
+        if (!export_padded(pb, nb, b))
+            memset(pb, 0xFF, nb);
+    }
+    mpz_clears(a, b, NULL);
+}
+
+void ksc_reduce_product(mpz_t result,
+                        const mpz_t local,
+                        mpz_srcptr modulo,
+                        size_t nbytes,
+                        int rank)
+{
+    static MPI_Op op = MPI_OP_NULL;
+    static MPI_Datatype elem = MPI_DATATYPE_NULL;
+    static size_t elem_nbytes = 0;
+
+    if (op == MPI_OP_NULL)
+        MPI_Op_create(ksc_mul_op, /*commute=*/1, &op);
+    if (elem_nbytes != nbytes)
+    {
+        if (elem != MPI_DATATYPE_NULL)
+            MPI_Type_free(&elem);
+        MPI_Type_contiguous((int)nbytes, MPI_BYTE, &elem);
+        MPI_Type_commit(&elem);
+        elem_nbytes = nbytes;
+    }
+
+    if (!s_red_modulo_init)
+    {
+        mpz_init(s_red_modulo);
+        s_red_modulo_init = true;
+    }
+    s_red_use_modulo = (modulo != nullptr);
+    if (modulo)
+        mpz_set(s_red_modulo, modulo);
+    s_red_nbytes = nbytes;
+
+    unsigned char *sendbuf = (unsigned char *)malloc(nbytes);
+    unsigned char *recvbuf = (rank == 0) ? (unsigned char *)malloc(nbytes) : nullptr;
+    if (!export_padded(sendbuf, nbytes, local))
+        memset(sendbuf, 0xFF, nbytes);
+
+    MPI_Reduce(sendbuf, recvbuf, 1, elem, op, 0, MPI_COMM_WORLD);
+
+    if (rank == 0)
+    {
+        mpz_import(result, nbytes, 1, 1, 0, 0, recvbuf);
+        free(recvbuf);
+    }
+    free(sendbuf);
+}
+
+// ---------------------------------------------------------------------------
 // ksc_gather_and_combine_cbrt
 // ---------------------------------------------------------------------------
 
@@ -196,49 +304,18 @@ void ksc_gather_and_combine_cbrt(
     double *t_gat_ms_out,
     double *t_com_ms_out)
 {
-    // Export local_cbrt to zero-padded big-endian buffer
-    unsigned char *local_buf = (unsigned char *)calloc(cbrt_bytes, 1);
-    {
-        size_t wr = 0;
-        unsigned char *tmp = (unsigned char *)mpz_export(NULL, &wr, 1, 1, 0, 0, local_cbrt);
-        if (tmp && wr > 0 && wr <= cbrt_bytes)
-        {
-            memcpy(local_buf + cbrt_bytes - wr, tmp, wr);
-            free(tmp);
-        }
-    }
+    (void)nranks;
 
-    unsigned char *all_bufs = nullptr;
-    if (rank == 0)
-        all_bufs = (unsigned char *)malloc((size_t)nranks * cbrt_bytes);
-
-    auto t_gat0 = std::chrono::high_resolution_clock::now();
-    MPI_Gather(local_buf, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-               all_bufs, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-               0, MPI_COMM_WORLD);
-    auto t_gat1 = std::chrono::high_resolution_clock::now();
-    free(local_buf);
-
+    // There is no separate gather any more: the tree reduce moves the data and
+    // multiplies it in the same call, so its whole time is reported as combine.
     if (t_gat_ms_out)
-        *t_gat_ms_out = std::chrono::duration<double, std::milli>(t_gat1 - t_gat0).count();
+        *t_gat_ms_out = 0.0;
+
+    auto t_com0 = std::chrono::high_resolution_clock::now();
+    ksc_reduce_product(result, local_cbrt, modulo, cbrt_bytes, rank);
 
     if (rank == 0)
     {
-        auto t_com0 = std::chrono::high_resolution_clock::now();
-
-        mpz_set_ui(result, 1);
-        mpz_t partial;
-        mpz_init(partial);
-        for (int rk = 0; rk < nranks; rk++)
-        {
-            mpz_import(partial, cbrt_bytes, 1, 1, 0, 0,
-                       all_bufs + (size_t)rk * cbrt_bytes);
-            mpz_mul(result, result, partial);
-            mpz_mod(result, result, modulo);
-        }
-        mpz_clear(partial);
-        free(all_bufs);
-
         // Unblind: result = combined * r^{-1} mod M
         if (attempt > 0 && blind_table)
         {
@@ -765,7 +842,7 @@ const char *ksc_ensure_k35_primes(int sp_count, const unsigned *sp, int rank)
 // ---------------------------------------------------------------------------
 // ksc_alg2_broadcast_complete — Algorithm 2 (k32/k35) B-smooth completeness
 //
-// Gathers each rank's partial factor product, combines on rank 0, and checks
+// Tree-reduces each rank's partial factor product to rank 0, and checks
 // whether combined_product == blinded (i.e. cofactor = 1, fully B-smooth).
 // Returns 1 on all ranks if complete, 0 otherwise.
 //
@@ -778,46 +855,19 @@ int ksc_alg2_broadcast_complete(
     size_t cbrt_bytes,
     int rank, int nranks)
 {
-    // --- 1. Export local factor product ---
-    unsigned char *prod_buf = (unsigned char *)calloc(cbrt_bytes, 1);
-    {
-        size_t written = 0;
-        unsigned char *tmp = (unsigned char *)mpz_export(
-            NULL, &written, 1, 1, 0, 0, local_prod);
-        if (tmp && written > 0 && written <= cbrt_bytes)
-        {
-            memcpy(prod_buf + cbrt_bytes - written, tmp, written);
-            free(tmp);
-        }
-    }
-
-    // --- 2. Gather to rank 0 ---
-    unsigned char *all_prods = NULL;
-    if (rank == 0)
-        all_prods = (unsigned char *)malloc((size_t)nranks * cbrt_bytes);
-
-    MPI_Gather(prod_buf, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-               all_prods, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-               0, MPI_COMM_WORLD);
-    free(prod_buf);
+    // --- 1-2. Tree-reduce the local factor products to rank 0 (exact) ---
+    mpz_t combined;
+    mpz_init(combined);
+    ksc_reduce_product(combined, local_prod, nullptr, cbrt_bytes, rank);
 
     // --- 3. Rank 0: check combined == blinded ---
     int complete = 0;
     if (rank == 0)
     {
-        mpz_t combined, part;
-        mpz_init_set_ui(combined, 1);
-        mpz_init(part);
-        for (int rk = 0; rk < nranks; rk++)
-        {
-            mpz_import(part, cbrt_bytes, 1, 1, 0, 0,
-                       all_prods + (size_t)rk * cbrt_bytes);
-            mpz_mul(combined, combined, part);
-        }
-        free(all_prods);
         complete = (mpz_cmp(combined, blinded) == 0) ? 1 : 0;
-        mpz_clears(combined, part, NULL);
     }
+
+    mpz_clear(combined);
 
     // --- 4. Broadcast result ---
     MPI_Bcast(&complete, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -840,28 +890,10 @@ int ksc_alg3_broadcast_cofactor(
     int rank, int nranks,
     double *primality_ms)
 {
-    // --- 1. Export local factor product to fixed-size big-endian buffer ---
-    unsigned char *prod_buf = (unsigned char *)calloc(cbrt_bytes, 1);
-    {
-        size_t written = 0;
-        unsigned char *tmp = (unsigned char *)mpz_export(
-            NULL, &written, 1, 1, 0, 0, local_prod);
-        if (tmp && written > 0 && written <= cbrt_bytes)
-        {
-            memcpy(prod_buf + cbrt_bytes - written, tmp, written);
-            free(tmp);
-        }
-    }
-
-    // --- 2. Gather all local products to rank 0 ---
-    unsigned char *all_prods = NULL;
-    if (rank == 0)
-        all_prods = (unsigned char *)malloc((size_t)nranks * cbrt_bytes);
-
-    MPI_Gather(prod_buf, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-               all_prods, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-               0, MPI_COMM_WORLD);
-    free(prod_buf);
+    // --- 1-2. Tree-reduce the local factor products to rank 0 (exact) ---
+    mpz_t combined;
+    mpz_init(combined);
+    ksc_reduce_product(combined, local_prod, nullptr, cbrt_bytes, rank);
 
     // --- 3. Rank 0: combine, compute cofactor, classify ---
     int complete = 0;
@@ -869,22 +901,12 @@ int ksc_alg3_broadcast_cofactor(
 
     if (rank == 0)
     {
-        mpz_t combined, part, q, r;
-        mpz_init_set_ui(combined, 1);
-        mpz_inits(part, q, r, NULL);
-
-        for (int rk = 0; rk < nranks; rk++)
-        {
-            mpz_import(part, cbrt_bytes, 1, 1, 0, 0,
-                       all_prods + (size_t)rk * cbrt_bytes);
-            mpz_mul(combined, combined, part);
-        }
-        free(all_prods);
+        mpz_t q, r;
+        mpz_inits(q, r, NULL);
 
         // cofactor = blinded / combined_small_product
         // Use tdiv_qr: non-zero remainder means combined doesn't divide blinded → retry.
         mpz_tdiv_qr(q, r, blinded, combined);
-        mpz_clears(combined, part, NULL);
 
         if (mpz_sgn(r) == 0)
         {
@@ -933,6 +955,8 @@ int ksc_alg3_broadcast_cofactor(
         }
         mpz_clears(q, r, NULL);
     }
+
+    mpz_clear(combined);
 
     // --- 4. Broadcast result to all ranks ---
     MPI_Bcast(&complete, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -992,28 +1016,10 @@ int ksc_alg4_broadcast_cofactor(
     size_t cbrt_bytes,
     int rank, int nranks)
 {
-    // --- 1. Export local factor product to fixed-size big-endian buffer ---
-    unsigned char *prod_buf = (unsigned char *)calloc(cbrt_bytes, 1);
-    {
-        size_t written = 0;
-        unsigned char *tmp = (unsigned char *)mpz_export(
-            NULL, &written, 1, 1, 0, 0, local_prod);
-        if (tmp && written > 0 && written <= cbrt_bytes)
-        {
-            memcpy(prod_buf + cbrt_bytes - written, tmp, written);
-            free(tmp);
-        }
-    }
-
-    // --- 2. Gather all local products to rank 0 ---
-    unsigned char *all_prods = NULL;
-    if (rank == 0)
-        all_prods = (unsigned char *)malloc((size_t)nranks * cbrt_bytes);
-
-    MPI_Gather(prod_buf, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-               all_prods, (int)cbrt_bytes, MPI_UNSIGNED_CHAR,
-               0, MPI_COMM_WORLD);
-    free(prod_buf);
+    // --- 1-2. Tree-reduce the local factor products to rank 0 (exact) ---
+    mpz_t combined;
+    mpz_init(combined);
+    ksc_reduce_product(combined, local_prod, nullptr, cbrt_bytes, rank);
 
     // --- 3. Rank 0: combine, compute cofactor, classify ---
     int complete = 0;
@@ -1023,20 +1029,10 @@ int ksc_alg4_broadcast_cofactor(
 
     if (rank == 0)
     {
-        mpz_t combined, part, q, r;
-        mpz_init_set_ui(combined, 1);
-        mpz_inits(part, q, r, NULL);
-
-        for (int rk = 0; rk < nranks; rk++)
-        {
-            mpz_import(part, cbrt_bytes, 1, 1, 0, 0,
-                       all_prods + (size_t)rk * cbrt_bytes);
-            mpz_mul(combined, combined, part);
-        }
-        free(all_prods);
+        mpz_t q, r;
+        mpz_inits(q, r, NULL);
 
         mpz_tdiv_qr(q, r, blinded, combined);
-        mpz_clears(combined, part, NULL);
 
         if (mpz_sgn(r) == 0)
         {
@@ -1151,6 +1147,8 @@ int ksc_alg4_broadcast_cofactor(
         }
         mpz_clears(q, r, NULL);
     }
+
+    mpz_clear(combined);
 
     // --- 4. Broadcast result to all ranks ---
     MPI_Bcast(&complete, 1, MPI_INT, 0, MPI_COMM_WORLD);
