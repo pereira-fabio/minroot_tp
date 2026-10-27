@@ -160,7 +160,15 @@ associative, so `kf_product_mod_tree` splits it into per-thread chunk products
 combined pairwise — n/T + log2 T dependent mulmods instead of n-1 — on the
 host cores the GPU jobs already reserve (28 on IRIS). Measured off-cluster on 4
 cores at 24576 bits, warm cache: 62 -> 19 ms for 802 factors, 124 -> 40 ms for
-1536, identical results. Not yet re-measured on IRIS. The instrumentation itself lives in
+1536, identical results. Not yet re-measured on IRIS.
+
+**Follow-up: and on the device.** `--recon device` runs the same tree on the
+GPU (`src/common/gpu/gpu_recon.cuh`): one thread block per Montgomery
+multiplication (`gpu_mont.h`), one kernel launch per tree level, ceil(log2 n)+2
+launches in all. The block arithmetic is unit-tested against GMP by running the
+identical code as host threads behind a barrier; it has not yet been run or
+timed on a GPU, so whether it beats the 28-core host tree is open. The
+instrumentation itself lives in
 `src/common/factorization.cpp` and `src/common/gpu/gpu_common.h`, compiled into
 every solver; this directory holds only the job that exercises it.
 

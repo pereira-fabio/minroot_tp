@@ -1246,6 +1246,13 @@ void kf_product_mod_tree(mpz_t result, mpz_t *vals, int n,
     }
 }
 
+static kf_product_fn g_product_backend = kf_product_mod_tree;
+
+void kf_set_product_backend(kf_product_fn fn)
+{
+    g_product_backend = fn ? fn : kf_product_mod_tree;
+}
+
 // ---------------------------------------------------------------------------
 // Parallel (OpenMP) variant of kf_compute_cbrt_from_factors, for single-process
 // solvers (the IRIS GPU port) where reconstruction is NOT distributed across MPI
@@ -1334,8 +1341,9 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
 
     auto t_p1 = std::chrono::high_resolution_clock::now();
 
-    // Combine: parallel product tree over the terms.
-    kf_product_mod_tree(result, parts, n, modulo, nthreads);
+    // Combine: product tree over the terms (host threads, or the device tree
+    // when a CUDA solver installed it with kf_set_product_backend).
+    g_product_backend(result, parts, n, modulo, nthreads);
 
     // Serial: append newly computed roots to the cache, in index order.
     for (int i = 0; i < n; i++)

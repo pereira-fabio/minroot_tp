@@ -14,7 +14,7 @@
 // One CUDA thread block per 1024-prime delta block, grid-stride over blocks.
 // Thread 0 decodes the block (anchor + running gap-half sum) into shared
 // memory; then all threads trial-divide their primes with the SAME
-// mod_big_by_u32/u64 as the flat kernels. Decode is ~1024 adds against a
+// divides_big_u32/u64 as the flat kernels. Decode is ~1024 adds against a
 // ~384-limb mod per prime (<0.3% overhead), so no cooperative block-scan is
 // needed.
 //
@@ -78,7 +78,7 @@ __global__ void k32_trial_divide_delta_kernel(
         for (uint32_t k = threadIdx.x; k < len; k += blockDim.x)
         {
             uint64_t p = s_primes[k];
-            if (mod_big_by_u32(d_y_limbs, nlimbs, p) == 0)
+            if (divides_big_u32(d_y_limbs, nlimbs, (uint32_t)p))
             {
                 int slot = atomicAdd(out_count, 1);
                 if (slot < MAX_GPU_FACTORS)
@@ -123,7 +123,7 @@ __global__ void k35_upper_trial_divide_delta_kernel(
         for (uint32_t k = threadIdx.x; k < len; k += blockDim.x)
         {
             uint64_t q = s_primes[k];
-            if (mod_big_by_u64(d_y_limbs, nlimbs, q) == 0)
+            if (divides_big_u64(d_y_limbs, nlimbs, q))
             {
                 int slot = atomicAdd(out_count, 1);
                 if (slot < MAX_GPU_FACTORS)

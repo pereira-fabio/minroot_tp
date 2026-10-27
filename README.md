@@ -334,6 +334,7 @@ Same flags as the CPU solvers, minus `--all`, `--cbrt-dir` and
 | `--size N` | challenge size, with `--data`, instead of naming both files |
 | `--n-gpus N` | split the prime range across N devices |
 | `--n-runs N` | warm runs to average |
+| `--recon host\|device` | where the final reconstruction product runs: a tree over the host cores (default) or a tree of Montgomery-multiply kernels on device 0 (`gpu_recon.cuh`) |
 
 Two things worth knowing before the first k32 or k35 run:
 

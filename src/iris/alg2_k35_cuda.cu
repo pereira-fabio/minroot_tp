@@ -7,9 +7,9 @@
 // TWO-PHASE TRIAL DIVISION
 // -------------------------
 // Phase 1 (k32 lower range):  ~203 M primes in (65536, 2^32], uint32_t table (813 MB).
-//   Kernel: k32_trial_divide_kernel — same as alg2_k32_cuda.cu, Horner mod_big_by_u32.
+//   Kernel: k32_trial_divide_kernel — same as alg2_k32_cuda.cu, divides_big_u32.
 // Phase 2 (k35 upper range):  ~1.2 B primes in (2^32, 2^35], uint64_t table (9.6 GB).
-//   Kernel: k35_upper_trial_divide_kernel — uses mod_big_by_u64 (__uint128_t Horner).
+//   Kernel: k35_upper_trial_divide_kernel — uses divides_big_u64 (64-bit Montgomery).
 //
 // MULTI-GPU PRIME-RANGE SPLITTING
 // --------------------------------
@@ -44,6 +44,7 @@
 // =============================================================================
 
 #include "gpu_common.h"
+#include "gpu_recon.cuh" // --recon host|device
 
 #include <gmp.h>
 #include <cstdint>
@@ -74,8 +75,7 @@ __global__ void k35_upper_trial_divide_kernel(
     for (int64_t i = idx; i < nprimes; i += stride)
     {
         uint64_t q = primes[i];
-        uint64_t rem = mod_big_by_u64(d_y_limbs, nlimbs, q);
-        if (rem == 0)
+        if (divides_big_u64(d_y_limbs, nlimbs, q))
         {
             int slot = atomicAdd(out_count, 1);
             if (slot < MAX_GPU_FACTORS)
@@ -105,6 +105,7 @@ struct K35Dev
 
 int main(int argc, char **argv)
 {
+    gpu_recon_parse_args(&argc, argv); // consumes --recon before the parser below
     const char *challenge_file = nullptr;
     const char *modulo_file = nullptr;
     const char *data_dir = nullptr;

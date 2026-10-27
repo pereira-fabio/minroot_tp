@@ -10,7 +10,7 @@
 // Each solver is a separate executable, so the __constant__ symbols below get
 // one instance per binary — the usual one-definition concerns do not apply.
 //
-// Requires gpu_common.h (MAX_LIMBS, MAX_GPU_FACTORS, mod_big_by_u32).
+// Requires gpu_common.h (MAX_LIMBS, MAX_GPU_FACTORS, divides_big_u32).
 // =============================================================================
 
 #pragma once
@@ -41,8 +41,7 @@ __global__ void k32_trial_divide_kernel(
     for (int64_t i = idx; i < nprimes; i += stride)
     {
         uint64_t p = (uint64_t)primes[i];
-        uint64_t rem = mod_big_by_u32(d_y_limbs, nlimbs, p);
-        if (rem == 0)
+        if (divides_big_u32(d_y_limbs, nlimbs, (uint32_t)p))
         {
             int slot = atomicAdd(out_count, 1);
             if (slot < MAX_GPU_FACTORS)

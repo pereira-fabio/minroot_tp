@@ -1,19 +1,23 @@
 // =============================================================================
 // gpu_common.h — Shared CUDA device utilities for Algorithm 2 GPU tools
 //
-// Included by alg2_k16_cuda.cu, alg2_k32_cuda.cu, alg2_k35_cuda.cu.
-// NOT included by alg7_cuda.cu (which is self-contained for historical reasons).
+// Included by every CUDA solver and GPU experiment.
 //
 // Device functions defined here:
 //   mod_big_by_u32 — Horner reduction mod a prime q < 2^32; pure uint64_t arithmetic
 //   mod_big_by_u64 — Horner reduction mod a prime q < 2^63; uses __uint128_t
 //                    Required for k35 upper-range primes in (2^32, 2^35].
+//   These return the remainder and are kept for the callers that need it
+//   (alg7's sieve setup, the CRT experiment). Trial division only needs a
+//   yes/no: use divides_big_u32/u64 from gpu_divides.h, which avoid the
+//   software 64/128-bit division these spend nearly all their time in.
 // =============================================================================
 
 #pragma once
 
 #include <cuda_runtime.h>
 #include <cstdint>
+#include "gpu_divides.h"
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>

@@ -267,6 +267,13 @@ void kf_compute_cbrt_from_factors_omp(mpz_t result,
 void kf_product_mod_tree(mpz_t result, mpz_t *vals, int n,
                          const mpz_t modulo, int nthreads);
 
+// Where kf_compute_cbrt_from_factors_omp sends its final product. The default
+// is kf_product_mod_tree; the CUDA solvers can install the device tree
+// (gpu_recon.cuh, --recon device). nullptr restores the default.
+typedef void (*kf_product_fn)(mpz_t result, mpz_t *vals, int n,
+                              const mpz_t modulo, int nthreads);
+void kf_set_product_backend(kf_product_fn fn);
+
 // ---------------------------------------------------------------------------
 // Blinding pair table (Algorithm 2 precomputation, Biryukov et al. §2)
 //
