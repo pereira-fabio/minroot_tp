@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <math.h>
 #include <time.h>
 #include <chrono>
 
@@ -288,6 +289,69 @@ static inline void kf_pair_check(const mpz_t local_cof, uint64_t a, uint64_t b,
 }
 
 // ---------------------------------------------------------------------------
+// kf_cost_split — see factorization.h
+//
+// Constants: 2^24-integer windows near 2^28 (paired) and 2^32 (unpaired), one
+// thread. The sieve alone (64-bit y) costs ~2.1 ns per integer; one unpaired
+// test 10.7 / 42 / 59 / 221 ns at 1024 / 4096 / 8192 / 24576 bits (fit:
+// 5 + 0.55 * limbs); a paired test 0.29-0.46 of that (0.45 used, the large-
+// size value where trial division dominates).
+// ---------------------------------------------------------------------------
+
+#define KF_COST_STEPS 4096
+
+// Boundary k of the split: the x where the cumulative cost reaches k/parts of
+// the total, by midpoint-rule integration over KF_COST_STEPS equal cells and
+// linear interpolation inside the cell. Pure arithmetic on the arguments, so
+// every rank and thread gets bit-identical boundaries.
+static uint64_t kf_cost_boundary(uint64_t lo, uint64_t hi, int parts, int k,
+                                 int limbs, bool sieve)
+{
+    if (k <= 0)
+        return lo;
+    if (k >= parts)
+        return hi + 1;
+    const double a = (double)lo, width = (double)(hi - lo + 1);
+    const double cell = width / KF_COST_STEPS;
+    const double fixed = sieve ? KF_SIEVE_NS : 0.0;
+    const double test = KF_TD_BASE_NS + KF_TD_LIMB_NS * limbs;
+    double cum[KF_COST_STEPS + 1];
+    cum[0] = 0.0;
+    for (int i = 0; i < KF_COST_STEPS; i++)
+    {
+        double x = a + (i + 0.5) * cell;
+        double w = (x < 2147483648.0) ? KF_PAIRED_COST : 1.0;
+        cum[i + 1] = cum[i] + (fixed + w * test / log(x < 3.0 ? 3.0 : x)) * cell;
+    }
+    double target = cum[KF_COST_STEPS] * k / parts;
+    int i = 0;
+    while (i < KF_COST_STEPS - 1 && cum[i + 1] < target)
+        i++;
+    double frac = (cum[i + 1] > cum[i]) ? (target - cum[i]) / (cum[i + 1] - cum[i]) : 0.0;
+    uint64_t b = lo + (uint64_t)((i + frac) * cell);
+    if (b < lo)
+        b = lo;
+    if (b > hi + 1)
+        b = hi + 1;
+    return b;
+}
+
+void kf_cost_split(uint64_t lo, uint64_t hi, int parts, int idx, int limbs, bool sieve,
+                   uint64_t *out_lo, uint64_t *out_hi)
+{
+    uint64_t b0 = kf_cost_boundary(lo, hi, parts, idx, limbs, sieve);
+    uint64_t b1 = kf_cost_boundary(lo, hi, parts, idx + 1, limbs, sieve);
+    if (b1 <= b0)
+    {
+        *out_lo = 1; // empty piece
+        *out_hi = 0;
+        return;
+    }
+    *out_lo = b0;
+    *out_hi = b1 - 1;
+}
+
+// ---------------------------------------------------------------------------
 // k32 — Trial division: sieve method
 // ---------------------------------------------------------------------------
 
@@ -316,8 +380,6 @@ void kf_trial_divide_sieve(const mpz_t n,
     omp_init_lock(&cof_lock);
     volatile int done = 0; // set to 1 when cofactor == 1
 
-    uint64_t range_size = range_hi - range_lo + 1;
-
 #ifdef _OPENMP
 #pragma omp parallel
     {
@@ -327,10 +389,9 @@ void kf_trial_divide_sieve(const mpz_t n,
     {
         int t = 0, nt = 1;
 #endif
-        uint64_t t_lo = range_lo + (range_size * (uint64_t)t) / (uint64_t)nt;
-        uint64_t t_hi = range_lo + (range_size * (uint64_t)(t + 1)) / (uint64_t)nt - 1;
-        if (t == nt - 1)
-            t_hi = range_hi;
+        // Threads split the rank's range by cost, like ranks split the whole.
+        uint64_t t_lo, t_hi;
+        kf_cost_split(range_lo, range_hi, nt, t, (int)mpz_size(n), true, &t_lo, &t_hi);
 
         char *seg = (char *)malloc(KF_SEG_SIZE);
 
@@ -502,6 +563,8 @@ void kf_trial_divide_table(const mpz_t n,
     //
     // Primes are tested two at a time (kf_pair_check): iteration j covers
     // primes[2j] and primes[2j+1], sharing one walk when their product allows.
+    // Pairs below 2^31 cost about half those above, so a slice that straddles
+    // it is handed out in dynamic chunks rather than equal static blocks.
     int64_t npairs = (prime_count + 1) / 2;
 
 #ifdef _OPENMP
@@ -520,7 +583,7 @@ void kf_trial_divide_table(const mpz_t n,
         omp_unset_lock(&cof_lock);
 
 #ifdef _OPENMP
-#pragma omp for schedule(static)
+#pragma omp for schedule(dynamic, 256)
 #endif
         for (int64_t j = 0; j < npairs; j++)
         {

@@ -228,6 +228,21 @@ static benchmark_results_t run_one(
         return benchmark_results_t{}; // unreachable — ksc_broadcast aborts
     }
 
+    // Re-split [RANGE_LO, RANGE_HI] by trial-division cost now that the size
+    // and method are known (kf_cost_split); main's equal-width split is only
+    // the default. Every rank computes the same boundaries.
+    kf_cost_split(RANGE_LO, RANGE_HI, nranks, rank, (int)mpz_size(modulo),
+                  method == METHOD_SIEVE, &my_lo, &my_hi);
+    if (rank == 0)
+    {
+        uint64_t last_lo, last_hi;
+        kf_cost_split(RANGE_LO, RANGE_HI, nranks, nranks - 1, (int)mpz_size(modulo),
+                      method == METHOD_SIEVE, &last_lo, &last_hi);
+        printf("Range split by cost: rank 0 [%" PRIu64 ", %" PRIu64 "], rank %d [%" PRIu64
+               ", %" PRIu64 "]\n",
+               my_lo, my_hi, nranks - 1, last_lo, last_hi);
+    }
+
     if (rank == 0)
     {
         const char *mname = method == METHOD_TABLE  ? "table"
@@ -688,7 +703,8 @@ int main(int argc, char *argv[])
 
     if (rank == 0)
     {
-        printf("Prime range per rank: ~%.1fM primes\n\n",
+        printf("Range per rank: ~%.1fM integers on average; each challenge re-splits "
+               "it by trial-division cost\n\n",
                (double)range_size / nranks / 1e6);
         fflush(stdout);
     }

@@ -122,6 +122,10 @@ static int b0_residue_bits(const mpz_t y,
     return rem_bits;
 }
 
+// Trial-division range [65537, 2^32] — file-scope so run_one() and main() see it.
+static const uint64_t RANGE_LO = 65537ULL;
+static const uint64_t RANGE_HI = (uint64_t)UINT32_MAX;
+
 // ---------------------------------------------------------------------------
 // run_one — run benchmark for one challenge file, return results (no JSON write)
 // ---------------------------------------------------------------------------
@@ -144,6 +148,21 @@ static benchmark_results_t run_one(
     {
         mpz_clears(challenge, modulo, result, NULL);
         return benchmark_results_t{}; // unreachable — ksc_broadcast aborts
+    }
+
+    // Re-split [RANGE_LO, RANGE_HI] by trial-division cost now that the size
+    // and method are known (kf_cost_split); main's equal-width split is only
+    // the default. Every rank computes the same boundaries.
+    kf_cost_split(RANGE_LO, RANGE_HI, nranks, rank, (int)mpz_size(modulo),
+                  method == METHOD_SIEVE, &my_lo, &my_hi);
+    if (rank == 0)
+    {
+        uint64_t last_lo, last_hi;
+        kf_cost_split(RANGE_LO, RANGE_HI, nranks, nranks - 1, (int)mpz_size(modulo),
+                      method == METHOD_SIEVE, &last_lo, &last_hi);
+        printf("Range split by cost: rank 0 [%" PRIu64 ", %" PRIu64 "], rank %d [%" PRIu64
+               ", %" PRIu64 "]\n",
+               my_lo, my_hi, nranks - 1, last_lo, last_hi);
     }
 
     if (rank == 0)
@@ -1079,8 +1098,6 @@ int main(int argc, char *argv[])
     }
 
     // Partition sieve range [65537, 2^32] evenly across MPI ranks.
-    const uint64_t RANGE_LO = 65537ULL;
-    const uint64_t RANGE_HI = (uint64_t)UINT32_MAX;
     const uint64_t range_size = RANGE_HI - RANGE_LO + 1;
 
     uint64_t my_lo = RANGE_LO + (range_size * (uint64_t)rank) / (uint64_t)nranks;
@@ -1090,7 +1107,8 @@ int main(int argc, char *argv[])
 
     if (rank == 0)
     {
-        printf("Prime range per rank: ~%.1fM primes\n\n",
+        printf("Range per rank: ~%.1fM integers on average; each challenge re-splits "
+               "it by trial-division cost\n\n",
                (double)range_size / nranks / 1e6);
         fflush(stdout);
     }

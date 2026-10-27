@@ -233,6 +233,30 @@ void kf_recon_prof_reset(void);
 const kf_recon_prof_t *kf_recon_prof_get(void);
 
 // ---------------------------------------------------------------------------
+// Cost-balanced split of a trial-division range [lo, hi] into `parts`
+// contiguous pieces; piece `idx` is returned as [*out_lo, *out_hi] (empty when
+// *out_lo > *out_hi). `limbs` is the size of the number being divided (64-bit
+// limbs) and `sieve` says whether the range is sieved (sieve method) or read
+// from a prime table. Equal-width pieces are unbalanced: low ranges hold more
+// primes (density 1/ln x), primes below 2^31 are tested in pairs at under half
+// the cost each, and the sieve adds a fixed cost per integer. The model, per
+// integer x (constants measured single-threaded, see factorization.cpp):
+//
+//     cost(x) = sieve * KF_SIEVE_NS + w(x) * u(limbs) / ln x
+//     u(limbs) = KF_TD_BASE_NS + KF_TD_LIMB_NS * limbs     one prime test
+//     w(x) = KF_PAIRED_COST below 2^31, 1 above
+//
+// Every caller computes the same boundaries independently.
+// ---------------------------------------------------------------------------
+
+#define KF_SIEVE_NS 2.1
+#define KF_TD_BASE_NS 5.0
+#define KF_TD_LIMB_NS 0.55
+#define KF_PAIRED_COST 0.45
+void kf_cost_split(uint64_t lo, uint64_t hi, int parts, int idx, int limbs, bool sieve,
+                   uint64_t *out_lo, uint64_t *out_hi);
+
+// ---------------------------------------------------------------------------
 // k32 — reconstruction from found factors
 //
 //   result = ∏ cbrt(p_i)^e_i  mod M

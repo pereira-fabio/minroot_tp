@@ -112,7 +112,11 @@ A precomputed table would require ~52GB — infeasible. Instead:
 
 ### alg2_k32 — MPI+OpenMP Hybrid
 
-Distributes the sieve range `[65537, 2^32]` across MPI ranks. Each rank
+Distributes the sieve range `[65537, 2^32]` across MPI ranks, in pieces of
+equal estimated trial-division cost rather than equal width (`kf_cost_split`:
+low ranges hold more primes but test them in pairs, and the sieve adds a cost
+per integer; at 24576 bits this cut the slowest rank by 1.13-1.18x in a local
+8- and 32-rank simulation). Each rank
 factors its own slice and computes its partial cbrt product locally
 (`∏ cbrt(pᵢ)^eᵢ mod M`). The per-rank partial products are combined by a
 log-depth reduction tree (`MPI_Reduce` with a user-defined multiply-mod-M op),
