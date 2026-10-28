@@ -160,15 +160,20 @@ associative, so `kf_product_mod_tree` splits it into per-thread chunk products
 combined pairwise — n/T + log2 T dependent mulmods instead of n-1 — on the
 host cores the GPU jobs already reserve (28 on IRIS). Measured off-cluster on 4
 cores at 24576 bits, warm cache: 62 -> 19 ms for 802 factors, 124 -> 40 ms for
-1536, identical results. Not yet re-measured on IRIS.
+1536, identical results. On a desktop RTX 2080 SUPER (8 host cores) the host
+tree brought k32 reconstruction to 1.09 ms at 8192 bits; not yet re-measured on
+IRIS.
 
 **Follow-up: and on the device.** `--recon device` runs the same tree on the
 GPU (`src/common/gpu/gpu_recon.cuh`): one thread block per Montgomery
 multiplication (`gpu_mont.h`), one kernel launch per tree level, ceil(log2 n)+2
 launches in all. The block arithmetic is unit-tested against GMP by running the
-identical code as host threads behind a barrier; it has not yet been run or
-timed on a GPU, so whether it beats the 28-core host tree is open. The
-instrumentation itself lives in
+identical code as host threads behind a barrier. Timed on an RTX 2080 SUPER
+against the host tree on its 8 cores (warm recon_ms): slower at 2048 bits
+(0.18 vs 0.075 ms, 66 terms: launch cost dominates), faster at 8192 bits
+(k32 0.86 vs 1.09 ms, 268 terms; k16 1.57 vs 4.10 ms, 528 terms).
+`--recon auto` (the default) picks between them by product size. Against the
+28-core IRIS host it is still unmeasured. The instrumentation itself lives in
 `src/common/factorization.cpp` and `src/common/gpu/gpu_common.h`, compiled into
 every solver; this directory holds only the job that exercises it.
 

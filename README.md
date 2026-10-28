@@ -528,13 +528,47 @@ construction that branch never fires.
 **k16 peaks at 32 ranks and then declines.** Beyond that the 6542-prime sieve is
 divided too finely for the reconstruction and gather to be worth their cost.
 These figures were measured with the old serial combine (gather to rank 0, then
-`N-1` multiplications); the combine is now a log-depth tree, which
-`analysis/ideal_combine.py` projects to remove most of this decline. Not yet
-re-measured on the cluster.
+`N-1` multiplications). With the log-depth tree combine, k16 at 128 ranks
+re-measures at 569x, well above the old 32-rank peak (next section).
 
 **k35 does not reach the paper's figure**, and cannot here: it would need roughly
 1024 ranks, eight times the maximum allocation. Any number quoted beyond 128
 ranks in the thesis is extrapolation from this curve, not measurement.
+
+### After the reduction trees: 24576 bits, 128 ranks
+
+AION job 16119156: table method, 64 nodes x 2 ranks x 32 threads, 50 challenges
+(k32: 49 valid, 1 with blinding exhausted). Results in
+`data/results/aion/alg2/{k16,k32}_16119156_N64/`. The run skipped the powm
+baseline, so speedups use the 1806.9 ms baseline above.
+
+The build used for this job sits between the tree combine and the cost-balanced
+rank split. It has the `MPI_Reduce` combine (`gather_ms` is 0), but ranks still
+took equal-width ranges (every `tested_per_rank`, which counts integers, is
+33,553,920), and the per-rank reconstruction looks serial. This table therefore
+measures mainly the combine. The later changes need a rerun on the current
+branch.
+
+| Variant | before (table above) | now | factor_ms | local_cbrt_ms | combine_ms | total_ms |
+|---------|-----:|-----:|-----:|-----:|-----:|-----:|
+| k16     | 119.02x | **569.1x** |  0.82 | 1.46 | 0.89 |  3.17 |
+| k32     |  51.84x | **105.2x** | 15.05 | 1.21 | 0.93 | 17.18 |
+
+- **The combine went from ~12.8 ms to under 1 ms.** That is 7 tree rounds of
+  about 130 us each, roughly one 24576-bit multiplication plus network latency.
+  The serial version measured 12.80 ms at 128 ranks (k16 breakdown).
+- **k16 no longer declines past 32 ranks.** Its 128-rank figure is 3.2x the old
+  32-rank peak (180.58x). Only 128 ranks were measured, so the full curve still
+  needs a sweep.
+- **k32 is now factor-bound.** Trial division is 88% of the 17.2 ms.
+- **These are warm-cache numbers.** In the k32 job, the first warm-up run of
+  each new challenge took ~1.85 s. That is the cube roots of primes not yet in
+  the cache, each a full-width exponentiation, computed before the timed runs
+  hit the cache. A k32 challenge with a cold cache therefore costs ~1.87 s,
+  slightly more than the baseline. k16's complete 6542-root table is a
+  legitimate precomputation; k32's 203 million roots at 24576 bits cannot be
+  stored, so its warm-cache speedup assumes a cache an attacker could not hold
+  in full.
 
 ### GPU, 24576 bits
 
