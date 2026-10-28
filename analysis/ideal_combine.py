@@ -20,9 +20,15 @@ algorithm and method (sieve vs table, where both exist).
 This was first deferred as a code change (perf-fix-plan 2026-06-11, item
 "D-review") and is now implemented: ksc_reduce_product in
 src/common/solver_common.cpp tree-reduces with MPI_Reduce and a custom op.
-Correctness is checked locally by `make test` at any rank count; only the
-speedup needs the cluster. Until fresh cluster numbers land, this script is
-the estimate of what that change buys, computed from the serial-combine data.
+Correctness is checked locally by `make test` at any rank count.
+
+MEASURED SINCE (AION job 16119156, table method, 128 ranks, 24576 bits; README
+"After the reduction trees"): combine_ms 0.89 (k16) and 0.93 (k32) against
+the projected c * ceil(log2 128) = 0.71 ms, and speedup_total 569.1x (k16)
+and 105.2x (k32) against the projected ~543x and ~81x below. k32 beats its
+projection because that build also carries the trial-division changes; k16,
+whose factor phase is tiny, lands within 5%. Other rank counts are still
+projections from this script.
 
 METHOD
 ------
@@ -59,12 +65,11 @@ resting on this one assumption.
 
 CAVEAT
 ------
-This is a projection, not a measurement -- the log-depth combine has not been
-run on the cluster yet. It also assumes the log-depth tree adds no
-per-round overhead beyond the raw multiplication cost c (a generous, lower-
-bound assumption -- a real MPI-based tree reduce would add some communication
-latency per round, though that should be small given Bcast/Gather/Barrier are
-already <0.1ms each at this scale).
+This is a projection, not a measurement, except at 128 ranks (above). It
+assumes the log-depth tree adds no per-round overhead beyond the raw
+multiplication cost c. The 128-rank measurement puts that overhead at ~0.03 ms
+per round ((0.91 - 0.71) / 7: MPI latency plus the op's import/export of the
+operands), small next to c ~= 0.10 ms.
 
 HOW TO REFRESH WHEN NEW DATA LANDS
 -----------------------------------
@@ -164,8 +169,9 @@ def main():
         gain = (speedup_id / speedup_meas - 1) * 100
         print(f"{name:>14} | {speedup_meas:9.2f} | {speedup_id:9.2f} | {gain:+.1f}%")
 
-    print("\nAll 'ideal' values come from a model of the log-depth combine tree, not from "
-          "cluster runs of it -- this is a projection, not a measurement. See "
+    print("\nAll 'ideal' values come from a model of the log-depth combine tree -- a "
+          "projection, not a measurement. The tree has since been measured at 128 ranks "
+          "(k16 569.1x, k32 105.2x; README 'After the reduction trees'). See also "
           "wiki/results/ideal-overhead-free-projection.md.")
 
 
