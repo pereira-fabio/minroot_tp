@@ -352,6 +352,54 @@ void kf_cost_split(uint64_t lo, uint64_t hi, int parts, int idx, int limbs, bool
 }
 
 // ---------------------------------------------------------------------------
+// Checkpoint between trial-division phases (see factorization.h). Called by
+// every thread of the team. The master exports this rank's new factors (each
+// thread's list past exported[t]), runs `share`, and divides every returned
+// factor out of the shared cofactor; own factors are already gone and simply
+// fail the divisibility test. Then every thread refreshes its snapshot.
+// ---------------------------------------------------------------------------
+
+static void kf_share_checkpoint(kf_share_fn share, mpz_t cofactor, omp_lock_t *lock,
+                                kfactor_list_t *tf, int nthreads, int *exported,
+                                mpz_t local_cof, volatile int *done)
+{
+#ifdef _OPENMP
+#pragma omp barrier
+#pragma omp master
+#endif
+    {
+        if (share)
+        {
+            kfactor_list_t mine, all;
+            kfl_init(&mine);
+            kfl_init(&all);
+            for (int t = 0; t < nthreads; t++)
+            {
+                for (int i = exported[t]; i < tf[t].count; i++)
+                    kfl_append_mpz(&mine, tf[t].items[i].prime, tf[t].items[i].exponent);
+                exported[t] = tf[t].count;
+            }
+            share(&mine, &all);
+            omp_set_lock(lock);
+            for (int i = 0; i < all.count; i++)
+                while (mpz_divisible_p(cofactor, all.items[i].prime))
+                    mpz_divexact(cofactor, cofactor, all.items[i].prime);
+            if (mpz_cmp_ui(cofactor, 1) == 0)
+                *done = 1;
+            omp_unset_lock(lock);
+            kfl_free(&mine);
+            kfl_free(&all);
+        }
+    }
+#ifdef _OPENMP
+#pragma omp barrier
+#endif
+    omp_set_lock(lock);
+    mpz_set(local_cof, cofactor);
+    omp_unset_lock(lock);
+}
+
+// ---------------------------------------------------------------------------
 // k32 — Trial division: sieve method
 // ---------------------------------------------------------------------------
 
@@ -360,7 +408,7 @@ void kf_trial_divide_sieve(const mpz_t n,
                            int sp_count, const unsigned *sp,
                            kfactor_list_t *found,
                            int64_t *thread_tested, int *thread_found,
-                           int nthreads_out)
+                           int nthreads_out, kf_share_fn share)
 {
     int nthreads = 1;
 #ifdef _OPENMP
@@ -370,6 +418,7 @@ void kf_trial_divide_sieve(const mpz_t n,
         (size_t)nthreads * sizeof(kfactor_list_t));
     for (int t = 0; t < nthreads; t++)
         kfl_init(&tf[t]);
+    int *exported = (int *)calloc((size_t)nthreads, sizeof(int));
 
     // Shared cofactor for early termination.
     // Each thread divides out its found factors under a mutex.
@@ -468,39 +517,63 @@ void kf_trial_divide_sieve(const mpz_t n,
             }
         };
 
+        // The thread's odd candidates are scanned in KF_SHARE_PHASES phases
+        // with a cofactor checkpoint between them. Phase k covers the k-th
+        // equal slice of the candidates, so every thread does the same share
+        // of its work per phase; whole segments per phase would round apart
+        // when a thread has only a few, and the checkpoint barrier would then
+        // serialise threads (measured 2x slower on 1-2 segments per thread).
+        // Segments end early at phase boundaries; next_mult carries across
+        // any contiguous run of odd starts. Every thread passes every
+        // checkpoint, even with nothing left to scan or `done` set.
         const uint64_t span = 2 * (uint64_t)KF_SEG_SIZE;
-        for (uint64_t lo = first_odd; lo <= t_hi && !done; lo += span)
+        const uint64_t n_odd = (t_hi >= first_odd && t_lo <= t_hi)
+                                   ? (t_hi - first_odd) / 2 + 1
+                                   : 0;
+        for (int phase = 0; phase < KF_SHARE_PHASES; phase++)
         {
-            uint64_t hi = lo + span - 2;
-            if (hi > t_hi)
-                hi = t_hi;
-            size_t seg_len = (size_t)((hi - lo) / 2 + 1);
+            if (phase > 0)
+                kf_share_checkpoint(share, cofactor, &cof_lock, tf, nthreads,
+                                    exported, local_cof, &done);
+            const uint64_t i_lo = n_odd * (uint64_t)phase / KF_SHARE_PHASES;
+            const uint64_t i_hi = n_odd * (uint64_t)(phase + 1) / KF_SHARE_PHASES;
+            if (i_hi <= i_lo)
+                continue;
+            const uint64_t ph_lo = first_odd + 2 * i_lo;
+            const uint64_t ph_hi = first_odd + 2 * (i_hi - 1);
+            for (uint64_t lo = ph_lo; lo <= ph_hi && !done; lo += span)
+            {
+                uint64_t hi = lo + span - 2;
+                if (hi > ph_hi)
+                    hi = ph_hi;
+                size_t seg_len = (size_t)((hi - lo) / 2 + 1);
 
-            memset(seg, 1, seg_len);
-            if (lo == 1)
-                seg[0] = 0; // 1 is not a prime
-            for (int i = 0; i < sp_count; i++)
-            {
-                uint64_t j = next_mult[i];
-                if (j > hi)
-                    continue;
-                uint64_t step = 2 * (uint64_t)sp[i];
-                for (; j <= hi; j += step)
-                    seg[(j - lo) >> 1] = 0;
-                next_mult[i] = j; // first odd multiple > hi — carry to next segment
-            }
-            for (size_t k = 0; k < seg_len; k++)
-            {
-                if (!seg[k])
-                    continue;
-                uint64_t c = lo + 2 * (uint64_t)k;
-                if (pend == 0)
+                memset(seg, 1, seg_len);
+                if (lo == 1)
+                    seg[0] = 0; // 1 is not a prime
+                for (int i = 0; i < sp_count; i++)
                 {
-                    pend = c;
-                    continue;
+                    uint64_t j = next_mult[i];
+                    if (j > hi)
+                        continue;
+                    uint64_t step = 2 * (uint64_t)sp[i];
+                    for (; j <= hi; j += step)
+                        seg[(j - lo) >> 1] = 0;
+                    next_mult[i] = j; // first odd multiple > hi — carry to next segment
                 }
-                test_pair(pend, c);
-                pend = 0;
+                for (size_t k = 0; k < seg_len; k++)
+                {
+                    if (!seg[k])
+                        continue;
+                    uint64_t c = lo + 2 * (uint64_t)k;
+                    if (pend == 0)
+                    {
+                        pend = c;
+                        continue;
+                    }
+                    test_pair(pend, c);
+                    pend = 0;
+                }
             }
         }
         if (pend != 0 && !done)
@@ -521,6 +594,7 @@ void kf_trial_divide_sieve(const mpz_t n,
         kfl_free(&tf[t]);
     }
     free(tf);
+    free(exported);
 }
 
 // ---------------------------------------------------------------------------
@@ -531,7 +605,7 @@ void kf_trial_divide_table(const mpz_t n,
                            const uint32_t *primes, int64_t prime_count,
                            kfactor_list_t *found,
                            int64_t *thread_tested, int *thread_found,
-                           int nthreads_out)
+                           int nthreads_out, kf_share_fn share)
 {
     int nthreads = 1;
 #ifdef _OPENMP
@@ -541,6 +615,7 @@ void kf_trial_divide_table(const mpz_t n,
         (size_t)nthreads * sizeof(kfactor_list_t));
     for (int t = 0; t < nthreads; t++)
         kfl_init(&tf[t]);
+    int *exported = (int *)calloc((size_t)nthreads, sizeof(int));
 
     // Shared cofactor for early termination.
     mpz_t cofactor;
@@ -548,6 +623,7 @@ void kf_trial_divide_table(const mpz_t n,
     omp_lock_t cof_lock;
     omp_init_lock(&cof_lock);
     volatile int64_t stop_idx = prime_count; // threads stop when idx >= stop_idx
+    volatile int done = 0;                   // cofactor == 1 via shared factors
 
     // Thread-local snapshot of cofactor for the pre-check — same fix as
     // kf_trial_divide_sieve.  The shared cofactor is only written under
@@ -582,39 +658,47 @@ void kf_trial_divide_table(const mpz_t n,
         mpz_init_set(local_cof, cofactor);
         omp_unset_lock(&cof_lock);
 
+        for (int phase = 0; phase < KF_SHARE_PHASES; phase++)
+        {
+            if (phase > 0)
+                kf_share_checkpoint(share, cofactor, &cof_lock, tf, nthreads,
+                                    exported, local_cof, &done);
+            const int64_t j_lo = npairs * phase / KF_SHARE_PHASES;
+            const int64_t j_hi = npairs * (phase + 1) / KF_SHARE_PHASES;
 #ifdef _OPENMP
 #pragma omp for schedule(dynamic, 256)
 #endif
-        for (int64_t j = 0; j < npairs; j++)
-        {
-            int64_t i0 = 2 * j;
-            if (i0 >= stop_idx)
-                continue;
-            int64_t np = (i0 + 1 < prime_count) ? 2 : 1;
-            uint64_t cand[2] = {(uint64_t)primes[i0],
-                                np == 2 ? (uint64_t)primes[i0 + 1] : 0};
-            if (thread_tested && t < nthreads_out)
-                thread_tested[t] += np;
-
-            bool hit[2];
-            kf_pair_check(local_cof, cand[0], cand[1], &hit[0], &hit[1]);
-            for (int k = 0; k < np; k++)
+            for (int64_t j = j_lo; j < j_hi; j++)
             {
-                if (!hit[k])
+                int64_t i0 = 2 * j;
+                if (i0 >= stop_idx || done)
                     continue;
-                bool now_one = false;
-                int e = kf_strip_prime(cofactor, local_cof, &cof_lock,
-                                       (unsigned long)cand[k], &now_one);
-                if (now_one)
-                    stop_idx = i0 + k + 1;
-                if (e > 0)
+                int64_t np = (i0 + 1 < prime_count) ? 2 : 1;
+                uint64_t cand[2] = {(uint64_t)primes[i0],
+                                    np == 2 ? (uint64_t)primes[i0 + 1] : 0};
+                if (thread_tested && t < nthreads_out)
+                    thread_tested[t] += np;
+
+                bool hit[2];
+                kf_pair_check(local_cof, cand[0], cand[1], &hit[0], &hit[1]);
+                for (int k = 0; k < np; k++)
                 {
-                    kfl_append_ul(&tf[t], (unsigned long)cand[k], e);
-                    if (thread_found && t < nthreads_out)
-                        thread_found[t]++;
+                    if (!hit[k])
+                        continue;
+                    bool now_one = false;
+                    int e = kf_strip_prime(cofactor, local_cof, &cof_lock,
+                                           (unsigned long)cand[k], &now_one);
+                    if (now_one)
+                        stop_idx = i0 + k + 1;
+                    if (e > 0)
+                    {
+                        kfl_append_ul(&tf[t], (unsigned long)cand[k], e);
+                        if (thread_found && t < nthreads_out)
+                            thread_found[t]++;
+                    }
                 }
             }
-        }
+        } // phases
 
         mpz_clear(local_cof);
     } // omp parallel
@@ -629,6 +713,7 @@ void kf_trial_divide_table(const mpz_t n,
         kfl_free(&tf[t]);
     }
     free(tf);
+    free(exported);
 }
 
 // ---------------------------------------------------------------------------

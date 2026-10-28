@@ -74,8 +74,29 @@ uint32_t *kf_load_prime_slice(uint64_t *slice_count, const char *path,
 //   On-the-fly segmented sieve; 512 KiB working set stays in L2 cache.
 //
 // trial_divide_table:
-//   Iterates a preloaded sorted uint32_t prime array (static OMP schedule).
+//   Iterates a preloaded sorted uint32_t prime array (dynamic OMP schedule).
+//
+// Cofactor sharing. Every factor divided out of y makes later tests cheaper
+// (mpz_tdiv_ui walks every limb), but a thread only sees the factors it or
+// its rank's other threads found. Both functions therefore scan in
+// KF_SHARE_PHASES phases; between phases the threads refresh their copy of
+// the shrinking cofactor, and when `share` is non-null the master thread
+// hands it this rank's factors found since the last checkpoint and divides
+// out every factor it returns (other ranks' finds). A smooth y then shrinks
+// for everyone as the scan advances: measured 124.7 -> 57.3 ms on a 768-
+// factor y with one shared snapshot vs fixed snapshots.
+//
+// `share` is a collective in the MPI solvers (ksc_share_found): every rank
+// must call the function the same number of times, each making exactly
+// KF_SHARE_PHASES - 1 calls to it, whatever its slice holds. Pass it only
+// where all ranks trial-divide in lockstep. `found` only ever lists this
+// rank's own factors; shared ones are only divided out of the cofactor.
 // ---------------------------------------------------------------------------
+
+#define KF_SHARE_PHASES 8
+
+// mine: this rank's factors since the last call; all: every rank's (appended).
+typedef void (*kf_share_fn)(const kfactor_list_t *mine, kfactor_list_t *all);
 
 void kf_trial_divide_sieve(const mpz_t n,
                            uint64_t range_lo, uint64_t range_hi,
@@ -83,14 +104,16 @@ void kf_trial_divide_sieve(const mpz_t n,
                            kfactor_list_t *found,
                            int64_t *thread_tested = nullptr,
                            int *thread_found = nullptr,
-                           int nthreads_out = 0);
+                           int nthreads_out = 0,
+                           kf_share_fn share = nullptr);
 
 void kf_trial_divide_table(const mpz_t n,
                            const uint32_t *primes, int64_t prime_count,
                            kfactor_list_t *found,
                            int64_t *thread_tested = nullptr,
                            int *thread_found = nullptr,
-                           int nthreads_out = 0);
+                           int nthreads_out = 0,
+                           kf_share_fn share = nullptr);
 
 // ---------------------------------------------------------------------------
 // k35 upper range — uint64_t prime table for (2^32, 2^35]

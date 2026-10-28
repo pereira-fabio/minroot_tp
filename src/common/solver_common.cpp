@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <chrono>
+#include <vector>
 #include <sys/stat.h>
 
 #ifdef _OPENMP
@@ -241,6 +242,34 @@ static void ksc_mul_op(void *in, void *inout, int *len, MPI_Datatype *)
             memset(pb, 0xFF, nb);
     }
     mpz_clears(a, b, NULL);
+}
+
+void ksc_share_found(const kfactor_list_t *mine, kfactor_list_t *all)
+{
+    int nranks = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &nranks);
+
+    // Primes here are below 2^36 and exponents small: two uint64_t each.
+    std::vector<uint64_t> send((size_t)2 * mine->count);
+    for (int i = 0; i < mine->count; i++)
+    {
+        send[2 * i] = (uint64_t)mpz_get_ui(mine->items[i].prime);
+        send[2 * i + 1] = (uint64_t)mine->items[i].exponent;
+    }
+    int n = (int)send.size();
+    std::vector<int> counts(nranks), displs(nranks);
+    MPI_Allgather(&n, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    int total = 0;
+    for (int r = 0; r < nranks; r++)
+    {
+        displs[r] = total;
+        total += counts[r];
+    }
+    std::vector<uint64_t> recv(total > 0 ? total : 1);
+    MPI_Allgatherv(send.data(), n, MPI_UINT64_T, recv.data(), counts.data(),
+                   displs.data(), MPI_UINT64_T, MPI_COMM_WORLD);
+    for (int i = 0; i + 1 < total; i += 2)
+        kfl_append_ul(all, (unsigned long)recv[i], (int)recv[i + 1]);
 }
 
 void ksc_reduce_product(mpz_t result,
@@ -1225,10 +1254,11 @@ int ksc_reconstruct_y(
     kfl_init(&local_factors);
     if (ctx->method == METHOD_TABLE)
         kf_trial_divide_table(y, ctx->prime_slice, ctx->slice_count,
-                              &local_factors, nullptr, nullptr, 0);
+                              &local_factors, nullptr, nullptr, 0, ksc_share_found);
     else
         kf_trial_divide_sieve(y, ctx->my_lo, ctx->my_hi,
-                              ctx->sp_count, ctx->sp, &local_factors);
+                              ctx->sp_count, ctx->sp, &local_factors, nullptr,
+                              nullptr, 0, ksc_share_found);
 
     mpz_t local_prod;
     mpz_init_set_ui(local_prod, 1);
