@@ -143,7 +143,8 @@ primes they found since the last one and divide them out (`ksc_share_found`). On
 smooth y this shrinks y for everyone as the scan advances: 2.2x in a
 single-process simulation where every thread sees all finds, and 1.2-1.4x
 measured with 2-4 local ranks, where each rank already holds a quarter to a
-half of the factors. Two caveats:
+half of the factors. On AION at 128 ranks, k32 trial division went from 15.05
+to 10.62 ms at 24576 bits (job 16123610, below). Two caveats:
 
 - **It only helps a y that really is smooth.** A random candidate has fewer
   than one prime factor in [2^16, 2^32] on average, so in a real attack it
@@ -593,6 +594,40 @@ branch.
   legitimate precomputation; k32's 203 million roots at 24576 bits cannot be
   stored, so its warm-cache speedup assumes a cache an attacker could not hold
   in full.
+
+### After the cost split and cofactor sharing: k32, 24576 bits, 128 ranks
+
+AION job 16123610: same setup (table method, 64 nodes x 2 ranks x 32 threads,
+50 challenges, 49 valid, 1 with blinding exhausted), built from `main` with the
+cost-balanced rank split and cofactor sharing. Results in
+`data/results/aion/alg2/k32_16123610_N64/`. This run measured its own powm
+baseline, 1802.6 ms.
+
+| k32 | job 16119156 | job 16123610 |
+|-----|-----:|-----:|
+| factor_ms     | 15.05 | **10.62** |
+| local_cbrt_ms |  1.21 |  1.23 |
+| combine_ms    |  0.93 |  0.91 |
+| total_ms      | 17.18 | **12.76** (median 12.56) |
+| speedup       | 105.2x | **141.2x** |
+
+- **Trial division is 1.42x faster** (15.05 -> 10.62 ms, std 0.47 ms over 49
+  runs). This is the low end of the 1.2-2.2x range estimated for cofactor
+  sharing: each rank holds only ~6 of a challenge's ~768 factors, so nearly all
+  of the shrinking comes from the other ranks' finds at each checkpoint.
+- **The cost split is active.** `tested_per_rank` is no longer constant: ranks
+  0-41, whose primes lie below ~2^31 where pairing makes each test cheaper,
+  take about twice as many as ranks 42-127.
+- **Reconstruction is unchanged**, about 2.1 ms (17% of the total). The
+  combine is already near one multiplication per tree round, so trial division
+  remains the target.
+- **The warm-cache and smooth-y caveats above still apply.** Cofactor sharing
+  only helps a y that is smooth, so this improves the "invert a smooth
+  challenge" figure, not the cost of finding one.
+- The `powm` JSON in the same directory reports `runs_valid: 0,
+  runs_failed: 50`. That is how the writer counts a baseline-only run (it
+  records no per-run timings), not 50 failures; its `powm_baseline_ms` is the
+  figure used here.
 
 ### GPU, 24576 bits
 
