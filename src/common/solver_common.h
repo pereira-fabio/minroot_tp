@@ -108,6 +108,15 @@ void ksc_init_json_results(
 // zero-padded big-endian buffers; an exact product that overflows nbytes
 // saturates to all 0xFF bytes (never equal to, or a divisor of, a value < M).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// kf_share_fn for the MPI solvers: every rank's newly found (prime, exponent)
+// pairs to every rank (MPI_Allgather of counts, then MPI_Allgatherv). A
+// collective: pass it to kf_trial_divide_* only where all ranks trial-divide
+// in lockstep. Called from the OpenMP master thread (MPI_THREAD_FUNNELED).
+// ---------------------------------------------------------------------------
+void ksc_share_found(const kfactor_list_t *mine, kfactor_list_t *all);
+
+
 void ksc_reduce_product(mpz_t result,
                         const mpz_t local,
                         mpz_srcptr modulo,

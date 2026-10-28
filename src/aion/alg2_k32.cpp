@@ -123,7 +123,8 @@ static void k32_factor_fn(
     if (c->method == METHOD_SIEVE)
     {
         kf_trial_divide_sieve(blinded, c->my_lo, c->my_hi,
-                              c->sp_count, c->sp, out);
+                              c->sp_count, c->sp, out, nullptr, nullptr, 0,
+                              ksc_share_found);
     }
     else
     {
@@ -143,7 +144,7 @@ static void k32_factor_fn(
             kf_trial_divide_table(blinded, c->prime_slice, c->slice_count, out,
                                   do_thr ? thr_tested.data() : nullptr,
                                   do_thr ? thr_found.data() : nullptr,
-                                  do_thr ? nT : 0);
+                                  do_thr ? nT : 0, ksc_share_found);
         if (do_thr)
         {
             json->stats.thread_primes_tested.insert(

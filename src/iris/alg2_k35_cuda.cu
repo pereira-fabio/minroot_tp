@@ -44,7 +44,7 @@
 // =============================================================================
 
 #include "gpu_common.h"
-#include "gpu_recon.cuh" // --recon auto|host|device
+#include "gpu_recon.cuh" // --recon, --td-phases
 
 #include <gmp.h>
 #include <cstdint>
@@ -105,7 +105,7 @@ struct K35Dev
 
 int main(int argc, char **argv)
 {
-    gpu_recon_parse_args(&argc, argv); // consumes --recon before the parser below
+    gpu_parse_common_args(&argc, argv); // consumes --recon, --td-phases first
     const char *challenge_file = nullptr;
     const char *modulo_file = nullptr;
     const char *data_dir = nullptr;
@@ -585,6 +585,10 @@ int main(int argc, char **argv)
 
     const int THREADS = 256, BLOCKS = 1024;
 
+    // Delta tables: one unsliced launch each, no cofactor sharing.
+    const int phases = use_delta ? 1 : g_td_phases;
+    printf("Cofactor sharing: %d launch round%s per kernel%s\n", phases, phases == 1 ? "" : "s",
+           use_delta && g_td_phases > 1 ? " (delta table: off)" : "");
     // Upload y to all GPUs, launch Phase 1 + Phase 2 in parallel, return wall-clock max.
     auto launch_all = [&](const mpz_t y) -> float
     {
@@ -592,7 +596,7 @@ int main(int argc, char **argv)
         size_t cnt = 0;
         mpz_export(y_limbs, &cnt, -1, sizeof(uint64_t), 0, 0, y);
 
-        // Launch loop — all GPUs start concurrently
+        // Upload and start the clock on every GPU
         for (int g = 0; g < n_gpus; g++)
         {
             CUDA_CHECK(cudaSetDevice(g));
@@ -600,45 +604,47 @@ int main(int argc, char **argv)
             CUDA_CHECK(cudaMemset(devs[g].d_out_factors, 0, MAX_GPU_FACTORS * sizeof(uint64_t)));
             CUDA_CHECK(cudaMemset(devs[g].d_out_count, 0, sizeof(int)));
             CUDA_CHECK(cudaEventRecord(devs[g].ev0));
-
-            // Phase 1: lower range on GPU 0 only
-            if (use_delta)
-            {
-                if (lo_nblk[g] > 0)
-                {
-                    k32_trial_divide_delta_kernel<<<BLOCKS, THREADS>>>(
-                        d_lo_delta[g], lo_nblk[g], lo_first[g], (uint64_t)nprimes32,
-                        devs[g].d_out_factors, devs[g].d_out_count);
-                    CUDA_CHECK(cudaGetLastError());
-                }
-                if (up_nblk[g] > 0)
-                {
-                    k35_upper_trial_divide_delta_kernel<<<BLOCKS, THREADS>>>(
-                        d_up_delta[g], up_nblk[g], up_first[g], (uint64_t)n_upper,
-                        devs[g].d_out_factors, devs[g].d_out_count);
-                    CUDA_CHECK(cudaGetLastError());
-                }
-            }
-            else
-            {
-                if (devs[g].d_primes32)
-                {
-                    k32_trial_divide_kernel<<<BLOCKS, THREADS>>>(
-                        devs[g].d_primes32, devs[g].n_primes32,
-                        devs[g].d_out_factors, devs[g].d_out_count);
-                    CUDA_CHECK(cudaGetLastError());
-                }
-                // Phase 2: each GPU checks its upper slice
-                if (devs[g].n_upper > 0)
-                {
-                    k35_upper_trial_divide_kernel<<<BLOCKS, THREADS>>>(
-                        devs[g].d_upper, devs[g].n_upper,
-                        devs[g].d_out_factors, devs[g].d_out_count);
-                    CUDA_CHECK(cudaGetLastError());
-                }
-            }
-            CUDA_CHECK(cudaEventRecord(devs[g].ev1));
         }
+        // Cofactor sharing (gpu_td_rounds): the lower (k32) and upper slices
+        // form one list of n32 + n_upper primes, cut into rounds, so the upper
+        // kernel already runs on a y shrunk by the lower range's factors.
+        gpu_td_rounds(devs.data(), n_gpus, phases, y, nlimbs, h_out_factors,
+                      [&](int g, int ph, int nph)
+                      {
+                          if (use_delta)
+                          {
+                              if (lo_nblk[g] > 0)
+                              {
+                                  k32_trial_divide_delta_kernel<<<BLOCKS, THREADS>>>(
+                                      d_lo_delta[g], lo_nblk[g], lo_first[g], (uint64_t)nprimes32,
+                                      devs[g].d_out_factors, devs[g].d_out_count);
+                                  CUDA_CHECK(cudaGetLastError());
+                              }
+                              if (up_nblk[g] > 0)
+                                  k35_upper_trial_divide_delta_kernel<<<BLOCKS, THREADS>>>(
+                                      d_up_delta[g], up_nblk[g], up_first[g], (uint64_t)n_upper,
+                                      devs[g].d_out_factors, devs[g].d_out_count);
+                              return;
+                          }
+                          const int64_t n32 = devs[g].d_primes32 ? devs[g].n_primes32 : 0;
+                          int64_t a, b;
+                          gpu_td_round_range(n32 + devs[g].n_upper, ph, nph, &a, &b);
+                          if (a < n32)
+                          {
+                              int64_t e = b < n32 ? b : n32;
+                              k32_trial_divide_kernel<<<BLOCKS, THREADS>>>(
+                                  devs[g].d_primes32 + a, e - a,
+                                  devs[g].d_out_factors, devs[g].d_out_count);
+                              CUDA_CHECK(cudaGetLastError());
+                          }
+                          if (b > n32)
+                          {
+                              int64_t ua = a > n32 ? a - n32 : 0;
+                              k35_upper_trial_divide_kernel<<<BLOCKS, THREADS>>>(
+                                  devs[g].d_upper + ua, b - n32 - ua,
+                                  devs[g].d_out_factors, devs[g].d_out_count);
+                          }
+                      });
 
         // Sync loop — collect max elapsed time
         float km = 0;

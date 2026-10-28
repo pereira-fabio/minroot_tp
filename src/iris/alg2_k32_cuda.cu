@@ -31,11 +31,13 @@
 //                                   the L2-residency experiment (gpu-delta-decode-kernel-plan.md)
 //     --n-challenges N              number of challenge files to run (default: 10)
 //     --n-gpus N                    split prime range across N CUDA devices (default: 1)
+//     --td-phases N                 cofactor sharing: N launch rounds, y shrunk between them
+//                                   by the factors found so far (default: 16, 1 = off)
 //     --json FILE                   write JSON output to FILE
 // =============================================================================
 
 #include "gpu_common.h"
-#include "gpu_recon.cuh" // --recon auto|host|device
+#include "gpu_recon.cuh" // --recon, --td-phases
 
 #include <gmp.h>
 #include <cstdint>
@@ -87,6 +89,8 @@ static void print_usage(const char *prog)
             "  --primes FILE                 k32 prime table (default: data/k32_primes.bin)\n"
             "  --n-challenges N              challenge files to run (default: 10)\n"
             "  --n-gpus N                    split prime range across N CUDA devices (default: 1)\n"
+            "  --td-phases N                 trial-division launch rounds, y shrunk between them\n"
+            "                                (cofactor sharing; default: 16, 1 = off)\n"
             "  --json FILE                   write JSON output\n",
             prog);
 }
@@ -97,7 +101,7 @@ static void print_usage(const char *prog)
 
 int main(int argc, char **argv)
 {
-    gpu_recon_parse_args(&argc, argv); // consumes --recon before the parser below
+    gpu_parse_common_args(&argc, argv); // consumes --recon, --td-phases first
     const char *challenge_file = nullptr;
     const char *modulo_file = nullptr;
     const char *data_dir = nullptr;
@@ -405,6 +409,11 @@ int main(int argc, char **argv)
 
     // Upload y to all GPUs, launch kernel on each in parallel, sync and return
     // wall-clock kernel time (max across all devices = effective per-challenge cost).
+    // Cofactor sharing (gpu_td_rounds): g_td_phases launch rounds, y shrunk
+    // between them. Not with the delta table, whose kernel cannot be sliced.
+    const int phases = use_delta ? 1 : g_td_phases;
+    printf("Cofactor sharing: %d launch round%s per kernel%s\n", phases, phases == 1 ? "" : "s",
+           use_delta && g_td_phases > 1 ? " (delta table: off)" : "");
     auto launch_all = [&](const mpz_t y) -> float
     {
         uint64_t y_limbs[MAX_LIMBS] = {};
@@ -423,21 +432,25 @@ int main(int argc, char **argv)
             CUDA_CHECK(cudaMemset(devs[g].d_out_factors, 0, MAX_GPU_FACTORS * sizeof(uint64_t)));
             CUDA_CHECK(cudaMemset(devs[g].d_out_count, 0, sizeof(int)));
             CUDA_CHECK(cudaEventRecord(devs[g].ev0));
-            if (use_delta)
-            {
-                uint32_t grid = dev_nblocks[g] ? dev_nblocks[g] : 1; // one CUDA block per delta block
-                k32_trial_divide_delta_kernel<<<grid, THREADS>>>(
-                    d_delta[g], dev_nblocks[g], dev_first_block[g], (uint64_t)nprimes,
-                    devs[g].d_out_factors, devs[g].d_out_count);
-            }
-            else
-            {
-                k32_trial_divide_kernel<<<BLOCKS, THREADS>>>(devs[g].d_primes, devs[g].n_slice,
-                                                             devs[g].d_out_factors, devs[g].d_out_count);
-            }
-            CUDA_CHECK(cudaGetLastError());
-            CUDA_CHECK(cudaEventRecord(devs[g].ev1));
         }
+        gpu_td_rounds(devs.data(), n_gpus, phases, y, nlimbs, h_out_factors,
+                      [&](int g, int ph, int nph)
+                      {
+                          if (use_delta)
+                          {
+                              uint32_t grid = dev_nblocks[g] ? dev_nblocks[g] : 1; // one CUDA block per delta block
+                              k32_trial_divide_delta_kernel<<<grid, THREADS>>>(
+                                  d_delta[g], dev_nblocks[g], dev_first_block[g], (uint64_t)nprimes,
+                                  devs[g].d_out_factors, devs[g].d_out_count);
+                              return;
+                          }
+                          int64_t a, b;
+                          gpu_td_round_range(devs[g].n_slice, ph, nph, &a, &b);
+                          if (b > a)
+                              k32_trial_divide_kernel<<<BLOCKS, THREADS>>>(
+                                  devs[g].d_primes + a, b - a, devs[g].d_out_factors,
+                                  devs[g].d_out_count);
+                      });
         float km = 0;
         for (int g = 0; g < n_gpus; g++)
         {

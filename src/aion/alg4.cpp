@@ -534,10 +534,12 @@ static benchmark_results_t run_one(
                 kf_trial_divide_delta(blinded_challenge, &delta_slice, &local_factors);
             else if (method == METHOD_TABLE)
                 kf_trial_divide_table(blinded_challenge, prime_slice, slice_count,
-                                      &local_factors, nullptr, nullptr, 0);
+                                      &local_factors, nullptr, nullptr, 0,
+                                      ksc_share_found);
             else
                 kf_trial_divide_sieve(blinded_challenge, my_lo, my_hi,
-                                      sp_count, sp, &local_factors);
+                                      sp_count, sp, &local_factors, nullptr,
+                                      nullptr, 0, ksc_share_found);
 
             // -- Rank 0: catch small primes (≤ 65536) missed by the sieve --
             //

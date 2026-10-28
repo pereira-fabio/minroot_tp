@@ -17,6 +17,9 @@
 
 #include "gpu_common.h"
 
+#include <gmp.h>
+#include <vector>
+
 #include <cstdint>
 
 // ---------------------------------------------------------------------------
@@ -112,4 +115,103 @@ __global__ void k32_trial_divide_kernel(
             k32_record_factor(p, out_factors, out_count);
     }
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// Cofactor sharing between kernel launches (--td-phases N, default 16).
+//
+// Each thread's work is proportional to the limb count of y, and a smooth y
+// loses ~32 bits per factor found. So the trial division runs as N launch
+// rounds over successive slices of each device's primes; between rounds the
+// host reads the primes found so far on every device, divides them out of a
+// working copy of y, and uploads the shorter y and limb count to every
+// device. A smooth y then averages about 1/2 + 1/(2N) of its size over the
+// scan. RTX 2080 SUPER, k32 8192-bit: warm factor_ms 43.0 -> 30.2 ms (N = 8)
+// -> 28.8 ms (N = 16); cold 50.0 -> 28.9 -> 27.7 ms. Only a y that is
+// actually smooth shrinks, so in a real attack this speeds up the successful
+// candidate, not the search for one.
+//
+// Call after uploading y, clearing the output buffers and recording ev0 on
+// every device. launch(g, ph) launches round ph's slice on device g (current
+// device already set); ev1 is recorded after the last round. The output
+// buffers accumulate across rounds, so the caller's collect step sees every
+// find. `full_nlimbs` is restored on every device afterwards. Dev needs
+// d_out_factors, d_out_count and ev1 (GpuDev or a solver's own struct).
+// ---------------------------------------------------------------------------
+
+template <class Dev, class Launch>
+static void gpu_td_rounds(Dev *devs, int n_gpus, int phases, const mpz_t y,
+                          int full_nlimbs, uint64_t *h_buf, Launch launch)
+{
+    if (phases < 1)
+        phases = 1;
+    mpz_t cur;
+    mpz_init_set(cur, y);
+    std::vector<int> seen(n_gpus, 0);
+    for (int ph = 0; ph < phases; ph++)
+    {
+        if (ph > 0)
+        {
+            bool shrunk = false;
+            for (int g = 0; g < n_gpus; g++)
+            {
+                CUDA_CHECK(cudaSetDevice(g));
+                CUDA_CHECK(cudaDeviceSynchronize());
+                int h_count = 0;
+                CUDA_CHECK(cudaMemcpy(&h_count, devs[g].d_out_count, sizeof(int),
+                                      cudaMemcpyDeviceToHost));
+                if (h_count > MAX_GPU_FACTORS)
+                    h_count = MAX_GPU_FACTORS;
+                if (h_count <= seen[g])
+                    continue;
+                int fresh = h_count - seen[g];
+                CUDA_CHECK(cudaMemcpy(h_buf, devs[g].d_out_factors + seen[g],
+                                      (size_t)fresh * sizeof(uint64_t),
+                                      cudaMemcpyDeviceToHost));
+                for (int j = 0; j < fresh; j++)
+                    while (mpz_divisible_ui_p(cur, (unsigned long)h_buf[j]))
+                    {
+                        mpz_divexact_ui(cur, cur, (unsigned long)h_buf[j]);
+                        shrunk = true;
+                    }
+                seen[g] = h_count;
+            }
+            if (shrunk)
+            {
+                uint64_t limbs[MAX_LIMBS] = {};
+                size_t cnt = 0;
+                mpz_export(limbs, &cnt, -1, sizeof(uint64_t), 0, 0, cur);
+                int n = (int)cnt;
+                for (int g = 0; g < n_gpus; g++)
+                {
+                    CUDA_CHECK(cudaSetDevice(g));
+                    CUDA_CHECK(cudaMemcpyToSymbol(d_y_limbs, limbs, sizeof(uint64_t) * MAX_LIMBS));
+                    CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &n, sizeof(int)));
+                }
+            }
+        }
+        for (int g = 0; g < n_gpus; g++)
+        {
+            CUDA_CHECK(cudaSetDevice(g));
+            launch(g, ph, phases);
+            CUDA_CHECK(cudaGetLastError());
+            if (ph == phases - 1)
+                CUDA_CHECK(cudaEventRecord(devs[g].ev1));
+        }
+    }
+    mpz_clear(cur);
+    if (phases > 1)
+        for (int g = 0; g < n_gpus; g++)
+        {
+            CUDA_CHECK(cudaSetDevice(g));
+            CUDA_CHECK(cudaEventSynchronize(devs[g].ev1));
+            CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &full_nlimbs, sizeof(int)));
+        }
+}
+
+// [a, b) of a slice of n primes for round ph of phases.
+static inline void gpu_td_round_range(int64_t n, int ph, int phases, int64_t *a, int64_t *b)
+{
+    *a = n * ph / phases;
+    *b = n * (ph + 1) / phases;
 }

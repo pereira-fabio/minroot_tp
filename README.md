@@ -132,7 +132,30 @@ number of ranks.
   up a binary tree → rank 0 (cbrt products, and the exact factor products used by
   the completeness/cofactor checks). Each buffer is one element of a contiguous
   derived datatype so MPI never hands the op a partial big integer
-- No communication during the hot trial division loop
+- `MPI_Allgather(v)` (cofactor sharing): seven checkpoints per trial division,
+  each sending only the primes found since the last one
+
+**Cofactor sharing.** Each test walks every limb of y, so every factor divided
+out makes later tests cheaper. At 128 ranks x 32 threads a thread finds ~0.2 of
+a challenge's ~768 factors, so its copy of y barely shrinks on its own. Trial
+division therefore runs in eight phases; at each checkpoint, ranks exchange the
+primes they found since the last one and divide them out (`ksc_share_found`). On a
+smooth y this shrinks y for everyone as the scan advances: 2.2x in a
+single-process simulation where every thread sees all finds, and 1.2-1.4x
+measured with 2-4 local ranks, where each rank already holds a quarter to a
+half of the factors. Two caveats:
+
+- **It only helps a y that really is smooth.** A random candidate has fewer
+  than one prime factor in [2^16, 2^32] on average, so in a real attack it
+  speeds up the final, successful candidate and not the search for one. The
+  benchmark challenges are smooth by construction, so it raises the measured
+  numbers more than the real cost of an attack. Report it as part of "invert a
+  smooth challenge".
+- **It costs 3-5% when there is nothing to share** (the phase barriers).
+
+Enabled in k32, alg3, alg4 and alg7's phase 2. k35 and k16 do not use it: some
+k35 ranks skip a lower-range call, which would deadlock the collective, and k16's
+slices are ~51 primes.
 
 ### alg2_k35 — Paper's Concrete Parameters (B = 2^35)
 
@@ -341,6 +364,7 @@ Same flags as the CPU solvers, minus `--all`, `--cbrt-dir` and
 | `--n-gpus N` | split the prime range across N devices |
 | `--n-runs N` | warm runs to average |
 | `--recon auto\|host\|device` | where the final reconstruction product runs: a tree over the host cores, a tree of Montgomery-multiply kernels on device 0 (`gpu_recon.cuh`), or `auto` (default): the device once the product is big enough to pay for its launches |
+| `--td-phases N` | k32, k35, Algorithms 3 and 4: run trial division as N launch rounds and divide the factors found so far out of y between them (cofactor sharing, as on the CPU; default 16, 1 = off; not with the delta table). RTX 2080 SUPER, k32 8192-bit: warm factor_ms 43.0 -> 28.8 ms. Only a smooth y shrinks, so this speeds up inverting a smooth challenge, not the search for one |
 
 Two things worth knowing before the first k32 or k35 run:
 
