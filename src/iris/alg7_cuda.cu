@@ -325,9 +325,9 @@ static void print_usage(const char *prog)
             "Usage: %s <challenge_file> <modulo_file> [options]\n"
             "  --method {sieve|powm}  benchmark method (default: sieve)\n"
             "  --R N                  candidates to test, R = 2^N (default: 20)\n"
-            "  --bitbound B           sieve up to 2^B (default: 24; use 32 for full k32 range)\n"
+            "  --bitbound B           sieve up to 2^B (default: 32, the full k32 range)\n"
             "  --exponent E           root exponent (default: 3)\n"
-            "  --medium-bits K        accept cofactor prime up to 2^K (default: 45)\n"
+            "  --medium-bits K        accept cofactor prime up to 2^K (default: 65)\n"
             "  --n-runs N             warm runs (default: 10)\n"
             "  --n-gpus N             split the prime range across N devices (default: 1)\n"
             "  --json FILE            write JSON output\n",
@@ -347,9 +347,9 @@ int main(int argc, char **argv)
     const char *modulo_suffix = "";
     int size_bits = 0;
     int r_log2 = 20;
-    int bitbound = 24;
+    int bitbound = 32;
     unsigned long exponent = 3;
-    int medium_bits = 45;
+    int medium_bits = 65;
     int n_challenges = 10;
     int n_gpus = 1;
     gpu_method_t method = GPU_METHOD_SIEVE;
@@ -563,24 +563,45 @@ int main(int argc, char **argv)
         return km;
     };
 
+    // r minimising log2(x + r*M) - h_log_sum[r]. log2(y_r) is taken in double
+    // from x/M, so it is exact enough for every r including r = 0.
+    auto pick_best_r = [&](const mpz_t x, double *deficit_out) -> int64_t
+    {
+        long ex = 0, em = 0;
+        double fx = mpz_get_d_2exp(&ex, x), fm = mpz_get_d_2exp(&em, modulo);
+        double log2_m = log2(fm) + (double)em;
+        double x_over_m = (mpz_sgn(x) == 0) ? 0.0 : (fx / fm) * exp2((double)(ex - em));
+        int64_t best = 0;
+        double best_def = INFINITY;
+        for (int64_t r = 0; r < R; r++)
+        {
+            double t = (double)r + x_over_m;
+            if (t <= 0.0)
+                continue; // y_0 = 0: nothing to factor
+            double def = log2_m + log2(t) - (double)h_log_sum[(size_t)r];
+            if (def < best_def)
+            {
+                best_def = def;
+                best = r;
+            }
+        }
+        *deficit_out = best_def;
+        return best;
+    };
+
     // ---- Discovery run: find best_r ----
     float disc_km = run_phase1(); // fills h_log_sum (summed across all devices)
 
-    double total_bits = (double)challenge_bits + r_log2;
-    double threshold = total_bits - medium_bits;
-    int64_t best_r = -1;
-    float best_score = -1.0f;
-    for (int64_t r = 0; r < R; r++)
-    {
-        if (h_log_sum[r] > best_score)
-        {
-            best_score = h_log_sum[r];
-            best_r = r;
-        }
-    }
-    printf("Phase 1: %.3f ms, best_r=%ld, log_sum=%.2f bits (threshold=%.2f)\n",
-           disc_km, (long)best_r, best_score, threshold);
-    if (best_score < threshold)
+    // Rank candidates by deficit = log2(y_r) - log_sum[r], the bits of y_r the
+    // sieve did NOT account for (what is left for the cofactor), as the CPU
+    // solver does. The raw log_sum is the wrong score: y_r grows with r, so a
+    // large r can collect more sieved bits yet leave a bigger cofactor, and
+    // a single challenge_bits + r_log2 threshold overstates y_0 by r_log2 bits.
+    double best_deficit = 0.0;
+    int64_t best_r = pick_best_r(challenge_mod, &best_deficit);
+    printf("Phase 1: %.3f ms, best_r=%ld, log_sum=%.2f bits, unsieved %.2f bits (limit=%d)\n",
+           disc_km, (long)best_r, h_log_sum[(size_t)best_r], best_deficit, medium_bits);
+    if (best_deficit > medium_bits)
     {
         printf("Warning: no almost-smooth candidate found in R=2^%d window. "
                "Try a larger --R or larger --bitbound.\n",
@@ -710,14 +731,8 @@ int main(int argc, char **argv)
 
             // Find best_r for this x_w from the combined log-sum.
             auto t_d2h0 = std::chrono::high_resolution_clock::now();
-            int64_t br_w = 0;
-            float bs_w = -1.0f;
-            for (int64_t r = 0; r < R; r++)
-                if (h_log_sum[r] > bs_w)
-                {
-                    bs_w = h_log_sum[r];
-                    br_w = r;
-                }
+            double def_w = 0.0;
+            int64_t br_w = pick_best_r(x_w, &def_w);
             auto t_d2h1 = std::chrono::high_resolution_clock::now();
             xfer.h2d_ms.push_back(std::chrono::duration<double, std::milli>(t_h2d1 - t_h2d0).count());
             xfer.d2h_ms.push_back(std::chrono::duration<double, std::milli>(t_d2h1 - t_d2h0).count());
