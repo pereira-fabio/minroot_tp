@@ -25,7 +25,7 @@
 // =============================================================================
 
 #include "gpu_common.h"
-#include "gpu_recon.cuh" // --recon auto|host|device
+#include "gpu_recon.cuh" // --recon, --td-phases
 #include "common.h"
 #include "factorization.h"
 #include "gpu_k32_kernels.cuh"
@@ -113,7 +113,7 @@ static bool cache_cofactor_cbrt(const mpz_t cofactor, const mpz_t modulo,
 // ---------------------------------------------------------------------------
 int main(int argc, char **argv)
 {
-    gpu_recon_parse_args(&argc, argv); // consumes --recon before the parser below
+    gpu_parse_common_args(&argc, argv); // consumes --recon, --td-phases first
     const char *challenge_file = nullptr;
     const char *modulo_file = nullptr;
     const char *data_dir = nullptr;
@@ -438,6 +438,10 @@ int main(int argc, char **argv)
     const int NBLOCKS = 1024;
 
     // Upload y to all GPUs, launch kernels in parallel, return wall-clock max.
+    // Delta table: one unsliced launch, no cofactor sharing.
+    const int phases = use_delta ? 1 : g_td_phases;
+    printf("Cofactor sharing: %d launch round%s per kernel%s\n", phases, phases == 1 ? "" : "s",
+           use_delta && g_td_phases > 1 ? " (delta table: off)" : "");
     auto launch_all = [&](const mpz_t y) -> float
     {
         uint64_t y_limbs[MAX_LIMBS] = {};
@@ -450,16 +454,25 @@ int main(int argc, char **argv)
             CUDA_CHECK(cudaMemset(devs[g].d_out_count, 0, sizeof(int)));
             CUDA_CHECK(cudaMemset(devs[g].d_out_factors, 0, MAX_GPU_FACTORS * sizeof(uint64_t)));
             CUDA_CHECK(cudaEventRecord(devs[g].ev0));
-            if (use_delta)
-                k32_trial_divide_delta_kernel<<<NBLOCKS, 256>>>(
-                    d_delta[g], dev_nblocks[g], dev_firstblk[g], (uint64_t)nprimes,
-                    devs[g].d_out_factors, devs[g].d_out_count);
-            else
-                k32_trial_divide_kernel<<<NBLOCKS, 256>>>(devs[g].d_primes, devs[g].n_slice,
-                                                          devs[g].d_out_factors, devs[g].d_out_count);
-            CUDA_CHECK(cudaGetLastError());
-            CUDA_CHECK(cudaEventRecord(devs[g].ev1));
         }
+        // Cofactor sharing (gpu_td_rounds): launch rounds with y shrunk between them.
+        gpu_td_rounds(devs.data(), n_gpus, phases, y, nlimbs, h_out_factors,
+                      [&](int g, int ph, int nph)
+                      {
+                          if (use_delta)
+                          {
+                              k32_trial_divide_delta_kernel<<<NBLOCKS, 256>>>(
+                                  d_delta[g], dev_nblocks[g], dev_firstblk[g], (uint64_t)nprimes,
+                                  devs[g].d_out_factors, devs[g].d_out_count);
+                              return;
+                          }
+                          int64_t a, b;
+                          gpu_td_round_range(devs[g].n_slice, ph, nph, &a, &b);
+                          if (b > a)
+                              k32_trial_divide_kernel<<<NBLOCKS, 256>>>(
+                                  devs[g].d_primes + a, b - a, devs[g].d_out_factors,
+                                  devs[g].d_out_count);
+                      });
         float km = 0;
         for (int g = 0; g < n_gpus; g++)
         {

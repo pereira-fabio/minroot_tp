@@ -31,13 +31,13 @@
 //                                   the L2-residency experiment (gpu-delta-decode-kernel-plan.md)
 //     --n-challenges N              number of challenge files to run (default: 10)
 //     --n-gpus N                    split prime range across N CUDA devices (default: 1)
-//     --td-phases N                 cofactor sharing: N launches per kernel, y shrunk between
-//                                   them by the factors found so far (default: 1 = off)
+//     --td-phases N                 cofactor sharing: N launch rounds, y shrunk between them
+//                                   by the factors found so far (default: 16, 1 = off)
 //     --json FILE                   write JSON output to FILE
 // =============================================================================
 
 #include "gpu_common.h"
-#include "gpu_recon.cuh" // --recon auto|host|device
+#include "gpu_recon.cuh" // --recon, --td-phases
 
 #include <gmp.h>
 #include <cstdint>
@@ -89,8 +89,8 @@ static void print_usage(const char *prog)
             "  --primes FILE                 k32 prime table (default: data/k32_primes.bin)\n"
             "  --n-challenges N              challenge files to run (default: 10)\n"
             "  --n-gpus N                    split prime range across N CUDA devices (default: 1)\n"
-            "  --td-phases N                 split each kernel into N launches and divide found\n"
-            "                                factors out of y between them (default: 1 = off)\n"
+            "  --td-phases N                 trial-division launch rounds, y shrunk between them\n"
+            "                                (cofactor sharing; default: 16, 1 = off)\n"
             "  --json FILE                   write JSON output\n",
             prog);
 }
@@ -101,7 +101,7 @@ static void print_usage(const char *prog)
 
 int main(int argc, char **argv)
 {
-    gpu_recon_parse_args(&argc, argv); // consumes --recon before the parser below
+    gpu_parse_common_args(&argc, argv); // consumes --recon, --td-phases first
     const char *challenge_file = nullptr;
     const char *modulo_file = nullptr;
     const char *data_dir = nullptr;
@@ -118,7 +118,6 @@ int main(int argc, char **argv)
     gpu_method_t method = GPU_METHOD_TABLE;
     int n_challenges = 10;
     int n_gpus = 1;
-    int td_phases = 1;
 
     for (int i = 1; i < argc; i++)
     {
@@ -134,8 +133,6 @@ int main(int argc, char **argv)
             n_challenges = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--n-gpus") && i + 1 < argc)
             n_gpus = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--td-phases") && i + 1 < argc)
-            td_phases = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--exponent") && i + 1 < argc)
             exponent = strtoul(argv[++i], nullptr, 10);
         else if (!strcmp(argv[i], "--primes") && i + 1 < argc)
@@ -412,10 +409,11 @@ int main(int argc, char **argv)
 
     // Upload y to all GPUs, launch kernel on each in parallel, sync and return
     // wall-clock kernel time (max across all devices = effective per-challenge cost).
-    const int phases = (use_delta || td_phases < 1) ? 1 : td_phases;
-    if (td_phases > 1)
-        printf("Cofactor sharing: %d launches per kernel%s\n", td_phases,
-               use_delta ? " (not with the delta table: off)" : "");
+    // Cofactor sharing (gpu_td_rounds): g_td_phases launch rounds, y shrunk
+    // between them. Not with the delta table, whose kernel cannot be sliced.
+    const int phases = use_delta ? 1 : g_td_phases;
+    printf("Cofactor sharing: %d launch round%s per kernel%s\n", phases, phases == 1 ? "" : "s",
+           use_delta && g_td_phases > 1 ? " (delta table: off)" : "");
     auto launch_all = [&](const mpz_t y) -> float
     {
         uint64_t y_limbs[MAX_LIMBS] = {};
@@ -434,108 +432,25 @@ int main(int argc, char **argv)
             CUDA_CHECK(cudaMemset(devs[g].d_out_factors, 0, MAX_GPU_FACTORS * sizeof(uint64_t)));
             CUDA_CHECK(cudaMemset(devs[g].d_out_count, 0, sizeof(int)));
             CUDA_CHECK(cudaEventRecord(devs[g].ev0));
-            if (use_delta)
-            {
-                uint32_t grid = dev_nblocks[g] ? dev_nblocks[g] : 1; // one CUDA block per delta block
-                k32_trial_divide_delta_kernel<<<grid, THREADS>>>(
-                    d_delta[g], dev_nblocks[g], dev_first_block[g], (uint64_t)nprimes,
-                    devs[g].d_out_factors, devs[g].d_out_count);
-            }
-            else if (phases == 1)
-            {
-                k32_trial_divide_kernel<<<BLOCKS, THREADS>>>(devs[g].d_primes, devs[g].n_slice,
-                                                             devs[g].d_out_factors, devs[g].d_out_count);
-            }
-            else
-            {
-                // Phase 0 only; the remaining phases are launched below.
-                int64_t n0 = devs[g].n_slice / phases;
-                CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
-                k32_trial_divide_kernel<<<BLOCKS, THREADS>>>(devs[g].d_primes, n0,
-                                                             devs[g].d_out_factors, devs[g].d_out_count);
-            }
-            CUDA_CHECK(cudaGetLastError());
-            if (phases == 1)
-                CUDA_CHECK(cudaEventRecord(devs[g].ev1));
         }
-
-        // Cofactor sharing (--td-phases N > 1). Each device's slice runs in N
-        // launches; between them the host reads the primes found so far on
-        // every device, divides them out of a working copy of y, and uploads
-        // the shorter y (and its limb count, which sets each thread's work) to
-        // every device. The output buffers keep accumulating, so
-        // collect_factors sees all finds and takes exponents from the original
-        // y. ev0..ev1 spans the host work between phases, so factor_ms
-        // includes it. Only a y that is actually smooth shrinks.
-        if (phases > 1)
-        {
-            mpz_t cur;
-            mpz_init_set(cur, y);
-            std::vector<int> seen(n_gpus, 0);
-            for (int ph = 1; ph < phases; ph++)
-            {
-                bool shrunk = false;
-                for (int g = 0; g < n_gpus; g++)
-                {
-                    CUDA_CHECK(cudaSetDevice(g));
-                    CUDA_CHECK(cudaDeviceSynchronize());
-                    int h_count = 0;
-                    CUDA_CHECK(cudaMemcpy(&h_count, devs[g].d_out_count, sizeof(int),
-                                          cudaMemcpyDeviceToHost));
-                    if (h_count > MAX_GPU_FACTORS)
-                        h_count = MAX_GPU_FACTORS;
-                    if (h_count > seen[g])
-                    {
-                        int fresh = h_count - seen[g];
-                        CUDA_CHECK(cudaMemcpy(h_out_factors, devs[g].d_out_factors + seen[g],
-                                              (size_t)fresh * sizeof(uint64_t),
-                                              cudaMemcpyDeviceToHost));
-                        for (int j = 0; j < fresh; j++)
-                            while (mpz_divisible_ui_p(cur, (unsigned long)h_out_factors[j]))
-                            {
-                                mpz_divexact_ui(cur, cur, (unsigned long)h_out_factors[j]);
-                                shrunk = true;
-                            }
-                        seen[g] = h_count;
-                    }
-                }
-                if (shrunk)
-                {
-                    uint64_t cur_limbs[MAX_LIMBS] = {};
-                    size_t cur_cnt = 0;
-                    mpz_export(cur_limbs, &cur_cnt, -1, sizeof(uint64_t), 0, 0, cur);
-                    int cur_n = (int)cur_cnt;
-                    for (int g = 0; g < n_gpus; g++)
-                    {
-                        CUDA_CHECK(cudaSetDevice(g));
-                        CUDA_CHECK(cudaMemcpyToSymbol(d_y_limbs, cur_limbs,
-                                                      sizeof(uint64_t) * MAX_LIMBS));
-                        CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &cur_n, sizeof(int)));
-                    }
-                }
-                for (int g = 0; g < n_gpus; g++)
-                {
-                    CUDA_CHECK(cudaSetDevice(g));
-                    int64_t a = devs[g].n_slice * ph / phases;
-                    int64_t b = devs[g].n_slice * (ph + 1) / phases;
-                    if (b > a)
-                        k32_trial_divide_kernel<<<BLOCKS, THREADS>>>(
-                            devs[g].d_primes + a, b - a, devs[g].d_out_factors,
-                            devs[g].d_out_count);
-                    CUDA_CHECK(cudaGetLastError());
-                    if (ph == phases - 1)
-                        CUDA_CHECK(cudaEventRecord(devs[g].ev1));
-                }
-            }
-            mpz_clear(cur);
-            // Leave the full-size limb count for the next launch_all.
-            for (int g = 0; g < n_gpus; g++)
-            {
-                CUDA_CHECK(cudaSetDevice(g));
-                CUDA_CHECK(cudaEventSynchronize(devs[g].ev1));
-                CUDA_CHECK(cudaMemcpyToSymbol(d_nlimbs, &nlimbs, sizeof(int)));
-            }
-        }
+        gpu_td_rounds(devs.data(), n_gpus, phases, y, nlimbs, h_out_factors,
+                      [&](int g, int ph, int nph)
+                      {
+                          if (use_delta)
+                          {
+                              uint32_t grid = dev_nblocks[g] ? dev_nblocks[g] : 1; // one CUDA block per delta block
+                              k32_trial_divide_delta_kernel<<<grid, THREADS>>>(
+                                  d_delta[g], dev_nblocks[g], dev_first_block[g], (uint64_t)nprimes,
+                                  devs[g].d_out_factors, devs[g].d_out_count);
+                              return;
+                          }
+                          int64_t a, b;
+                          gpu_td_round_range(devs[g].n_slice, ph, nph, &a, &b);
+                          if (b > a)
+                              k32_trial_divide_kernel<<<BLOCKS, THREADS>>>(
+                                  devs[g].d_primes + a, b - a, devs[g].d_out_factors,
+                                  devs[g].d_out_count);
+                      });
         float km = 0;
         for (int g = 0; g < n_gpus; g++)
         {

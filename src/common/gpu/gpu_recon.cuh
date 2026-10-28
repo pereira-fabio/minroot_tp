@@ -246,10 +246,16 @@ static void gpu_recon_auto(mpz_t result, mpz_t *vals, int n,
         kf_product_mod_tree(result, vals, n, modulo, nthreads);
 }
 
-// Strip `--recon auto|host|device` from argv (so the solver's own parser never
-// sees it) and install the chosen product backend; auto when the flag is
-// absent. Call first thing in main().
-static inline void gpu_recon_parse_args(int *argc, char **argv)
+// Launch rounds for cofactor sharing in the trial-division kernels
+// (gpu_td_rounds in gpu_k32_kernels.cuh); 1 = one launch, no sharing. Used by
+// k32, k35, Algorithms 3 and 4; set with --td-phases.
+static int g_td_phases = 16;
+
+// Strip the options every CUDA solver shares from argv (so the solver's own
+// parser never sees them) and apply them. Call first thing in main().
+//   --recon auto|host|device   reconstruction product backend (default auto)
+//   --td-phases N              trial-division launch rounds (default 16)
+static inline void gpu_parse_common_args(int *argc, char **argv)
 {
     const char *mode = "auto";
     int w = 1;
@@ -258,6 +264,13 @@ static inline void gpu_recon_parse_args(int *argc, char **argv)
         if (!strcmp(argv[i], "--recon") && i + 1 < *argc)
         {
             mode = argv[++i];
+            continue;
+        }
+        if (!strcmp(argv[i], "--td-phases") && i + 1 < *argc)
+        {
+            g_td_phases = atoi(argv[++i]);
+            if (g_td_phases < 1)
+                g_td_phases = 1;
             continue;
         }
         argv[w++] = argv[i];
