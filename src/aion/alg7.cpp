@@ -182,6 +182,8 @@ static benchmark_results_t run_one(
                (unsigned long long)my_hi);
         fflush(stdout);
     }
+    ksc_prepare_table_products(method == METHOD_TABLE ? prime_slice : NULL,
+                               (int64_t)slice_count, rank);
 
     // Precompute cbrt cache for smooth prime factors in this challenge (untimed).
     // Skipped when the merged cache is loaded (it already has every prime).
@@ -561,6 +563,7 @@ static benchmark_results_t run_one(
     free(log_sum);
     free(M_mod_q);
     free(M_inv_q);
+    kf_table_products_release(prime_slice);
     free(prime_slice);
     mpz_clear(blinded_challenge);
     mpz_clear(cofactor);
@@ -604,6 +607,8 @@ int main(int argc, char *argv[])
 {
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+    if (!kf_parse_td_arg(&argc, argv)) // --td gcd|scan (table method)
+        MPI_Abort(MPI_COMM_WORLD, 1);
     if (provided < MPI_THREAD_FUNNELED)
     {
         fprintf(stderr, "Error: MPI_THREAD_FUNNELED not supported\n");

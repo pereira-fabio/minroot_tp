@@ -523,6 +523,10 @@ int main(int argc, char *argv[])
     // but never touch MPI directly — safe with FUNNELED.
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+    // k35 stays on the per-prime scan: its upper range (2^32, 2^35] is a
+    // uint64_t table the gcd route does not cover, and kf_cost_split's flat
+    // gcd-route model would then misbalance the ranks that scan it.
+    kf_set_td_mode(KF_TD_SCAN);
     if (provided < MPI_THREAD_FUNNELED)
     {
         fprintf(stderr, "Error: MPI_THREAD_FUNNELED not supported\n");

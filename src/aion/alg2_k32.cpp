@@ -260,6 +260,7 @@ static benchmark_results_t run_one(
             }
         }
     }
+    ksc_prepare_table_products(prime_slice, slice_count, rank);
 
     size_t cbrt_bytes = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
 
@@ -400,6 +401,7 @@ static benchmark_results_t run_one(
         fflush(stdout);
     }
 
+    kf_table_products_release(prime_slice);
     free(prime_slice);
     if (have_delta)
         kf_delta_slice_free(&delta_slice);
@@ -458,6 +460,8 @@ int main(int argc, char *argv[])
     // but never touch MPI directly — safe with FUNNELED.
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+    if (!kf_parse_td_arg(&argc, argv)) // --td gcd|scan (table method)
+        MPI_Abort(MPI_COMM_WORLD, 1);
     if (provided < MPI_THREAD_FUNNELED)
     {
         fprintf(stderr, "Error: MPI_THREAD_FUNNELED not supported\n");

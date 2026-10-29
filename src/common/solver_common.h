@@ -234,6 +234,13 @@ void ksc_ensure_k16_cbrt(
 // ---------------------------------------------------------------------------
 const char *ksc_ensure_k32_primes(int sp_count, const unsigned *sp, int rank);
 
+// ksc_prepare_table_products:
+//   Builds this rank's chunk products for the gcd route of the table method
+//   (kf_table_products_prepare), outside any timed region, and has rank 0
+//   report the trial-division mode and the slowest rank's build time.
+//   Collective: every rank calls it, with or without a slice.
+void ksc_prepare_table_products(const uint32_t *slice, int64_t count, int rank);
+
 // ---------------------------------------------------------------------------
 // cbrt cache precomputation — unified for k32, k35, alg3, alg4
 //
