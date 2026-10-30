@@ -409,6 +409,7 @@ Same flags as the CPU solvers, minus `--all`, `--cbrt-dir` and
 | `--n-runs N` | warm runs to average |
 | `--recon auto\|host\|device` | where the final reconstruction product runs: a tree over the host cores, a tree of Montgomery-multiply kernels on device 0 (`gpu_recon.cuh`), or `auto` (default): the device once the product is big enough to pay for its launches |
 | `--td-phases N` | k32, k35, Algorithms 3 and 4: run trial division as N launch rounds and divide the factors found so far out of y between them (cofactor sharing, as on the CPU; default 16, 1 = off; not with the delta table). RTX 2080 SUPER, k32 8192-bit: warm factor_ms 43.0 -> 28.8 ms. Only a smooth y shrinks, so this speeds up inverting a smooth challenge, not the search for one |
+| `--td-group 0\|4\|8` | k32, k35, Algorithms 3 and 4, prototype (default 0 = off): each thread reduces y once modulo the product of G of its primes (multi-word Montgomery, `divides_big_group`) instead of once per prime, (G + 1) / (2G) of the multiplies, so at most ~2x fewer. 42 registers at G = 4, 63 at G = 8 (default kernel 38), no spills on sm_75. Not yet benchmarked on a GPU |
 
 Two things worth knowing before the first k32 or k35 run:
 

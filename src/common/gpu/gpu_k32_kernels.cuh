@@ -118,6 +118,54 @@ __global__ void k32_trial_divide_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Grouped trial division (--td-group G, prototype): each thread reduces y once
+// modulo the product of G of its primes (divides_big_group) instead of once
+// per prime, (G + 1) / (2G) of the multiplies. Its primes are
+// primes[i + k*stride], k = 0..G-1, as in KF_TD_ILP = 4, so loads stay
+// coalesced. A separate kernel, so the default kernel's register count and
+// occupancy do not change.
+// ---------------------------------------------------------------------------
+
+template <int G>
+__global__ void k32_trial_divide_group_kernel(
+    const uint32_t *__restrict__ primes, int64_t nprimes,
+    uint64_t *out_factors, int *out_count)
+{
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = (int64_t)gridDim.x * blockDim.x;
+    int nlimbs = d_nlimbs;
+    for (int64_t i = idx; i < nprimes; i += (int64_t)G * stride)
+    {
+        uint32_t q[G];
+        bool d[G];
+#pragma unroll
+        for (int k = 0; k < G; k++)
+        {
+            int64_t j = i + k * stride;
+            q[k] = j < nprimes ? primes[j] : 1u; // 1 pads the tail group
+        }
+        divides_big_group<G>(d_y_limbs, nlimbs, q, d);
+#pragma unroll
+        for (int k = 0; k < G; k++)
+            if (d[k] && q[k] != 1u)
+                k32_record_factor(q[k], out_factors, out_count);
+    }
+}
+
+// Launch the trial-division kernel the flags select: grouped (g_td_group,
+// gpu_recon.cuh) or the default per-prime kernel. Same arguments and grid.
+static inline void k32_td_launch(dim3 grid, dim3 block, const uint32_t *primes,
+                                 int64_t nprimes, uint64_t *out_factors, int *out_count)
+{
+    if (g_td_group == 8)
+        k32_trial_divide_group_kernel<8><<<grid, block>>>(primes, nprimes, out_factors, out_count);
+    else if (g_td_group == 4)
+        k32_trial_divide_group_kernel<4><<<grid, block>>>(primes, nprimes, out_factors, out_count);
+    else
+        k32_trial_divide_kernel<<<grid, block>>>(primes, nprimes, out_factors, out_count);
+}
+
+// ---------------------------------------------------------------------------
 // Cofactor sharing between kernel launches (--td-phases N, default 16).
 //
 // Each thread's work is proportional to the limb count of y, and a smooth y

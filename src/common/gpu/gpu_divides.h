@@ -217,3 +217,114 @@ KF_HD void divides_big_u32_x4(const uint64_t *limbs, int nlimbs,
     for (int k = 0; k < 4; k++)
         d[k] = (a[k] == 0 || a[k] == q[k]);
 }
+
+// G primes from ONE reduction of y (--td-group G). The thread multiplies its
+// G primes into Q (G 32-bit words) and runs the Montgomery reduction above
+// with that multi-word modulus, 32-bit digit by digit:
+//
+//     m   = (acc_0 + d) * (-Q^-1 mod 2^32)       (mod 2^32)
+//     acc = (acc + d + m*Q) / 2^32               (exact)
+//
+// leaving acc ≡ y * 2^(-32k) (mod Q) with acc < 2Q (G + 1 words). Every q_k
+// is odd and divides Q, so q_k | y iff q_k | acc, which divides_big_u32
+// answers on the short acc. Per digit this costs G + 1 multiplies for G
+// primes, against 2 per prime for divides_big_u32: (G + 1) / (2G) of the
+// multiplies, at most a 2x saving, approached as G grows (1.6x at G = 4,
+// 1.8x at G = 8). Same verdicts as G divides_big_u32 calls; an even q (never
+// a k32 prime) takes that route. Pass q = 1 for unused slots (d is then true
+// and should be ignored).
+template <int G>
+KF_HD void divides_big_group(const uint64_t *limbs, int nlimbs,
+                             const uint32_t q[G], bool d[G])
+{
+    uint32_t odd = 1u;
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+    for (int k = 0; k < G; k++)
+        odd &= q[k];
+    if ((odd & 1u) == 0)
+    {
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+        for (int k = 0; k < G; k++)
+            d[k] = divides_big_u32(limbs, nlimbs, q[k]);
+        return;
+    }
+    // Q = q_0 * ... * q_{G-1} < 2^(32G), as G little-endian words.
+    uint32_t Q[G];
+    Q[0] = q[0];
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+    for (int j = 1; j < G; j++)
+        Q[j] = 0;
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+    for (int k = 1; k < G; k++)
+    {
+        uint64_t c = 0;
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+        for (int j = 0; j < G; j++)
+        {
+            c += (uint64_t)Q[j] * q[k];
+            Q[j] = (uint32_t)c;
+            c >>= 32;
+        }
+    }
+    const uint32_t qi = kf_neg_inv32(Q[0]);
+    uint32_t acc[G + 1];
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+    for (int j = 0; j <= G; j++)
+        acc[j] = 0;
+    for (int i = 0; i < nlimbs; i++)
+    {
+        uint64_t limb = limbs[i];
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+        for (int h = 0; h < 2; h++)
+        {
+            uint32_t dg = (uint32_t)(limb >> (32 * h));
+            uint32_t m = (acc[0] + dg) * qi;
+            // acc + dg + m*Q; its low word is 0 by the choice of m. Each step
+            // stays below 2^64: (2^32-1)^2 + 2*(2^32-1) + carry < 2^64.
+            uint64_t s = (uint64_t)acc[0] + dg + (uint64_t)m * Q[0];
+            s >>= 32;
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+            for (int j = 1; j < G; j++)
+            {
+                s += (uint64_t)acc[j] + (uint64_t)m * Q[j];
+                acc[j - 1] = (uint32_t)s;
+                s >>= 32;
+            }
+            s += acc[G];
+            acc[G - 1] = (uint32_t)s;
+            acc[G] = (uint32_t)(s >> 32);
+        }
+    }
+    // acc as 64-bit limbs for the per-prime check.
+    uint64_t r[(G + 2) / 2];
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+    for (int j = 0; j < (G + 2) / 2; j++)
+    {
+        uint64_t lo = acc[2 * j];
+        uint64_t hi = (2 * j + 1 <= G) ? acc[2 * j + 1] : 0;
+        r[j] = lo | (hi << 32);
+    }
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+    for (int k = 0; k < G; k++)
+        d[k] = divides_big_u32(r, (G + 2) / 2, q[k]);
+}

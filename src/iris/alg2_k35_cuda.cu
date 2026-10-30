@@ -632,7 +632,7 @@ int main(int argc, char **argv)
                           if (a < n32)
                           {
                               int64_t e = b < n32 ? b : n32;
-                              k32_trial_divide_kernel<<<BLOCKS, THREADS>>>(
+                              k32_td_launch(BLOCKS, THREADS,
                                   devs[g].d_primes32 + a, e - a,
                                   devs[g].d_out_factors, devs[g].d_out_count);
                               CUDA_CHECK(cudaGetLastError());

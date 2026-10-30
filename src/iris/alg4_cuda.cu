@@ -500,7 +500,7 @@ int main(int argc, char **argv)
                           int64_t a, b;
                           gpu_td_round_range(devs[g].n_slice, ph, nph, &a, &b);
                           if (b > a)
-                              k32_trial_divide_kernel<<<NBLOCKS, 256>>>(
+                              k32_td_launch(NBLOCKS, 256,
                                   devs[g].d_primes + a, b - a, devs[g].d_out_factors,
                                   devs[g].d_out_count);
                       });

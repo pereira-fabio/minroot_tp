@@ -90,6 +90,7 @@ static void print_usage(const char *prog)
             "  --n-challenges N              challenge files to run (default: 10)\n"
             "  --n-gpus N                    split prime range across N CUDA devices (default: 1)\n"
             "  --td-phases N                 trial-division launch rounds, y shrunk between them\n"
+            "  --td-group 0|4|8              primes per Montgomery reduction of y (prototype; 0 = off)\n"
             "                                (cofactor sharing; default: 16, 1 = off)\n"
             "  --json FILE                   write JSON output\n",
             prog);
@@ -447,7 +448,7 @@ int main(int argc, char **argv)
                           int64_t a, b;
                           gpu_td_round_range(devs[g].n_slice, ph, nph, &a, &b);
                           if (b > a)
-                              k32_trial_divide_kernel<<<BLOCKS, THREADS>>>(
+                              k32_td_launch(BLOCKS, THREADS,
                                   devs[g].d_primes + a, b - a, devs[g].d_out_factors,
                                   devs[g].d_out_count);
                       });
