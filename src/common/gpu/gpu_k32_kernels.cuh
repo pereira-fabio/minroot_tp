@@ -118,6 +118,55 @@ __global__ void k32_trial_divide_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Grouped trial division (--td-group 4, the default): each thread reduces y once modulo the
+// product of 4 of its primes (divides_big_group) instead of once per prime,
+// 5/8 of the multiplies; the extra multi-word carries take back most of the
+// rest. RTX 2080 SUPER, k32 8192-bit sieve, warm factor_ms over 9 runs:
+// 28.57 -> 26.57 ms (-7%), 2-run batch 28.84 -> 26.87. G = 8 (63 registers)
+// measured 30.14, slower than the default, so only G = 4 is offered. Its primes are
+// primes[i + k*stride], k = 0..G-1, as in KF_TD_ILP = 4, so loads stay
+// coalesced. A separate kernel, so the default kernel's register count and
+// occupancy do not change.
+// ---------------------------------------------------------------------------
+
+template <int G>
+__global__ void k32_trial_divide_group_kernel(
+    const uint32_t *__restrict__ primes, int64_t nprimes,
+    uint64_t *out_factors, int *out_count)
+{
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = (int64_t)gridDim.x * blockDim.x;
+    int nlimbs = d_nlimbs;
+    for (int64_t i = idx; i < nprimes; i += (int64_t)G * stride)
+    {
+        uint32_t q[G];
+        bool d[G];
+#pragma unroll
+        for (int k = 0; k < G; k++)
+        {
+            int64_t j = i + k * stride;
+            q[k] = j < nprimes ? primes[j] : 1u; // 1 pads the tail group
+        }
+        divides_big_group<G>(d_y_limbs, nlimbs, q, d);
+#pragma unroll
+        for (int k = 0; k < G; k++)
+            if (d[k] && q[k] != 1u)
+                k32_record_factor(q[k], out_factors, out_count);
+    }
+}
+
+// Launch the trial-division kernel the flags select: grouped (g_td_group,
+// gpu_recon.cuh) or the default per-prime kernel. Same arguments and grid.
+static inline void k32_td_launch(dim3 grid, dim3 block, const uint32_t *primes,
+                                 int64_t nprimes, uint64_t *out_factors, int *out_count)
+{
+    if (g_td_group == 4)
+        k32_trial_divide_group_kernel<4><<<grid, block>>>(primes, nprimes, out_factors, out_count);
+    else
+        k32_trial_divide_kernel<<<grid, block>>>(primes, nprimes, out_factors, out_count);
+}
+
+// ---------------------------------------------------------------------------
 // Cofactor sharing between kernel launches (--td-phases N, default 16).
 //
 // Each thread's work is proportional to the limb count of y, and a smooth y
@@ -145,6 +194,16 @@ static void gpu_td_rounds(Dev *devs, int n_gpus, int phases, const mpz_t y,
 {
     if (phases < 1)
         phases = 1;
+    static bool said = false; // the kernel choice, once per run
+    if (!said)
+    {
+        said = true;
+        if (g_td_group)
+            printf("Trial division: %d primes per Montgomery reduction of y "
+                   "(--td-group 0 for one per prime)\n", g_td_group);
+        else
+            printf("Trial division: one Montgomery reduction of y per prime (--td-group 0)\n");
+    }
     mpz_t cur;
     mpz_init_set(cur, y);
     std::vector<int> seen(n_gpus, 0);

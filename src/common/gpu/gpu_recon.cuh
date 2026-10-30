@@ -251,10 +251,17 @@ static void gpu_recon_auto(mpz_t result, mpz_t *vals, int n,
 // k32, k35, Algorithms 3 and 4; set with --td-phases.
 static int g_td_phases = 16;
 
+// Primes per Montgomery reduction of y in the k32 trial-division kernel
+// (divides_big_group, k32_td_launch); 0 = the default per-prime kernel
+// (KF_TD_ILP). Set with --td-group 0|4; 4 is the default (-7% factor_ms on an
+// RTX 2080 SUPER, see k32_trial_divide_group_kernel).
+static int g_td_group = 4;
+
 // Strip the options every CUDA solver shares from argv (so the solver's own
 // parser never sees them) and apply them. Call first thing in main().
 //   --recon auto|host|device   reconstruction product backend (default auto)
 //   --td-phases N              trial-division launch rounds (default 16)
+//   --td-group 0|4             primes per reduction of y (default 4; 0 = per prime)
 static inline void gpu_parse_common_args(int *argc, char **argv)
 {
     const char *mode = "auto";
@@ -271,6 +278,16 @@ static inline void gpu_parse_common_args(int *argc, char **argv)
             g_td_phases = atoi(argv[++i]);
             if (g_td_phases < 1)
                 g_td_phases = 1;
+            continue;
+        }
+        if (!strcmp(argv[i], "--td-group") && i + 1 < *argc)
+        {
+            g_td_group = atoi(argv[++i]);
+            if (g_td_group != 0 && g_td_group != 4)
+            {
+                fprintf(stderr, "Error: --td-group must be 0 or 4, got %d\n", g_td_group);
+                exit(1);
+            }
             continue;
         }
         argv[w++] = argv[i];
