@@ -118,9 +118,12 @@ __global__ void k32_trial_divide_kernel(
 }
 
 // ---------------------------------------------------------------------------
-// Grouped trial division (--td-group G, prototype): each thread reduces y once
-// modulo the product of G of its primes (divides_big_group) instead of once
-// per prime, (G + 1) / (2G) of the multiplies. Its primes are
+// Grouped trial division (--td-group 4): each thread reduces y once modulo the
+// product of 4 of its primes (divides_big_group) instead of once per prime,
+// 5/8 of the multiplies; the extra multi-word carries take back most of the
+// rest. RTX 2080 SUPER, k32 8192-bit sieve, warm factor_ms over 9 runs:
+// 28.57 -> 26.57 ms (-7%), 2-run batch 28.84 -> 26.87. G = 8 (63 registers)
+// measured 30.14, slower than the default, so only G = 4 is offered. Its primes are
 // primes[i + k*stride], k = 0..G-1, as in KF_TD_ILP = 4, so loads stay
 // coalesced. A separate kernel, so the default kernel's register count and
 // occupancy do not change.
@@ -157,9 +160,7 @@ __global__ void k32_trial_divide_group_kernel(
 static inline void k32_td_launch(dim3 grid, dim3 block, const uint32_t *primes,
                                  int64_t nprimes, uint64_t *out_factors, int *out_count)
 {
-    if (g_td_group == 8)
-        k32_trial_divide_group_kernel<8><<<grid, block>>>(primes, nprimes, out_factors, out_count);
-    else if (g_td_group == 4)
+    if (g_td_group == 4)
         k32_trial_divide_group_kernel<4><<<grid, block>>>(primes, nprimes, out_factors, out_count);
     else
         k32_trial_divide_kernel<<<grid, block>>>(primes, nprimes, out_factors, out_count);

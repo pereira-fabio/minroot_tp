@@ -253,14 +253,14 @@ static int g_td_phases = 16;
 
 // Primes per Montgomery reduction of y in the k32 trial-division kernel
 // (divides_big_group, k32_td_launch); 0 = the default per-prime kernel
-// (KF_TD_ILP). Prototype, set with --td-group 0|4|8.
+// (KF_TD_ILP). Set with --td-group 0|4.
 static int g_td_group = 0;
 
 // Strip the options every CUDA solver shares from argv (so the solver's own
 // parser never sees them) and apply them. Call first thing in main().
 //   --recon auto|host|device   reconstruction product backend (default auto)
 //   --td-phases N              trial-division launch rounds (default 16)
-//   --td-group 0|4|8           primes per reduction of y (default 0 = off)
+//   --td-group 0|4             primes per reduction of y (default 0 = off)
 static inline void gpu_parse_common_args(int *argc, char **argv)
 {
     const char *mode = "auto";
@@ -282,9 +282,9 @@ static inline void gpu_parse_common_args(int *argc, char **argv)
         if (!strcmp(argv[i], "--td-group") && i + 1 < *argc)
         {
             g_td_group = atoi(argv[++i]);
-            if (g_td_group != 0 && g_td_group != 4 && g_td_group != 8)
+            if (g_td_group != 0 && g_td_group != 4)
             {
-                fprintf(stderr, "Error: --td-group must be 0, 4 or 8, got %d\n", g_td_group);
+                fprintf(stderr, "Error: --td-group must be 0 or 4, got %d\n", g_td_group);
                 exit(1);
             }
             continue;
@@ -294,7 +294,7 @@ static inline void gpu_parse_common_args(int *argc, char **argv)
     *argc = w;
     argv[w] = nullptr;
     if (g_td_group)
-        printf("Trial division: %d primes per Montgomery reduction of y (--td-group, prototype)\n",
+        printf("Trial division: %d primes per Montgomery reduction of y (--td-group)\n",
                g_td_group);
 
     if (!strcmp(mode, "auto"))

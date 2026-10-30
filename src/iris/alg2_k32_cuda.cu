@@ -90,7 +90,7 @@ static void print_usage(const char *prog)
             "  --n-challenges N              challenge files to run (default: 10)\n"
             "  --n-gpus N                    split prime range across N CUDA devices (default: 1)\n"
             "  --td-phases N                 trial-division launch rounds, y shrunk between them\n"
-            "  --td-group 0|4|8              primes per Montgomery reduction of y (prototype; 0 = off)\n"
+            "  --td-group 0|4                primes per Montgomery reduction of y (0 = off)\n"
             "                                (cofactor sharing; default: 16, 1 = off)\n"
             "  --json FILE                   write JSON output\n",
             prog);
