@@ -118,7 +118,7 @@ __global__ void k32_trial_divide_kernel(
 }
 
 // ---------------------------------------------------------------------------
-// Grouped trial division (--td-group 4): each thread reduces y once modulo the
+// Grouped trial division (--td-group 4, the default): each thread reduces y once modulo the
 // product of 4 of its primes (divides_big_group) instead of once per prime,
 // 5/8 of the multiplies; the extra multi-word carries take back most of the
 // rest. RTX 2080 SUPER, k32 8192-bit sieve, warm factor_ms over 9 runs:
@@ -194,6 +194,16 @@ static void gpu_td_rounds(Dev *devs, int n_gpus, int phases, const mpz_t y,
 {
     if (phases < 1)
         phases = 1;
+    static bool said = false; // the kernel choice, once per run
+    if (!said)
+    {
+        said = true;
+        if (g_td_group)
+            printf("Trial division: %d primes per Montgomery reduction of y "
+                   "(--td-group 0 for one per prime)\n", g_td_group);
+        else
+            printf("Trial division: one Montgomery reduction of y per prime (--td-group 0)\n");
+    }
     mpz_t cur;
     mpz_init_set(cur, y);
     std::vector<int> seen(n_gpus, 0);
