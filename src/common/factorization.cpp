@@ -315,13 +315,14 @@ static uint64_t kf_cost_boundary(uint64_t lo, uint64_t hi, int parts, int k,
     const double cell = width / KF_COST_STEPS;
     const double fixed = sieve ? KF_SIEVE_NS : 0.0;
     const double test = KF_TD_BASE_NS + KF_TD_LIMB_NS * limbs;
+    const bool flat = !sieve && kf_get_td_mode() == KF_TD_GCD;
     double cum[KF_COST_STEPS + 1];
     cum[0] = 0.0;
     for (int i = 0; i < KF_COST_STEPS; i++)
     {
         double x = a + (i + 0.5) * cell;
         double w = (x < 2147483648.0) ? KF_PAIRED_COST : 1.0;
-        cum[i + 1] = cum[i] + (fixed + w * test / log(x < 3.0 ? 3.0 : x)) * cell;
+        cum[i + 1] = cum[i] + (flat ? 1.0 : fixed + w * test / log(x < 3.0 ? 3.0 : x)) * cell;
     }
     double target = cum[KF_COST_STEPS] * k / parts;
     int i = 0;
@@ -598,6 +599,214 @@ void kf_trial_divide_sieve(const mpz_t n,
 }
 
 // ---------------------------------------------------------------------------
+// Table method, gcd route — see factorization.h
+// ---------------------------------------------------------------------------
+
+static kf_td_mode_t g_td_mode = KF_TD_GCD;
+
+void kf_set_td_mode(kf_td_mode_t mode) { g_td_mode = mode; }
+kf_td_mode_t kf_get_td_mode(void) { return g_td_mode; }
+
+bool kf_parse_td_arg(int *argc, char **argv)
+{
+    bool ok = true;
+    int w = 1;
+    for (int i = 1; i < *argc; i++)
+    {
+        if (strcmp(argv[i], "--td") == 0 && i + 1 < *argc)
+        {
+            const char *m = argv[++i];
+            if (strcmp(m, "gcd") == 0)
+                g_td_mode = KF_TD_GCD;
+            else if (strcmp(m, "scan") == 0)
+                g_td_mode = KF_TD_SCAN;
+            else
+            {
+                fprintf(stderr, "Unknown --td '%s' (use gcd or scan)\n", m);
+                ok = false;
+            }
+            continue;
+        }
+        argv[w++] = argv[i];
+    }
+    *argc = w;
+    argv[w] = nullptr;
+    return ok;
+}
+
+// Products of one prime table, one per chunk. Chunks are equal-width in value,
+// which is equal in product bits (see kf_cost_split). There are at least as
+// many as threads, and none holds more than KF_GCD_CHUNK primes: a product's
+// build time grows faster than its size, and a reduction costs the product's
+// bits whatever the chunking, so small chunks only add one cheap gcd each
+// (~7 ns per prime at 24576 bits against ~200 ns per prime for the scan).
+#define KF_GCD_CHUNK 65536
+struct kf_table_products
+{
+    const uint32_t *primes;
+    int64_t count;
+    int nchunks;
+    int64_t *bounds; // chunk c is primes[bounds[c], bounds[c+1])
+    mpz_t *prods;
+};
+
+static kf_table_products *g_tp = nullptr;
+static int g_tp_n = 0;
+
+// Product of primes[a, b) by a balanced tree (linear accumulation would cost
+// quadratic time on a 1.5M-bit result).
+static void kf_prime_product(mpz_t r, const uint32_t *primes, int64_t a, int64_t b)
+{
+    if (b - a <= 16)
+    {
+        mpz_set_ui(r, 1);
+        for (int64_t i = a; i < b; i++)
+            mpz_mul_ui(r, r, primes[i]);
+        return;
+    }
+    mpz_t l;
+    mpz_init(l);
+    int64_t m = a + (b - a) / 2;
+    kf_prime_product(l, primes, a, m);
+    kf_prime_product(r, primes, m, b);
+    mpz_mul(r, r, l);
+    mpz_clear(l);
+}
+
+static const kf_table_products *kf_table_products_get(const uint32_t *primes,
+                                                      int64_t count)
+{
+    for (int i = 0; i < g_tp_n; i++)
+        if (g_tp[i].primes == primes && g_tp[i].count == count)
+            return &g_tp[i];
+
+    int nchunks = 1;
+#ifdef _OPENMP
+    nchunks = omp_get_max_threads();
+#endif
+    if ((count + KF_GCD_CHUNK - 1) / KF_GCD_CHUNK > nchunks)
+        nchunks = (int)((count + KF_GCD_CHUNK - 1) / KF_GCD_CHUNK);
+    if (nchunks > count)
+        nchunks = count > 0 ? (int)count : 1;
+    kf_table_products tp;
+    tp.primes = primes;
+    tp.count = count;
+    tp.nchunks = nchunks;
+    tp.bounds = (int64_t *)malloc(sizeof(int64_t) * (size_t)(nchunks + 1));
+    tp.prods = (mpz_t *)malloc(sizeof(mpz_t) * (size_t)nchunks);
+    tp.bounds[0] = 0;
+    tp.bounds[nchunks] = count;
+    for (int c = 1; c < nchunks; c++)
+    {
+        // First prime >= the c-th equal-width value boundary.
+        double v = primes[0] + (double)(primes[count - 1] - primes[0]) * c / nchunks;
+        int64_t lo = tp.bounds[c - 1], hi = count;
+        while (lo < hi)
+        {
+            int64_t mid = lo + (hi - lo) / 2;
+            if ((double)primes[mid] < v)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        tp.bounds[c] = lo;
+    }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1)
+#endif
+    for (int c = 0; c < nchunks; c++)
+    {
+        mpz_init(tp.prods[c]);
+        kf_prime_product(tp.prods[c], primes, tp.bounds[c], tp.bounds[c + 1]);
+    }
+    g_tp = (kf_table_products *)realloc(g_tp, sizeof(kf_table_products) * (size_t)(g_tp_n + 1));
+    g_tp[g_tp_n] = tp;
+    return &g_tp[g_tp_n++];
+}
+
+double kf_table_products_prepare(const uint32_t *primes, int64_t prime_count)
+{
+    auto t0 = std::chrono::high_resolution_clock::now();
+    if (g_td_mode == KF_TD_GCD && primes && prime_count > 0)
+        kf_table_products_get(primes, prime_count);
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::high_resolution_clock::now() - t0)
+        .count();
+}
+
+void kf_table_products_release(const uint32_t *primes)
+{
+    for (int i = 0; i < g_tp_n; i++)
+    {
+        if (g_tp[i].primes != primes)
+            continue;
+        for (int c = 0; c < g_tp[i].nchunks; c++)
+            mpz_clear(g_tp[i].prods[c]);
+        free(g_tp[i].prods);
+        free(g_tp[i].bounds);
+        g_tp[i--] = g_tp[--g_tp_n];
+    }
+}
+
+static void kf_trial_divide_gcd(const mpz_t n, const kf_table_products *tp,
+                                kfactor_list_t *found,
+                                int64_t *thread_tested, int *thread_found,
+                                int nthreads_out)
+{
+    if (mpz_cmp_ui(n, 1) <= 0)
+        return;
+    const int nchunks = tp->nchunks;
+    kfactor_list_t *cf = (kfactor_list_t *)malloc(sizeof(kfactor_list_t) * (size_t)nchunks);
+    for (int c = 0; c < nchunks; c++)
+        kfl_init(&cf[c]);
+
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+    {
+#ifdef _OPENMP
+        int t = omp_get_thread_num();
+#else
+        int t = 0;
+#endif
+        mpz_t g;
+        mpz_init(g);
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 1)
+#endif
+        for (int c = 0; c < nchunks; c++)
+        {
+            const int64_t a = tp->bounds[c], b = tp->bounds[c + 1];
+            if (thread_tested && t < nthreads_out)
+                thread_tested[t] += b - a;
+            mpz_tdiv_r(g, tp->prods[c], n);
+            mpz_gcd(g, n, g); // product of this chunk's primes dividing n
+            // Split g, which is small: one word-sized remainder per prime,
+            // stopping once every prime of g is accounted for.
+            for (int64_t i = a; i < b && mpz_cmp_ui(g, 1) != 0; i++)
+            {
+                unsigned long p = tp->primes[i];
+                if (mpz_tdiv_ui(g, p) != 0)
+                    continue;
+                mpz_divexact_ui(g, g, p);
+                kfl_append_ul(&cf[c], p, count_exponent(n, p));
+                if (thread_found && t < nthreads_out)
+                    thread_found[t]++;
+            }
+        }
+        mpz_clear(g);
+    }
+
+    for (int c = 0; c < nchunks; c++)
+    {
+        for (int i = 0; i < cf[c].count; i++)
+            kfl_append_mpz(found, cf[c].items[i].prime, cf[c].items[i].exponent);
+        kfl_free(&cf[c]);
+    }
+    free(cf);
+}
+
+// ---------------------------------------------------------------------------
 // k32 — Trial division: table method
 // ---------------------------------------------------------------------------
 
@@ -607,6 +816,16 @@ void kf_trial_divide_table(const mpz_t n,
                            int64_t *thread_tested, int *thread_found,
                            int nthreads_out, kf_share_fn share)
 {
+    if (g_td_mode == KF_TD_GCD)
+    {
+        // Always return here in gcd mode, even for an empty slice: the scan
+        // below calls `share` collectively and must not run on some ranks only.
+        if (prime_count > 0)
+            kf_trial_divide_gcd(n, kf_table_products_get(primes, prime_count), found,
+                                thread_tested, thread_found, nthreads_out);
+        return;
+    }
+
     int nthreads = 1;
 #ifdef _OPENMP
     nthreads = omp_get_max_threads();

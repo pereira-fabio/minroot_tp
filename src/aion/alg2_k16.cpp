@@ -428,6 +428,10 @@ int main(int argc, char *argv[])
 {
     int provided;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+    // k16 stays on the per-prime scan: its slices are ~51 primes per rank at
+    // 128 ranks, too few for a chunk product's gcd to beat testing them
+    // directly (gcd route measured 0.75 vs 0.59 ms factoring at 8192 bits).
+    kf_set_td_mode(KF_TD_SCAN);
     if (provided < MPI_THREAD_FUNNELED)
     {
         fprintf(stderr, "MPI_THREAD_FUNNELED not supported\n");

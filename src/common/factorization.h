@@ -116,6 +116,41 @@ void kf_trial_divide_table(const mpz_t n,
                            kf_share_fn share = nullptr);
 
 // ---------------------------------------------------------------------------
+// Table method, gcd route (default; --td scan restores the per-prime scan)
+//
+// A prime table is fixed for the whole run, so the product of each thread's
+// chunk of it, P_c, can be built once before timing. P_c is squarefree, so
+//
+//     g_c = gcd(n, P_c mod n)
+//
+// is exactly the product of the chunk's primes that divide n. Per challenge a
+// thread pays one reduction of P_c (cost ~ bits of P_c) and one gcd instead of
+// one full walk over n per prime pair; only the rare chunk with g_c != 1 is
+// split, against the small g_c, and exponents are then read off n. The cost
+// does not depend on n being smooth, so unlike cofactor sharing it speeds up
+// rejected candidates too; `share` is not used on this route (every rank
+// takes it or none does, so the lockstep collectives stay matched).
+//
+// kf_table_products_prepare builds the products for one table up front (call
+// it after loading a slice, outside the timed region); kf_trial_divide_table
+// builds them on first use otherwise; kf_table_products_release drops them
+// (call it before freeing the table, whose address may be reused). kf_parse_td_arg consumes "--td gcd|scan"
+// from argv (returns false on a bad value).
+// ---------------------------------------------------------------------------
+
+typedef enum
+{
+    KF_TD_GCD = 0,
+    KF_TD_SCAN
+} kf_td_mode_t;
+
+void kf_set_td_mode(kf_td_mode_t mode);
+kf_td_mode_t kf_get_td_mode(void);
+bool kf_parse_td_arg(int *argc, char **argv);
+double kf_table_products_prepare(const uint32_t *primes, int64_t prime_count);
+void kf_table_products_release(const uint32_t *primes); // before freeing the table
+
+// ---------------------------------------------------------------------------
 // k35 upper range — uint64_t prime table for (2^32, 2^35]
 //
 // The k35 smoothness bound B = 2^35 covers primes that do not fit in uint32_t
@@ -268,6 +303,10 @@ const kf_recon_prof_t *kf_recon_prof_get(void);
 //     cost(x) = sieve * KF_SIEVE_NS + w(x) * u(limbs) / ln x
 //     u(limbs) = KF_TD_BASE_NS + KF_TD_LIMB_NS * limbs     one prime test
 //     w(x) = KF_PAIRED_COST below 2^31, 1 above
+//
+// A table on the gcd route (KF_TD_GCD) costs the bits of the chunk products,
+// log2(x) per prime at density 1/ln x: a constant per integer, so the split
+// is equal-width there.
 //
 // Every caller computes the same boundaries independently.
 // ---------------------------------------------------------------------------

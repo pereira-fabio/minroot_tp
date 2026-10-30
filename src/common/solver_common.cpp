@@ -708,6 +708,22 @@ void ksc_ensure_k16_cbrt(
 // ksc_ensure_k32_primes
 // ---------------------------------------------------------------------------
 
+void ksc_prepare_table_products(const uint32_t *slice, int64_t count, int rank)
+{
+    double ms[2] = {kf_table_products_prepare(slice, count), slice ? 1.0 : 0.0};
+    double max_ms[2] = {0.0, 0.0};
+    MPI_Reduce(ms, max_ms, 2, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    if (rank == 0 && max_ms[1] > 0.0) // some rank uses a table
+    {
+        if (kf_get_td_mode() == KF_TD_GCD)
+            printf("Trial division: gcd route (chunk products built in %.1f ms, "
+                   "untimed; --td scan for the per-prime scan)\n", max_ms[0]);
+        else
+            printf("Trial division: per-prime scan (--td scan)\n");
+        fflush(stdout);
+    }
+}
+
 const char *ksc_ensure_k32_primes(int sp_count, const unsigned *sp, int rank)
 {
     static char path[128];

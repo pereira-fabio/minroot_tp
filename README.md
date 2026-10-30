@@ -143,7 +143,8 @@ primes they found since the last one and divide them out (`ksc_share_found`). On
 smooth y this shrinks y for everyone as the scan advances: 2.2x in a
 single-process simulation where every thread sees all finds, and 1.2-1.4x
 measured with 2-4 local ranks, where each rank already holds a quarter to a
-half of the factors. Two caveats:
+half of the factors. On AION at 128 ranks, k32 trial division went from 15.05
+to 10.62 ms at 24576 bits (job 16123610, below). Two caveats:
 
 - **It only helps a y that really is smooth.** A random candidate has fewer
   than one prime factor in [2^16, 2^32] on average, so in a real attack it
@@ -155,7 +156,49 @@ half of the factors. Two caveats:
 
 Enabled in k32, alg3, alg4 and alg7's phase 2. k35 and k16 do not use it: some
 k35 ranks skip a lower-range call, which would deadlock the collective, and k16's
-slices are ~51 primes.
+slices are ~51 primes. With `--method table` it now only runs under `--td scan`;
+the default gcd route below replaces it.
+
+**gcd route (table method, default).** A prime table never changes during a
+run, so each thread's chunk of it can be multiplied into one number P_c before
+timing starts (`kf_table_products_prepare`, chunks of at most 65536 primes).
+P_c is squarefree, so g_c = gcd(y, P_c mod y) is exactly the product of the
+chunk's primes that divide y. Per challenge a thread pays one reduction of P_c,
+whose cost is set by P_c's bits, and one gcd, instead of one walk over all of y
+per prime pair. Only a chunk with g_c != 1 is split, against the small g_c, and
+exponents are then read off y. Measured against the per-prime scan (with
+cofactor sharing):
+
+| Setup | scan | gcd route | |
+|---|---:|---:|---:|
+| one thread, 52K primes near 2^31 (an AION thread's slice), 24576-bit y, 20 numbers | 297 ms | 98 ms | 3.0x |
+| k32 table, 2 ranks x 2 threads, 24576 bits, `Factoring` | 11.35 s | 6.85 s | 1.66x |
+| k32 table, 2 ranks x 2 threads, 8192 bits, `Factoring` | 5.42 s | 3.80 s | 1.43x |
+| alg3 table, same, 8192 bits | 5.80 s | 4.21 s | 1.38x |
+| alg4 table, same, 8192 bits | 5.69 s | 3.83 s | 1.48x |
+
+The local MPI runs give each thread ~50M primes, so the comparison there is
+against a scan that cofactor sharing already speeds up 1.2-1.45x; an AION
+thread holds ~50K primes, the first row's case. Not yet measured on AION.
+
+- **It works on any y, smooth or not**: the cost does not depend on y having
+  factors, so unlike cofactor sharing it also speeds up rejected candidates in
+  a real attack.
+- **The products are precomputation**, like the prime table itself: built once
+  per rank, untimed, and reported at startup (`chunk products built in ...`).
+  They take as many bits as the slice's primes, ~6 MB per rank at 128 ranks
+  (800 MB per rank on a 2-rank local run, built in ~35 s on 2 threads).
+- **The rank split is equal-width on this route.** A prime near x adds
+  log2(x) bits to the products at density 1/ln x, a constant per integer, so
+  `kf_cost_split`'s paired-scan model (which gives ranks below 2^31 about twice
+  the primes) does not apply.
+- **Small y gains less.** At 1024 bits on one thread the gcd route was ~1.2x
+  slower than the scan; from 4096 bits up it was faster in every test.
+- k32, alg3, alg4 and alg7's phase 2 use it with `--method table`; `--td scan`
+  restores the per-prime scan. k35 always scans: its upper range is a 64-bit
+  table this route does not cover. k16 always scans too: ~51 primes per rank
+  are too few for a gcd to pay off (0.75 vs 0.59 ms factoring at 8192 bits). The sieve method is unchanged, since it has
+  no table to precompute from.
 
 ### alg2_k35 — Paper's Concrete Parameters (B = 2^35)
 
@@ -326,6 +369,7 @@ srun --mpi=pmix -N 64 --ntasks=128 ./alg2_k32 \
 | `--modulo-suffix S` | e.g. `_e5`, to select the exponent-5 moduli |
 | `--table-format flat\|delta\|auto` | prime table encoding (`auto` detects by file magic) |
 | `--primes FILE` | prime table for `--method table` |
+| `--td gcd\|scan` | table-method trial division: `gcd` (default) reduces precomputed chunk products of the primes mod y and takes one gcd per chunk; `scan` tests each prime pair against y, with cofactor sharing |
 | `--cbrt-dir DIR` | where to keep the cube-root cache |
 | `--json PREFIX` | write results as `PREFIX_<size>.json` |
 | `--skip-powm-baseline` | skip the baseline (the `powm` pass already measured it) |
@@ -593,6 +637,40 @@ branch.
   legitimate precomputation; k32's 203 million roots at 24576 bits cannot be
   stored, so its warm-cache speedup assumes a cache an attacker could not hold
   in full.
+
+### After the cost split and cofactor sharing: k32, 24576 bits, 128 ranks
+
+AION job 16123610: same setup (table method, 64 nodes x 2 ranks x 32 threads,
+50 challenges, 49 valid, 1 with blinding exhausted), built from `main` with the
+cost-balanced rank split and cofactor sharing. Results in
+`data/results/aion/alg2/k32_16123610_N64/`. This run measured its own powm
+baseline, 1802.6 ms.
+
+| k32 | job 16119156 | job 16123610 |
+|-----|-----:|-----:|
+| factor_ms     | 15.05 | **10.62** |
+| local_cbrt_ms |  1.21 |  1.23 |
+| combine_ms    |  0.93 |  0.91 |
+| total_ms      | 17.18 | **12.76** (median 12.56) |
+| speedup       | 105.2x | **141.2x** |
+
+- **Trial division is 1.42x faster** (15.05 -> 10.62 ms, std 0.47 ms over 49
+  runs). This is the low end of the 1.2-2.2x range estimated for cofactor
+  sharing: each rank holds only ~6 of a challenge's ~768 factors, so nearly all
+  of the shrinking comes from the other ranks' finds at each checkpoint.
+- **The cost split is active.** `tested_per_rank` is no longer constant: ranks
+  0-41, whose primes lie below ~2^31 where pairing makes each test cheaper,
+  take about twice as many as ranks 42-127.
+- **Reconstruction is unchanged**, about 2.1 ms (17% of the total). The
+  combine is already near one multiplication per tree round, so trial division
+  remains the target.
+- **The warm-cache and smooth-y caveats above still apply.** Cofactor sharing
+  only helps a y that is smooth, so this improves the "invert a smooth
+  challenge" figure, not the cost of finding one.
+- The `powm` JSON in the same directory reports `runs_valid: 0,
+  runs_failed: 50`. That is how the writer counts a baseline-only run (it
+  records no per-run timings), not 50 failures; its `powm_baseline_ms` is the
+  figure used here.
 
 ### GPU, 24576 bits
 
