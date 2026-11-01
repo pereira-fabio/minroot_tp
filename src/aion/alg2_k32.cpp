@@ -165,6 +165,11 @@ static const uint64_t RANGE_HI = (uint64_t)UINT32_MAX;
 // run_one — run benchmark for one challenge file, return results (no JSON write)
 // ---------------------------------------------------------------------------
 
+// --search K [--search-n N]: after the benchmark, time screening N blinded
+// candidates one at a time and in batches of K (ksc_search_bench).
+static int g_search_k = 0;
+static int g_search_n = 64;
+
 static benchmark_results_t run_one(
     int rank, int nranks,
     const char *challenge_file, const char *modulo_file,
@@ -415,6 +420,10 @@ static benchmark_results_t run_one(
         }
     }
 
+    if (g_search_k > 0)
+        ksc_search_bench(challenge, modulo, blind_table, BLIND_TABLE_SIZE,
+                         prime_slice, slice_count, g_search_k, g_search_n, rank, nranks);
+
     // ---- Timing report + baseline + verify ----
     if (rank == 0)
     {
@@ -600,6 +609,14 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[argi], "--skip-powm-baseline") == 0)
         {
             skip_powm = true;
+        }
+        else if (strcmp(argv[argi], "--search") == 0 && argi + 1 < argc)
+        {
+            g_search_k = atoi(argv[++argi]);
+        }
+        else if (strcmp(argv[argi], "--search-n") == 0 && argi + 1 < argc)
+        {
+            g_search_n = atoi(argv[++argi]);
         }
         else if (argv[argi][0] != '-')
         {

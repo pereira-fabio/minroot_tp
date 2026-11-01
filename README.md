@@ -194,6 +194,18 @@ thread holds ~50K primes, the first row's case. Not yet measured on AION.
   the primes) does not apply.
 - **Small y gains less.** At 1024 bits on one thread the gcd route was ~1.2x
   slower than the scan; from 4096 bits up it was faster in every test.
+- **Batched for a real search (`--search K`, k32).** The benchmark never
+  searches: attempt 0 is the challenge itself, smooth by construction. A real
+  attack screens blinded candidates challenge * r^e mod M, generic numbers,
+  until one is B-smooth. `kf_trial_divide_table_batch` screens K of them at
+  once: each chunk product is reduced once modulo the product of the K
+  candidates and the remainder is split down a product tree to each one
+  (Bernstein's batch smoothness test). Same factors as one at a time, 436/436
+  test candidates. k32 table, 8192 bits, 2 ranks x 2 threads, 32 blinded
+  candidates: 3491 -> 922 ms per candidate in batches of 16 (3.79x); one
+  thread on an AION-sized slice at 24576 bits: 1.89x at K = 16. Past K ~ 32
+  the split down the tree dominates. This lowers the cost of the search a
+  real attack needs, not the "invert a smooth challenge" figure.
 - k32, alg3, alg4 and alg7's phase 2 use it with `--method table`; `--td scan`
   restores the per-prime scan. k35 always scans: its upper range is a 64-bit
   table this route does not cover. k16 always scans too: ~51 primes per rank
@@ -369,6 +381,7 @@ srun --mpi=pmix -N 64 --ntasks=128 ./alg2_k32 \
 | `--modulo-suffix S` | e.g. `_e5`, to select the exponent-5 moduli |
 | `--table-format flat\|delta\|auto` | prime table encoding (`auto` detects by file magic) |
 | `--primes FILE` | prime table for `--method table` |
+| `--search K [--search-n N]` | k32, table method: after the benchmark, screen N (default 64, max 255) blinded candidates one at a time and in batches of K, and print ms per candidate for both (`SEARCHPROF` line). Measures a real attack's search step |
 | `--td gcd\|scan` | table-method trial division: `gcd` (default) reduces precomputed chunk products of the primes mod y and takes one gcd per chunk; `scan` tests each prime pair against y, with cofactor sharing |
 | `--cbrt-dir DIR` | where to keep the cube-root cache |
 | `--json PREFIX` | write results as `PREFIX_<size>.json` |

@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <chrono>
+#include <cmath>
 #include <vector>
 #include <sys/stat.h>
 
@@ -722,6 +723,102 @@ void ksc_prepare_table_products(const uint32_t *slice, int64_t count, int rank)
             printf("Trial division: per-prime scan (--td scan)\n");
         fflush(stdout);
     }
+}
+
+void ksc_search_bench(const mpz_t challenge, const mpz_t modulo,
+                      const blinding_pair_t *blind_table, int blind_table_size,
+                      const uint32_t *slice, int64_t slice_count,
+                      int k, int n, int rank, int nranks)
+{
+    int have = slice != NULL, any = 0;
+    MPI_Allreduce(&have, &any, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    if (!any)
+    {
+        if (rank == 0)
+            printf("--search: needs --method table, skipped\n");
+        return;
+    }
+    if (n > blind_table_size)
+        n = blind_table_size;
+    if (k < 1)
+        k = 1;
+    const size_t nbytes = (mpz_sizeinbase(modulo, 2) + 7) / 8 + 1;
+    unsigned char *buf = (unsigned char *)malloc(nbytes * (size_t)k);
+    mpz_t *ys = (mpz_t *)malloc(sizeof(mpz_t) * (size_t)k);
+    for (int j = 0; j < k; j++)
+        mpz_init(ys[j]);
+    std::vector<double> bits(k), bits_all(k);
+
+    double ms[2] = {0.0, 0.0};
+    int smooth[2] = {0, 0};
+    const int widths[2] = {1, k};
+    for (int mode = 0; mode < 2; mode++)
+    {
+        const int w = widths[mode];
+        MPI_Barrier(MPI_COMM_WORLD);
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (int base = 0; base < n; base += w)
+        {
+            const int kk = (n - base < w) ? n - base : w;
+            // Rank 0 blinds the next kk candidates; everyone gets the bytes.
+            memset(buf, 0, nbytes * (size_t)kk);
+            if (rank == 0)
+                for (int j = 0; j < kk; j++)
+                {
+                    mpz_mul(ys[j], challenge, blind_table[base + j].r_blind);
+                    mpz_mod(ys[j], ys[j], modulo);
+                    size_t wr = 0;
+                    mpz_export(buf + nbytes * j, &wr, 1, 1, 0, 0, ys[j]);
+                    // right-align for a fixed-width import
+                    memmove(buf + nbytes * j + (nbytes - wr), buf + nbytes * j, wr);
+                    memset(buf + nbytes * j, 0, nbytes - wr);
+                }
+            MPI_Bcast(buf, (int)(nbytes * kk), MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
+            if (rank != 0)
+                for (int j = 0; j < kk; j++)
+                    mpz_import(ys[j], nbytes, 1, 1, 0, 0, buf + nbytes * j);
+
+            std::vector<kfactor_list_t> found(kk);
+            for (int j = 0; j < kk; j++)
+                kfl_init(&found[j]);
+            if (slice)
+                kf_trial_divide_table_batch(ys, kk, slice, slice_count, found.data());
+            for (int j = 0; j < kk; j++)
+            {
+                bits[j] = 0.0;
+                for (int q = 0; q < found[j].count; q++)
+                    bits[j] += found[j].items[q].exponent *
+                               log2(mpz_get_d(found[j].items[q].prime));
+                kfl_free(&found[j]);
+            }
+            MPI_Allreduce(bits.data(), bits_all.data(), kk, MPI_DOUBLE, MPI_SUM,
+                          MPI_COMM_WORLD);
+            for (int j = 0; j < kk; j++)
+                if (bits_all[j] >= (double)mpz_sizeinbase(ys[j], 2) - 1.0)
+                    smooth[mode]++;
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+        ms[mode] = std::chrono::duration<double, std::milli>(
+                       std::chrono::high_resolution_clock::now() - t0)
+                       .count();
+    }
+
+    if (rank == 0)
+    {
+        printf("\n--- Search: screening %d blinded candidates (table, gcd route) ---\n", n);
+        printf("  one at a time   : %10.3f ms per candidate\n", ms[0] / n);
+        printf("  batches of %-4d : %10.3f ms per candidate  (%.2fx)\n", k, ms[1] / n,
+               ms[1] > 0 ? ms[0] / ms[1] : 0.0);
+        printf("  B-smooth found  : %d / %d (one at a time), %d / %d (batched)\n",
+               smooth[0], n, smooth[1], n);
+        printf("SEARCHPROF|%zu|%d|%d|%d|%.4f|%.4f|%d|%d\n", mpz_sizeinbase(modulo, 2),
+               nranks, k, n, ms[0] / n, ms[1] / n, smooth[0], smooth[1]);
+        fflush(stdout);
+    }
+    for (int j = 0; j < k; j++)
+        mpz_clear(ys[j]);
+    free(ys);
+    free(buf);
 }
 
 const char *ksc_ensure_k32_primes(int sp_count, const unsigned *sp, int rank)

@@ -21,6 +21,8 @@
 #include <math.h>
 #include <time.h>
 #include <chrono>
+#include <utility>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -842,6 +844,131 @@ static void kf_trial_divide_gcd(const mpz_t n, const kf_table_products *tp,
     }
     free(cf);
     g_td_prof.wall_ms += 1e3 * (omp_get_wtime() - t_call);
+}
+
+// ---------------------------------------------------------------------------
+// Batch gcd route — see factorization.h
+// ---------------------------------------------------------------------------
+
+void kf_trial_divide_table_batch(const mpz_t *ys, int k,
+                                 const uint32_t *primes, int64_t prime_count,
+                                 kfactor_list_t *found)
+{
+    if (k <= 0)
+        return;
+    if (g_td_mode != KF_TD_GCD || prime_count <= 0)
+    {
+        for (int i = 0; i < k; i++)
+            if (mpz_cmp_ui(ys[i], 1) > 0)
+                kf_trial_divide_table(ys[i], primes, prime_count, &found[i]);
+        return;
+    }
+    const kf_table_products *tp = kf_table_products_get(primes, prime_count);
+
+    // Product tree of the candidates, shared read-only by every thread.
+    // lv[0] are the leaves (a candidate <= 1 becomes 1: nothing to find, and
+    // P mod 1 = 0 gives gcd 1); lv[L][j] = lv[L-1][2j] * lv[L-1][2j+1].
+    std::vector<std::vector<mpz_t *>> lv(1);
+    for (int i = 0; i < k; i++)
+    {
+        mpz_t *z = (mpz_t *)malloc(sizeof(mpz_t));
+        if (mpz_cmp_ui(ys[i], 1) > 0)
+            mpz_init_set(*z, ys[i]);
+        else
+            mpz_init_set_ui(*z, 1);
+        lv[0].push_back(z);
+    }
+    while (lv.back().size() > 1)
+    {
+        const std::vector<mpz_t *> &b = lv.back();
+        std::vector<mpz_t *> nx;
+        for (size_t j = 0; j < b.size(); j += 2)
+        {
+            mpz_t *z = (mpz_t *)malloc(sizeof(mpz_t));
+            mpz_init(*z);
+            if (j + 1 < b.size())
+                mpz_mul(*z, *b[j], *b[j + 1]);
+            else
+                mpz_set(*z, *b[j]);
+            nx.push_back(z);
+        }
+        lv.push_back(nx);
+    }
+    const int top = (int)lv.size() - 1;
+
+    const int nchunks = tp->nchunks;
+    // Per chunk and candidate, so the merge below is in a fixed order.
+    kfactor_list_t *cf = (kfactor_list_t *)malloc(sizeof(kfactor_list_t) * (size_t)nchunks * k);
+    for (int j = 0; j < nchunks * k; j++)
+        kfl_init(&cf[j]);
+
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+    {
+        // Two rows of remainders, at most k wide, reused for every chunk.
+        mpz_t *cur = (mpz_t *)malloc(sizeof(mpz_t) * (size_t)k);
+        mpz_t *nxt = (mpz_t *)malloc(sizeof(mpz_t) * (size_t)k);
+        for (int i = 0; i < k; i++)
+        {
+            mpz_init(cur[i]);
+            mpz_init(nxt[i]);
+        }
+        mpz_t g;
+        mpz_init(g);
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 1)
+#endif
+        for (int c = 0; c < nchunks; c++)
+        {
+            const int64_t a = tp->bounds[c], b = tp->bounds[c + 1];
+            mpz_tdiv_r(cur[0], tp->prods[c], *lv[top][0]); // one big reduction
+            for (int L = top; L > 0; L--) // split it down to every candidate
+            {
+                for (size_t j = 0; j < lv[L - 1].size(); j++)
+                    mpz_tdiv_r(nxt[j], cur[j / 2], *lv[L - 1][j]);
+                std::swap(cur, nxt);
+            }
+            for (int i = 0; i < k; i++)
+            {
+                if (mpz_cmp_ui(ys[i], 1) <= 0)
+                    continue;
+                mpz_gcd(g, ys[i], cur[i]); // product of this chunk's primes dividing ys[i]
+                for (int64_t q = a; q < b && mpz_cmp_ui(g, 1) != 0; q++)
+                {
+                    unsigned long p = tp->primes[q];
+                    if (mpz_tdiv_ui(g, p) != 0)
+                        continue;
+                    mpz_divexact_ui(g, g, p);
+                    kfl_append_ul(&cf[(size_t)c * k + i], p, count_exponent(ys[i], p));
+                }
+            }
+        }
+        for (int i = 0; i < k; i++)
+        {
+            mpz_clear(cur[i]);
+            mpz_clear(nxt[i]);
+        }
+        free(cur);
+        free(nxt);
+        mpz_clear(g);
+    }
+
+    for (int c = 0; c < nchunks; c++)
+        for (int i = 0; i < k; i++)
+        {
+            kfactor_list_t *l = &cf[(size_t)c * k + i];
+            for (int j = 0; j < l->count; j++)
+                kfl_append_mpz(&found[i], l->items[j].prime, l->items[j].exponent);
+            kfl_free(l);
+        }
+    free(cf);
+    for (auto &row : lv)
+        for (mpz_t *z : row)
+        {
+            mpz_clear(*z);
+            free(z);
+        }
 }
 
 // ---------------------------------------------------------------------------

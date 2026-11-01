@@ -144,6 +144,19 @@ typedef enum
     KF_TD_SCAN
 } kf_td_mode_t;
 
+// Batch form (Bernstein's batch smoothness test on top of the gcd route):
+// factor k candidates ys[0..k-1] against the table at once; found[i] gets
+// exactly what kf_trial_divide_table(ys[i]) would find. Each chunk product is
+// reduced once modulo Y = ys[0] * ... * ys[k-1] and the remainder is split
+// down a product tree of the candidates to P_c mod ys[i], instead of one
+// reduction of P_c per candidate: 2.0x per candidate at k = 4 and 3.0x at
+// k = 16 (one thread, 52K primes, 24576 bits); past ~32 the descent dominates.
+// Pays off when many candidates are screened (a real attack's search), not
+// for one smooth challenge. Under --td scan it loops kf_trial_divide_table.
+void kf_trial_divide_table_batch(const mpz_t *ys, int k,
+                                 const uint32_t *primes, int64_t prime_count,
+                                 kfactor_list_t *found);
+
 void kf_set_td_mode(kf_td_mode_t mode);
 kf_td_mode_t kf_get_td_mode(void);
 bool kf_parse_td_arg(int *argc, char **argv);
