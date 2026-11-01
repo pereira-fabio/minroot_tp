@@ -331,6 +331,7 @@ static benchmark_results_t run_one(
 
     kf_cbrt_stats_reset();
     kf_recon_prof_reset();
+    kf_td_prof_reset();
 
     ksc_run_bench_loop(
         result, method,
@@ -340,6 +341,36 @@ static benchmark_results_t run_one(
         my_lo, my_hi,
         &fac_acc, &loc_acc, &gat_acc, &com_acc, &recon_acc,
         &json_results, &strategy, rank, nranks);
+
+    // ---- Trial-division step profile (gcd route): the slowest rank ----
+    // Every rank reports its per-call averages; rank 0 prints the rank with
+    // the largest wall time, since that rank sets factor_ms.
+    {
+        const kf_td_prof_t *tp = kf_td_prof_get();
+        double c = tp->calls > 0 ? (double)tp->calls : 1.0;
+        double mine[6] = {tp->wall_ms / c, tp->mod_ms / c, tp->gcd_ms / c,
+                          tp->split_ms / c, (double)tp->chunks / c, (double)tp->hit_chunks / c};
+        std::vector<double> all(rank == 0 ? 6 * (size_t)nranks : 0);
+        MPI_Gather(mine, 6, MPI_DOUBLE, rank == 0 ? all.data() : nullptr, 6, MPI_DOUBLE,
+                   0, MPI_COMM_WORLD);
+        if (rank == 0 && tp->calls > 0)
+        {
+            int s = 0;
+            for (int r = 1; r < nranks; r++)
+                if (all[6 * r] > all[6 * s])
+                    s = r;
+            const double *v = &all[6 * (size_t)s];
+            printf("\n--- Trial division, gcd route (slowest rank %d, per call, %ld calls) ---\n",
+                   s, tp->calls);
+            printf("  wall %.4f ms | reduction %.4f | gcd %.4f | split %.4f ms "
+                   "(slowest thread) | %.1f chunks, %.2f with hits\n",
+                   v[0], v[1], v[2], v[3], v[4], v[5]);
+            printf("TDPROF|%zu|%d|%d|%.4f|%.4f|%.4f|%.4f|%.1f|%.2f|%ld\n",
+                   mpz_sizeinbase(modulo, 2), nranks, s, v[0], v[1], v[2], v[3], v[4], v[5],
+                   tp->calls);
+            fflush(stdout);
+        }
+    }
 
     // ---- cbrt cache reads per core, reduced across ranks ----
     // Each rank owns a private cache slice, so lookups are rank-local; SUM gives

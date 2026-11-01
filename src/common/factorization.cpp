@@ -748,6 +748,11 @@ void kf_table_products_release(const uint32_t *primes)
     }
 }
 
+static kf_td_prof_t g_td_prof = {0.0, 0.0, 0.0, 0.0, 0, 0, 0};
+
+void kf_td_prof_reset(void) { g_td_prof = kf_td_prof_t{0.0, 0.0, 0.0, 0.0, 0, 0, 0}; }
+const kf_td_prof_t *kf_td_prof_get(void) { return &g_td_prof; }
+
 static void kf_trial_divide_gcd(const mpz_t n, const kf_table_products *tp,
                                 kfactor_list_t *found,
                                 int64_t *thread_tested, int *thread_found,
@@ -755,10 +760,15 @@ static void kf_trial_divide_gcd(const mpz_t n, const kf_table_products *tp,
 {
     if (mpz_cmp_ui(n, 1) <= 0)
         return;
+    const double t_call = omp_get_wtime();
     const int nchunks = tp->nchunks;
     kfactor_list_t *cf = (kfactor_list_t *)malloc(sizeof(kfactor_list_t) * (size_t)nchunks);
     for (int c = 0; c < nchunks; c++)
         kfl_init(&cf[c]);
+    // Per-thread step times (s): [3t] reduction, [3t+1] gcd, [3t+2] split.
+    const int nth = omp_get_max_threads();
+    double *step = (double *)calloc((size_t)nth * 3, sizeof(double));
+    long hit_chunks = 0;
 
 #ifdef _OPENMP
 #pragma omp parallel
@@ -779,8 +789,20 @@ static void kf_trial_divide_gcd(const mpz_t n, const kf_table_products *tp,
             const int64_t a = tp->bounds[c], b = tp->bounds[c + 1];
             if (thread_tested && t < nthreads_out)
                 thread_tested[t] += b - a;
+            double t0 = omp_get_wtime();
             mpz_tdiv_r(g, tp->prods[c], n);
+            double t1 = omp_get_wtime();
             mpz_gcd(g, n, g); // product of this chunk's primes dividing n
+            double t2 = omp_get_wtime();
+            step[3 * t] += t1 - t0;
+            step[3 * t + 1] += t2 - t1;
+            if (mpz_cmp_ui(g, 1) != 0)
+            {
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+                hit_chunks++;
+            }
             // Split g, which is small: one word-sized remainder per prime,
             // stopping once every prime of g is accounted for.
             for (int64_t i = a; i < b && mpz_cmp_ui(g, 1) != 0; i++)
@@ -793,9 +815,24 @@ static void kf_trial_divide_gcd(const mpz_t n, const kf_table_products *tp,
                 if (thread_found && t < nthreads_out)
                     thread_found[t]++;
             }
+            step[3 * t + 2] += omp_get_wtime() - t2;
         }
         mpz_clear(g);
     }
+
+    // The slowest thread's split of its time is the critical path.
+    int slow = 0;
+    for (int t = 1; t < nth; t++)
+        if (step[3 * t] + step[3 * t + 1] + step[3 * t + 2] >
+            step[3 * slow] + step[3 * slow + 1] + step[3 * slow + 2])
+            slow = t;
+    g_td_prof.mod_ms += 1e3 * step[3 * slow];
+    g_td_prof.gcd_ms += 1e3 * step[3 * slow + 1];
+    g_td_prof.split_ms += 1e3 * step[3 * slow + 2];
+    g_td_prof.chunks += nchunks;
+    g_td_prof.hit_chunks += hit_chunks;
+    g_td_prof.calls++;
+    free(step);
 
     for (int c = 0; c < nchunks; c++)
     {
@@ -804,6 +841,7 @@ static void kf_trial_divide_gcd(const mpz_t n, const kf_table_products *tp,
         kfl_free(&cf[c]);
     }
     free(cf);
+    g_td_prof.wall_ms += 1e3 * (omp_get_wtime() - t_call);
 }
 
 // ---------------------------------------------------------------------------

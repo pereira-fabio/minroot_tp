@@ -291,6 +291,28 @@ void kf_recon_prof_reset(void);
 const kf_recon_prof_t *kf_recon_prof_get(void);
 
 // ---------------------------------------------------------------------------
+// Trial-division profile, gcd route. Per call, the slowest thread's time in
+// each step (reduction P_c mod n, the gcd, splitting chunks with hits) is
+// added up, so mod + gcd + split is the critical path inside the parallel
+// region; wall_ms is the whole call. Counts every call since the reset,
+// including silent warm-up runs.
+// ---------------------------------------------------------------------------
+
+typedef struct
+{
+    double wall_ms;  // whole kf_trial_divide_gcd call
+    double mod_ms;   // slowest thread: mpz_tdiv_r(P_c, n)
+    double gcd_ms;   //                 mpz_gcd(n, r)
+    double split_ms; //                 splitting g_c and reading exponents
+    long chunks;     // chunks reduced
+    long hit_chunks; // chunks with g_c != 1
+    long calls;
+} kf_td_prof_t;
+
+void kf_td_prof_reset(void);
+const kf_td_prof_t *kf_td_prof_get(void);
+
+// ---------------------------------------------------------------------------
 // Cost-balanced split of a trial-division range [lo, hi] into `parts`
 // contiguous pieces; piece `idx` is returned as [*out_lo, *out_hi] (empty when
 // *out_lo > *out_hi). `limbs` is the size of the number being divided (64-bit
