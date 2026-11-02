@@ -166,9 +166,12 @@ static const uint64_t RANGE_HI = (uint64_t)UINT32_MAX;
 // ---------------------------------------------------------------------------
 
 // --search K [--search-n N]: after the benchmark, time screening N blinded
-// candidates one at a time and in batches of K (ksc_search_bench).
+// candidates one at a time and in batches of K (ksc_search_bench). With
+// several challenges per size it runs on the first one only (g_search_now):
+// the candidates are generic numbers, so one measurement per size suffices.
 static int g_search_k = 0;
 static int g_search_n = 64;
+static bool g_search_now = true;
 
 static benchmark_results_t run_one(
     int rank, int nranks,
@@ -420,7 +423,7 @@ static benchmark_results_t run_one(
         }
     }
 
-    if (g_search_k > 0)
+    if (g_search_k > 0 && g_search_now)
         ksc_search_bench(challenge, modulo, blind_table, BLIND_TABLE_SIZE,
                          prime_slice, slice_count, g_search_k, g_search_n, rank, nranks);
 
@@ -815,6 +818,7 @@ int main(int argc, char *argv[])
                                    ci, sizes[s]);
                         continue;
                     }
+                    g_search_now = !has_data; // first challenge found for this size
                     benchmark_results_t r = run_one(rank, nranks, cfi, mf,
                                                     sp_count, sp, my_lo, my_hi,
                                                     method, primes_file, exponent,
