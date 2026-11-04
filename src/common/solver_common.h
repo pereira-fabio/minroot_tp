@@ -241,6 +241,20 @@ const char *ksc_ensure_k32_primes(int sp_count, const unsigned *sp, int rank);
 //   Collective: every rank calls it, with or without a slice.
 void ksc_prepare_table_products(const uint32_t *slice, int64_t count, int rank);
 
+// ksc_search_bench (--search K):
+//   Measures the real attack's search step, which the benchmark never runs
+//   (attempt 0 is the challenge itself, smooth by construction): screening
+//   blinded candidates challenge * r^e mod M, generic numbers, for B-smooth
+//   ones. Screens the first n of blind_table one at a time, then in batches of
+//   k (kf_trial_divide_table_batch), and rank 0 prints ms per candidate for
+//   both and a SEARCHPROF line. A candidate counts as smooth when the ranks'
+//   found factors account for all its bits (one MPI_Allreduce per batch).
+//   Table method only. Collective.
+void ksc_search_bench(const mpz_t challenge, const mpz_t modulo,
+                      const blinding_pair_t *blind_table, int blind_table_size,
+                      const uint32_t *slice, int64_t slice_count,
+                      int k, int n, int rank, int nranks);
+
 // ---------------------------------------------------------------------------
 // cbrt cache precomputation — unified for k32, k35, alg3, alg4
 //

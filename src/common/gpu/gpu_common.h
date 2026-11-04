@@ -314,18 +314,33 @@ static inline gpu_method_t gpu_parse_method(const char *s)
 }
 
 // Returns average time in ms of 5 sequential mpz_powm_ui calls (1 warmup).
+// Sequential baseline: the e-th root itself, chal^(e^-1 mod (M-1)) mod M, as
+// run_powm_baseline does on the CPU. This used to time mpz_powm_ui(chal, e),
+// the cheap forward direction (cubing), and reported ~1000x too little (e.g.
+// 0.0033 ms at 2048 bits against 3.04 ms for the root), so every GPU
+// powm_baseline_ms and printed speedup before this fix is unusable; the
+// analysis divides by the AION baseline instead. Still a host-CPU figure of
+// the GPU node, not the canonical AION one.
 static inline double gpu_measure_powm_baseline(const mpz_t chal,
                                                const mpz_t mod,
                                                unsigned long exp_e)
 {
-    mpz_t tmp;
-    mpz_init(tmp);
-    mpz_powm_ui(tmp, chal, exp_e, mod); // warmup
+    mpz_t tmp, e_inv, phi;
+    mpz_inits(tmp, e_inv, phi, nullptr);
+    mpz_sub_ui(phi, mod, 1);
+    mpz_set_ui(e_inv, exp_e);
+    if (mpz_invert(e_inv, e_inv, phi) == 0)
+    {
+        fprintf(stderr, "powm baseline: gcd(%lu, M-1) != 1, no unique root\n", exp_e);
+        mpz_clears(tmp, e_inv, phi, nullptr);
+        return 0.0;
+    }
+    mpz_powm(tmp, chal, e_inv, mod); // warmup
     auto t0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < 5; i++)
-        mpz_powm_ui(tmp, chal, exp_e, mod);
+        mpz_powm(tmp, chal, e_inv, mod);
     auto t1 = std::chrono::high_resolution_clock::now();
-    mpz_clear(tmp);
+    mpz_clears(tmp, e_inv, phi, nullptr);
     return std::chrono::duration<double, std::milli>(t1 - t0).count() / 5.0;
 }
 

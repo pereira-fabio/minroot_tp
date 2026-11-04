@@ -21,6 +21,8 @@
 #include <math.h>
 #include <time.h>
 #include <chrono>
+#include <utility>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -640,7 +642,18 @@ bool kf_parse_td_arg(int *argc, char **argv)
 // build time grows faster than its size, and a reduction costs the product's
 // bits whatever the chunking, so small chunks only add one cheap gcd each
 // (~7 ns per prime at 24576 bits against ~200 ns per prime for the scan).
+// The chunk count is rounded up to a multiple of the thread count, so every
+// thread gets the same number of equal chunks: AION job 16181045 had ~48
+// chunks for 32 threads at 32 nodes, half the threads doing two while the
+// rest waited.
+//
+// Each chunk also keeps the products of its consecutive runs of KF_GCD_SUB
+// primes. A chunk with g_c != 1 is split by gcd(g_c, sub-product) per run and
+// then scans only the runs that share a factor, instead of all its primes:
+// the split was ~65% of trial division at 257 bits and ~13% at 24577 bits on
+// AION (TDPROF), always on the thread that holds a factor.
 #define KF_GCD_CHUNK 65536
+#define KF_GCD_SUB 1024
 struct kf_table_products
 {
     const uint32_t *primes;
@@ -648,6 +661,8 @@ struct kf_table_products
     int nchunks;
     int64_t *bounds; // chunk c is primes[bounds[c], bounds[c+1])
     mpz_t *prods;
+    int *nsub;       // chunk c has nsub[c] runs, primes[bounds[c] + j*KF_GCD_SUB, ...)
+    mpz_t **subs;    // subs[c][j]: product of run j of chunk c
 };
 
 static kf_table_products *g_tp = nullptr;
@@ -673,6 +688,54 @@ static void kf_prime_product(mpz_t r, const uint32_t *primes, int64_t a, int64_t
     mpz_clear(l);
 }
 
+// Product of vals[a, b) by a balanced tree.
+static void kf_mpz_product(mpz_t r, mpz_t *vals, int a, int b)
+{
+    if (b - a == 1)
+    {
+        mpz_set(r, vals[a]);
+        return;
+    }
+    mpz_t l;
+    mpz_init(l);
+    int m = a + (b - a) / 2;
+    kf_mpz_product(l, vals, a, m);
+    kf_mpz_product(r, vals, m, b);
+    mpz_mul(r, r, l);
+    mpz_clear(l);
+}
+
+// Factor g (a product of distinct primes of chunk c of tp, each dividing n)
+// into found, with each prime's exponent in n: gcd against each run's
+// product, then a scan of only the runs that share a factor. g ends at 1.
+static void kf_split_chunk(mpz_t g, const kf_table_products *tp, int c, const mpz_t n,
+                           kfactor_list_t *found, int *nfound)
+{
+    mpz_t t;
+    mpz_init(t);
+    const int64_t a = tp->bounds[c], b = tp->bounds[c + 1];
+    for (int j = 0; j < tp->nsub[c] && mpz_cmp_ui(g, 1) != 0; j++)
+    {
+        mpz_gcd(t, tp->subs[c][j], g);
+        if (mpz_cmp_ui(t, 1) == 0)
+            continue;
+        mpz_divexact(g, g, t);
+        const int64_t lo = a + (int64_t)j * KF_GCD_SUB;
+        const int64_t hi = (lo + KF_GCD_SUB < b) ? lo + KF_GCD_SUB : b;
+        for (int64_t i = lo; i < hi && mpz_cmp_ui(t, 1) != 0; i++)
+        {
+            unsigned long p = tp->primes[i];
+            if (mpz_tdiv_ui(t, p) != 0)
+                continue;
+            mpz_divexact_ui(t, t, p);
+            kfl_append_ul(found, p, count_exponent(n, p));
+            if (nfound)
+                (*nfound)++;
+        }
+    }
+    mpz_clear(t);
+}
+
 static const kf_table_products *kf_table_products_get(const uint32_t *primes,
                                                       int64_t count)
 {
@@ -680,12 +743,12 @@ static const kf_table_products *kf_table_products_get(const uint32_t *primes,
         if (g_tp[i].primes == primes && g_tp[i].count == count)
             return &g_tp[i];
 
-    int nchunks = 1;
+    int nth = 1;
 #ifdef _OPENMP
-    nchunks = omp_get_max_threads();
+    nth = omp_get_max_threads();
 #endif
-    if ((count + KF_GCD_CHUNK - 1) / KF_GCD_CHUNK > nchunks)
-        nchunks = (int)((count + KF_GCD_CHUNK - 1) / KF_GCD_CHUNK);
+    int64_t need = (count + KF_GCD_CHUNK - 1) / KF_GCD_CHUNK;
+    int nchunks = (int)(((need + nth - 1) / nth) * nth); // a multiple of nth, >= nth
     if (nchunks > count)
         nchunks = count > 0 ? (int)count : 1;
     kf_table_products tp;
@@ -694,6 +757,8 @@ static const kf_table_products *kf_table_products_get(const uint32_t *primes,
     tp.nchunks = nchunks;
     tp.bounds = (int64_t *)malloc(sizeof(int64_t) * (size_t)(nchunks + 1));
     tp.prods = (mpz_t *)malloc(sizeof(mpz_t) * (size_t)nchunks);
+    tp.nsub = (int *)malloc(sizeof(int) * (size_t)nchunks);
+    tp.subs = (mpz_t **)malloc(sizeof(mpz_t *) * (size_t)nchunks);
     tp.bounds[0] = 0;
     tp.bounds[nchunks] = count;
     for (int c = 1; c < nchunks; c++)
@@ -716,8 +781,19 @@ static const kf_table_products *kf_table_products_get(const uint32_t *primes,
 #endif
     for (int c = 0; c < nchunks; c++)
     {
-        mpz_init(tp.prods[c]);
-        kf_prime_product(tp.prods[c], primes, tp.bounds[c], tp.bounds[c + 1]);
+        const int64_t a = tp.bounds[c], b = tp.bounds[c + 1];
+        const int ns = (int)((b - a + KF_GCD_SUB - 1) / KF_GCD_SUB);
+        tp.nsub[c] = ns;
+        tp.subs[c] = (mpz_t *)malloc(sizeof(mpz_t) * (size_t)(ns > 0 ? ns : 1));
+        for (int j = 0; j < ns; j++)
+        {
+            mpz_init(tp.subs[c][j]);
+            int64_t lo = a + (int64_t)j * KF_GCD_SUB;
+            kf_prime_product(tp.subs[c][j], primes, lo, lo + KF_GCD_SUB < b ? lo + KF_GCD_SUB : b);
+        }
+        mpz_init_set_ui(tp.prods[c], 1);
+        if (ns > 0)
+            kf_mpz_product(tp.prods[c], tp.subs[c], 0, ns);
     }
     g_tp = (kf_table_products *)realloc(g_tp, sizeof(kf_table_products) * (size_t)(g_tp_n + 1));
     g_tp[g_tp_n] = tp;
@@ -741,12 +817,24 @@ void kf_table_products_release(const uint32_t *primes)
         if (g_tp[i].primes != primes)
             continue;
         for (int c = 0; c < g_tp[i].nchunks; c++)
+        {
             mpz_clear(g_tp[i].prods[c]);
+            for (int j = 0; j < g_tp[i].nsub[c]; j++)
+                mpz_clear(g_tp[i].subs[c][j]);
+            free(g_tp[i].subs[c]);
+        }
         free(g_tp[i].prods);
+        free(g_tp[i].subs);
+        free(g_tp[i].nsub);
         free(g_tp[i].bounds);
         g_tp[i--] = g_tp[--g_tp_n];
     }
 }
+
+static kf_td_prof_t g_td_prof = {0.0, 0.0, 0.0, 0.0, 0, 0, 0};
+
+void kf_td_prof_reset(void) { g_td_prof = kf_td_prof_t{0.0, 0.0, 0.0, 0.0, 0, 0, 0}; }
+const kf_td_prof_t *kf_td_prof_get(void) { return &g_td_prof; }
 
 static void kf_trial_divide_gcd(const mpz_t n, const kf_table_products *tp,
                                 kfactor_list_t *found,
@@ -755,10 +843,15 @@ static void kf_trial_divide_gcd(const mpz_t n, const kf_table_products *tp,
 {
     if (mpz_cmp_ui(n, 1) <= 0)
         return;
+    const double t_call = omp_get_wtime();
     const int nchunks = tp->nchunks;
     kfactor_list_t *cf = (kfactor_list_t *)malloc(sizeof(kfactor_list_t) * (size_t)nchunks);
     for (int c = 0; c < nchunks; c++)
         kfl_init(&cf[c]);
+    // Per-thread step times (s): [3t] reduction, [3t+1] gcd, [3t+2] split.
+    const int nth = omp_get_max_threads();
+    double *step = (double *)calloc((size_t)nth * 3, sizeof(double));
+    long hit_chunks = 0;
 
 #ifdef _OPENMP
 #pragma omp parallel
@@ -779,23 +872,41 @@ static void kf_trial_divide_gcd(const mpz_t n, const kf_table_products *tp,
             const int64_t a = tp->bounds[c], b = tp->bounds[c + 1];
             if (thread_tested && t < nthreads_out)
                 thread_tested[t] += b - a;
+            double t0 = omp_get_wtime();
             mpz_tdiv_r(g, tp->prods[c], n);
+            double t1 = omp_get_wtime();
             mpz_gcd(g, n, g); // product of this chunk's primes dividing n
-            // Split g, which is small: one word-sized remainder per prime,
-            // stopping once every prime of g is accounted for.
-            for (int64_t i = a; i < b && mpz_cmp_ui(g, 1) != 0; i++)
+            double t2 = omp_get_wtime();
+            step[3 * t] += t1 - t0;
+            step[3 * t + 1] += t2 - t1;
+            if (mpz_cmp_ui(g, 1) != 0)
             {
-                unsigned long p = tp->primes[i];
-                if (mpz_tdiv_ui(g, p) != 0)
-                    continue;
-                mpz_divexact_ui(g, g, p);
-                kfl_append_ul(&cf[c], p, count_exponent(n, p));
-                if (thread_found && t < nthreads_out)
-                    thread_found[t]++;
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+                hit_chunks++;
             }
+            if (mpz_cmp_ui(g, 1) != 0)
+                kf_split_chunk(g, tp, c, n, &cf[c],
+                               (thread_found && t < nthreads_out) ? &thread_found[t] : nullptr);
+            step[3 * t + 2] += omp_get_wtime() - t2;
         }
         mpz_clear(g);
     }
+
+    // The slowest thread's split of its time is the critical path.
+    int slow = 0;
+    for (int t = 1; t < nth; t++)
+        if (step[3 * t] + step[3 * t + 1] + step[3 * t + 2] >
+            step[3 * slow] + step[3 * slow + 1] + step[3 * slow + 2])
+            slow = t;
+    g_td_prof.mod_ms += 1e3 * step[3 * slow];
+    g_td_prof.gcd_ms += 1e3 * step[3 * slow + 1];
+    g_td_prof.split_ms += 1e3 * step[3 * slow + 2];
+    g_td_prof.chunks += nchunks;
+    g_td_prof.hit_chunks += hit_chunks;
+    g_td_prof.calls++;
+    free(step);
 
     for (int c = 0; c < nchunks; c++)
     {
@@ -804,6 +915,125 @@ static void kf_trial_divide_gcd(const mpz_t n, const kf_table_products *tp,
         kfl_free(&cf[c]);
     }
     free(cf);
+    g_td_prof.wall_ms += 1e3 * (omp_get_wtime() - t_call);
+}
+
+// ---------------------------------------------------------------------------
+// Batch gcd route — see factorization.h
+// ---------------------------------------------------------------------------
+
+void kf_trial_divide_table_batch(const mpz_t *ys, int k,
+                                 const uint32_t *primes, int64_t prime_count,
+                                 kfactor_list_t *found)
+{
+    if (k <= 0)
+        return;
+    if (g_td_mode != KF_TD_GCD || prime_count <= 0)
+    {
+        for (int i = 0; i < k; i++)
+            if (mpz_cmp_ui(ys[i], 1) > 0)
+                kf_trial_divide_table(ys[i], primes, prime_count, &found[i]);
+        return;
+    }
+    const kf_table_products *tp = kf_table_products_get(primes, prime_count);
+
+    // Product tree of the candidates, shared read-only by every thread.
+    // lv[0] are the leaves (a candidate <= 1 becomes 1: nothing to find, and
+    // P mod 1 = 0 gives gcd 1); lv[L][j] = lv[L-1][2j] * lv[L-1][2j+1].
+    std::vector<std::vector<mpz_t *>> lv(1);
+    for (int i = 0; i < k; i++)
+    {
+        mpz_t *z = (mpz_t *)malloc(sizeof(mpz_t));
+        if (mpz_cmp_ui(ys[i], 1) > 0)
+            mpz_init_set(*z, ys[i]);
+        else
+            mpz_init_set_ui(*z, 1);
+        lv[0].push_back(z);
+    }
+    while (lv.back().size() > 1)
+    {
+        const std::vector<mpz_t *> &b = lv.back();
+        std::vector<mpz_t *> nx;
+        for (size_t j = 0; j < b.size(); j += 2)
+        {
+            mpz_t *z = (mpz_t *)malloc(sizeof(mpz_t));
+            mpz_init(*z);
+            if (j + 1 < b.size())
+                mpz_mul(*z, *b[j], *b[j + 1]);
+            else
+                mpz_set(*z, *b[j]);
+            nx.push_back(z);
+        }
+        lv.push_back(nx);
+    }
+    const int top = (int)lv.size() - 1;
+
+    const int nchunks = tp->nchunks;
+    // Per chunk and candidate, so the merge below is in a fixed order.
+    kfactor_list_t *cf = (kfactor_list_t *)malloc(sizeof(kfactor_list_t) * (size_t)nchunks * k);
+    for (int j = 0; j < nchunks * k; j++)
+        kfl_init(&cf[j]);
+
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+    {
+        // Two rows of remainders, at most k wide, reused for every chunk.
+        mpz_t *cur = (mpz_t *)malloc(sizeof(mpz_t) * (size_t)k);
+        mpz_t *nxt = (mpz_t *)malloc(sizeof(mpz_t) * (size_t)k);
+        for (int i = 0; i < k; i++)
+        {
+            mpz_init(cur[i]);
+            mpz_init(nxt[i]);
+        }
+        mpz_t g;
+        mpz_init(g);
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 1)
+#endif
+        for (int c = 0; c < nchunks; c++)
+        {
+            mpz_tdiv_r(cur[0], tp->prods[c], *lv[top][0]); // one big reduction
+            for (int L = top; L > 0; L--) // split it down to every candidate
+            {
+                for (size_t j = 0; j < lv[L - 1].size(); j++)
+                    mpz_tdiv_r(nxt[j], cur[j / 2], *lv[L - 1][j]);
+                std::swap(cur, nxt);
+            }
+            for (int i = 0; i < k; i++)
+            {
+                if (mpz_cmp_ui(ys[i], 1) <= 0)
+                    continue;
+                mpz_gcd(g, ys[i], cur[i]); // product of this chunk's primes dividing ys[i]
+                if (mpz_cmp_ui(g, 1) != 0)
+                    kf_split_chunk(g, tp, c, ys[i], &cf[(size_t)c * k + i], nullptr);
+            }
+        }
+        for (int i = 0; i < k; i++)
+        {
+            mpz_clear(cur[i]);
+            mpz_clear(nxt[i]);
+        }
+        free(cur);
+        free(nxt);
+        mpz_clear(g);
+    }
+
+    for (int c = 0; c < nchunks; c++)
+        for (int i = 0; i < k; i++)
+        {
+            kfactor_list_t *l = &cf[(size_t)c * k + i];
+            for (int j = 0; j < l->count; j++)
+                kfl_append_mpz(&found[i], l->items[j].prime, l->items[j].exponent);
+            kfl_free(l);
+        }
+    free(cf);
+    for (auto &row : lv)
+        for (mpz_t *z : row)
+        {
+            mpz_clear(*z);
+            free(z);
+        }
 }
 
 // ---------------------------------------------------------------------------

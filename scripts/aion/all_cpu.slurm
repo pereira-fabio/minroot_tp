@@ -84,6 +84,21 @@ TABLE_FORMAT=""                          #     default: flat (uint32/uint64 tabl
 # ===========================================================================
 
 # ===========================================================================
+# OPTIONAL FLAG — search screening, k32 table runs only  (--search K)
+# ---------------------------------------------------------------------------
+# The benchmark never searches (attempt 0 is the smooth challenge itself). With
+# --search, k32 additionally screens N blinded candidates challenge * r^e mod M
+# one at a time and in batches of K (Bernstein batch smoothness on the gcd
+# route) after each size's benchmark, and prints ms per candidate for both:
+#     grep SEARCHPROF minroot_all_cpu_*.out
+#     SEARCHPROF|bits|nranks|K|N|ms_single|ms_batch|smooth_single|smooth_batch
+# Extra time per size is about 2N single trial divisions (N1 at 24576 bits:
+# ~1 min); the benchmark JSON is unchanged. Empty it to skip.
+# Also printed on every k32 table run: TDPROF (trial-division step split).
+SEARCH="--search 16 --search-n 64"
+# ===========================================================================
+
+# ===========================================================================
 # NOTE — the pre-filter (paper Algorithm 5) is NOT toggled here (no flag yet).
 # ---------------------------------------------------------------------------
 # It is Phase 0 only: the selection primitive now lives in
@@ -119,13 +134,14 @@ echo "Sizes:         256 384 512 768 1024 2048 4096 8192 16384 24576 (canonical 
 echo ""
 
 # ---------------------------------------------------------------------------
-# run_variant NAME SRC DATA_DIR CBRT_DIR RESULT_SUBPATH JSON_PREFIX [EXTRA_FLAGS]
+# run_variant NAME SRC DATA_DIR CBRT_DIR RESULT_SUBPATH JSON_PREFIX [EXTRA_FLAGS] [TABLE_FLAGS]
 #   builds src/aion/<SRC>, then runs powm + table + sieve at the current node
 #   count. CBRT_DIR is the per-variant merged-cache dir (never wiped — M1).
 #   A compile failure skips just this variant; the sweep continues.
+#   EXTRA_FLAGS go to every method; TABLE_FLAGS only to --method table.
 # ---------------------------------------------------------------------------
 run_variant() {
-    local NAME=$1 SRC=$2 DATA=$3 CBRT=$4 RSUB=$5 JPREFIX=$6 EXTRA=$7
+    local NAME=$1 SRC=$2 DATA=$3 CBRT=$4 RSUB=$5 JPREFIX=$6 EXTRA=$7 TEXTRA=$8
     local BIN=./${NAME}_N${N_NODES}
     local JDIR=$SLURM_SUBMIT_DIR/data/results/aion/${RSUB}_${SLURM_JOB_ID}_N${N_NODES}
     mkdir -p "$JDIR" "$CBRT"
@@ -146,14 +162,16 @@ run_variant() {
         return 1
     fi
 
-    local M SKIP
+    local M SKIP MX
     for M in powm table sieve; do
         SKIP=""
         [ "$M" != "powm" ] && SKIP="--skip-powm-baseline"
+        MX=""
+        [ "$M" = "table" ] && MX="$TEXTRA"
         echo "  [$NAME $M]"
         srun --mpi=pmix -N ${N_NODES} --ntasks=${NRANKS} "$BIN" \
             --all --data "$DATA" \
-            --method $M $SKIP $EXTRA \
+            --method $M $SKIP $EXTRA $MX \
             --n-challenges $N_CHALLENGES \
             --cbrt-dir "$CBRT" \
             --json $JDIR/${JPREFIX}_${M}_${SLURM_JOB_ID}
@@ -171,7 +189,7 @@ run_variant() {
 #             NAME       SRC             DATA_DIR               CBRT_DIR                                 RESULT_SUBPATH  JSON_PREFIX   EXTRA
 # ---------------------------------------------------------------------------
 run_variant  alg2_k16   alg2_k16.cpp    data/challenges/k16    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k16_e3  alg2/k16        alg2_k16      ""
-run_variant  alg2_k32   alg2_k32.cpp    data/challenges/k32    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k32_e3  alg2/k32        alg2_k32      "$TABLE_FORMAT"
+run_variant  alg2_k32   alg2_k32.cpp    data/challenges/k32    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k32_e3  alg2/k32        alg2_k32      "$TABLE_FORMAT"  "$SEARCH"
 run_variant  alg2_k35   alg2_k35.cpp    data/challenges/k35    $SLURM_SUBMIT_DIR/data/cbrt/alg2_k35_e3  alg2/k35        alg2_k35      "$TABLE_FORMAT"
 run_variant  alg3       alg3.cpp        data/challenges/alg3   $SLURM_SUBMIT_DIR/data/cbrt/alg3_e3      alg3/alg3       alg3          "$TABLE_FORMAT"
 run_variant  alg4       alg4.cpp        data/challenges/alg4   $SLURM_SUBMIT_DIR/data/cbrt/alg4_e3      alg4/alg4       alg4          "$TABLE_FORMAT"
